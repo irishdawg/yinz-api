@@ -1,30 +1,87 @@
-"""Default V1 theme content — fictional companies. This is content/config, not
-game rules (domain model §02, ThemeSet/ThemeEntityDefinition). A real ThemeSet
-table with versioning is future work; for now `theme_key` just stores the
-display name directly.
+"""Theme content — domain model §02, ThemeSet/ThemeEntityDefinition. Content,
+not game rules: which named things populate the market this game, not how the
+market behaves. Deliberately separate from entities.py/engine.py for that
+reason.
 
-18 entities — enough headroom for the largest V1 market (17, at 6 players).
+`ThemeRepository` is the seam. `JsonFileThemeRepository` reads flat JSON files
+out of `theme_data/` for now; a Supabase-backed implementation satisfies the
+same Protocol later without engine.py or anything else changing — same
+pattern as `persistence.repository.GameRepository`.
+
+A theme set's `entities` become the market's `theme_key`s directly (see
+engine._handle_start_game). `entity_id` and `theme_key` coincide by
+construction today — every theme_key is sampled at most once per market — but
+the two remain conceptually distinct fields for the same reason they're
+distinct in the domain model: an entity's identity *within this game* and
+which content it displays as are different questions, even when today they
+have the same answer.
 """
 
 from __future__ import annotations
 
-FICTIONAL_COMPANIES_V1: list[tuple[str, str]] = [
-    ("daveco", "DaveCo"),
-    ("tiny_horse_motors", "Tiny Horse Motors"),
-    ("grandmas_pharma", "Grandma's Pharmaceuticals"),
-    ("cryptomatic", "Crypt-o-Matic"),
-    ("big_tuna", "Big Tuna Seafood"),
-    ("moonshot_ai", "Moonshot AI"),
-    ("questionable_meats", "Questionable Meats"),
-    ("emotional_support_robotics", "Emotional Support Robotics"),
-    ("uncle_larrys_lasers", "Uncle Larry's Lasers"),
-    ("nocturnal_notary", "Nocturnal Notary Co."),
-    ("spite_industries", "Spite Industries"),
-    ("driftwood_analytics", "Driftwood Analytics"),
-    ("hush_money_hvac", "Hush Money HVAC"),
-    ("feral_logistics", "Feral Logistics"),
-    ("second_breakfast_capital", "Second Breakfast Capital"),
-    ("gullible_gullwing", "Gullible Gullwing Motors"),
-    ("pterodactyl_courier", "Pterodactyl Courier"),
-    ("aunt_ruths_arbitrage", "Aunt Ruth's Arbitrage"),
-]
+import json
+from pathlib import Path
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from gotiate.domain.errors import NotFoundError
+
+
+class ThemeEntityDefinition(BaseModel):
+    theme_key: str
+    display_name: str
+
+
+class ThemeSet(BaseModel):
+    theme_set_id: str
+    name: str
+    version: int
+    entities: list[ThemeEntityDefinition]
+
+
+class ThemeRepository(Protocol):
+    def get(self, theme_set_id: str) -> ThemeSet: ...
+    def list_ids(self) -> list[str]: ...
+
+
+class JsonFileThemeRepository:
+    """One JSON file per theme set: `{theme_set_id, name, version, entities}`.
+    Loaded lazily, cached in memory — this is static reference content, not
+    per-request I/O, so a plain synchronous cache is the right amount of
+    machinery. Swap the repository, not this class, when Supabase exists."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+        self._cache: dict[str, ThemeSet] = {}
+
+    def get(self, theme_set_id: str) -> ThemeSet:
+        cached = self._cache.get(theme_set_id)
+        if cached is not None:
+            return cached
+        path = self._directory / f"{theme_set_id}.json"
+        if not path.exists():
+            raise NotFoundError(f"no theme set {theme_set_id!r} in {self._directory}")
+        theme_set = ThemeSet.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        self._cache[theme_set_id] = theme_set
+        return theme_set
+
+    def list_ids(self) -> list[str]:
+        return sorted(p.stem for p in self._directory.glob("*.json"))
+
+
+_DEFAULT_DIRECTORY = Path(__file__).parent / "theme_data"
+_repository: ThemeRepository = JsonFileThemeRepository(_DEFAULT_DIRECTORY)
+
+
+def get_theme_set(theme_set_id: str) -> ThemeSet:
+    return _repository.get(theme_set_id)
+
+
+def set_theme_repository(repo: ThemeRepository) -> None:
+    """Swap the backing repository — a Supabase-backed one in production
+    later, or a fake one in tests. Mirrors persistence.repository's
+    swappability; there's deliberately no dependency-injection ceremony here
+    since theme content isn't per-request authoritative state."""
+    global _repository
+    _repository = repo

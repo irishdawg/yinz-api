@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from gotiate.domain import themes
 from gotiate.domain.entities import (
     Game,
     GamePhase,
@@ -50,13 +51,14 @@ def project(game: Game, audience: Audience) -> dict:
             return player.pending_pickup.cached_view
 
     scored = game.phase == GamePhase.SCORED
+    names = _display_names(game)
 
     view: dict = {
         "game_id": game.id,
         "version": game.version,
         "phase": game.phase.value,
         "join_code": game.join_code if isinstance(audience, PlayerAudience) else None,
-        "market": _project_market(game),
+        "market": _project_market(game, names),
         "players": [_project_player(game, p, audience) for p in game.players],
         "proposals": [_project_proposal(p) for p in game.proposals.values()],
         "pools": [_project_pool(game, pool, audience) for pool in game.pools.values()],
@@ -64,16 +66,26 @@ def project(game: Game, audience: Audience) -> dict:
 
     if scored:
         view["waterline_entity_id"] = game.waterline_entity_id
-        view["holdings"] = [_holding_view(h) for h in game.holdings.values()]
+        view["holdings"] = [_holding_view(h, names) for h in game.holdings.values()]
     elif isinstance(audience, PlayerAudience):
-        view["holdings"] = [_holding_view(h) for h in game.holdings.values() if h.owner_player_id == audience.game_player_id]
+        view["holdings"] = [_holding_view(h, names) for h in game.holdings.values() if h.owner_player_id == audience.game_player_id]
 
     return view
 
 
-def _project_market(game: Game) -> list[dict]:
+def _display_names(game: Game) -> dict[str, str]:
+    """Resolved live from the game's ThemeSet, not stored on MarketEntity —
+    see entities.MarketEntity.theme_key."""
+    theme_set = themes.get_theme_set(game.config.theme_set_id)
+    return {e.theme_key: e.display_name for e in theme_set.entities}
+
+
+def _project_market(game: Game, names: dict[str, str]) -> list[dict]:
     return sorted(
-        ({"entity_id": m.entity_id, "theme_key": m.theme_key, "position": m.position} for m in game.market.values()),
+        (
+            {"entity_id": m.entity_id, "theme_key": m.theme_key, "display_name": names.get(m.theme_key, m.theme_key), "position": m.position}
+            for m in game.market.values()
+        ),
         key=lambda x: x["position"],
     )
 
@@ -147,8 +159,14 @@ def _pool_insiders(game: Game, pool: Pool) -> set[str]:
     return insiders
 
 
-def _holding_view(h: Holding) -> dict:
-    return {"holding_id": h.holding_id, "entity_id": h.entity_id, "owner_player_id": h.owner_player_id, "zone": h.zone.value}
+def _holding_view(h: Holding, names: dict[str, str]) -> dict:
+    return {
+        "holding_id": h.holding_id,
+        "entity_id": h.entity_id,
+        "display_name": names.get(h.entity_id, h.entity_id),
+        "owner_player_id": h.owner_player_id,
+        "zone": h.zone.value,
+    }
 
 
 def _portfolio_value(game: Game, game_player_id: str) -> int:

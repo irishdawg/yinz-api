@@ -36,7 +36,7 @@ from gotiate.domain.entities import (
 )
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.events import EventType, GameEvent
-from gotiate.domain.themes import FICTIONAL_COMPANIES_V1
+from gotiate.domain import themes
 
 # --------------------------------------------------------------------------
 # IDs
@@ -320,11 +320,19 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     events: list[GameEvent] = []
 
     market_size = game.config.market_size_by_players[n]
-    order = rng.sample(FICTIONAL_COMPANIES_V1, market_size)
+    theme_set = themes.get_theme_set(game.config.theme_set_id)
+    if len(theme_set.entities) < market_size:
+        raise IllegalCommandError(
+            f"theme set {theme_set.theme_set_id!r} has only {len(theme_set.entities)} entities, needs {market_size} for {n} players"
+        )
+    order = rng.sample(theme_set.entities, market_size)
     rng.shuffle(order)
-    for i, (entity_id, theme_key) in enumerate(order, start=1):
-        game.market[entity_id] = MarketEntity(entity_id=entity_id, theme_key=theme_key, position=i)
-    events.append(_emit(game, now, EventType.MARKET_INITIALIZED, actor=None, payload={"size": market_size}))
+    for i, entity in enumerate(order, start=1):
+        # entity_id and theme_key coincide by construction — each theme_key
+        # is sampled at most once per market — but stay distinct fields; see
+        # themes.py's module docstring for why.
+        game.market[entity.theme_key] = MarketEntity(entity_id=entity.theme_key, theme_key=entity.theme_key, position=i)
+    events.append(_emit(game, now, EventType.MARKET_INITIALIZED, actor=None, payload={"size": market_size, "theme_set_id": theme_set.theme_set_id}))
 
     entity_ids = list(game.market.keys())
     for player in game.players:

@@ -126,7 +126,7 @@ class GameConfig(BaseModel):
 
 class MarketEntity(BaseModel):
     entity_id: str
-    theme_key: str  # display name for now — real ThemeSet/version resolution is future work
+    theme_key: str  # stable key into the game's ThemeSet — display name is resolved at projection time, not stored here
     position: int  # 1..N, unique — mutates only via SWAP_EXECUTED
 
 

@@ -1,0 +1,25 @@
+{
+  "theme_set_id": "fictional_companies_v1",
+  "name": "Fictional Companies",
+  "version": 1,
+  "entities": [
+    {"theme_key": "daveco", "display_name": "DaveCo"},
+    {"theme_key": "tiny_horse_motors", "display_name": "Tiny Horse Motors"},
+    {"theme_key": "grandmas_pharma", "display_name": "Grandma's Pharmaceuticals"},
+    {"theme_key": "cryptomatic", "display_name": "Crypt-o-Matic"},
+    {"theme_key": "big_tuna", "display_name": "Big Tuna Seafood"},
+    {"theme_key": "moonshot_ai", "display_name": "Moonshot AI"},
+    {"theme_key": "questionable_meats", "display_name": "Questionable Meats"},
+    {"theme_key": "emotional_support_robotics", "display_name": "Emotional Support Robotics"},
+    {"theme_key": "uncle_larrys_lasers", "display_name": "Uncle Larry's Lasers"},
+    {"theme_key": "nocturnal_notary", "display_name": "Nocturnal Notary Co."},
+    {"theme_key": "spite_industries", "display_name": "Spite Industries"},
+    {"theme_key": "driftwood_analytics", "display_name": "Driftwood Analytics"},
+    {"theme_key": "hush_money_hvac", "display_name": "Hush Money HVAC"},
+    {"theme_key": "feral_logistics", "display_name": "Feral Logistics"},
+    {"theme_key": "second_breakfast_capital", "display_name": "Second Breakfast Capital"},
+    {"theme_key": "gullible_gullwing", "display_name": "Gullible Gullwing Motors"},
+    {"theme_key": "pterodactyl_courier", "display_name": "Pterodactyl Courier"},
+    {"theme_key": "aunt_ruths_arbitrage", "display_name": "Aunt Ruth's Arbitrage"}
+  ]
+}
