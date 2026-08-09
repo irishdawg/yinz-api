@@ -3,14 +3,14 @@
   "name": "Dragons",
   "version": 1,
   "entities": [
-    {"theme_key": "emberclaw", "display_name": "Emberclaw"},
-    {"theme_key": "frostwing", "display_name": "Frostwing"},
-    {"theme_key": "duskfang", "display_name": "Duskfang"},
-    {"theme_key": "stormscale", "display_name": "Stormscale"},
-    {"theme_key": "ashmaw", "display_name": "Ashmaw"},
-    {"theme_key": "glimmertail", "display_name": "Glimmertail"},
-    {"theme_key": "boneshard", "display_name": "Boneshard"},
-    {"theme_key": "verdigris", "display_name": "Verdigris"},
-    {"theme_key": "nightgale", "display_name": "Nightgale"}
+    {"theme_key": "emberclaw", "display_name": "Emberclaw", "ticker_symbol": "EMBR", "is_locked": true},
+    {"theme_key": "frostwing", "display_name": "Frostwing", "ticker_symbol": "FRST", "is_locked": false},
+    {"theme_key": "duskfang", "display_name": "Duskfang", "ticker_symbol": "DUSK", "is_locked": false},
+    {"theme_key": "stormscale", "display_name": "Stormscale", "ticker_symbol": "STRM", "is_locked": false},
+    {"theme_key": "ashmaw", "display_name": "Ashmaw", "ticker_symbol": "ASHM", "is_locked": false},
+    {"theme_key": "glimmertail", "display_name": "Glimmertail", "ticker_symbol": "GLIM", "is_locked": false},
+    {"theme_key": "boneshard", "display_name": "Boneshard", "ticker_symbol": "BONE", "is_locked": false},
+    {"theme_key": "verdigris", "display_name": "Verdigris", "ticker_symbol": "VERD", "is_locked": false},
+    {"theme_key": "nightgale", "display_name": "Nightgale", "ticker_symbol": "NGAL", "is_locked": false}
   ]
 }

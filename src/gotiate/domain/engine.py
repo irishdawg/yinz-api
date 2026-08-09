@@ -325,7 +325,17 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
         raise IllegalCommandError(
             f"theme set {theme_set.theme_set_id!r} has only {len(theme_set.entities)} entities, needs {market_size} for {n} players"
         )
-    order = rng.sample(theme_set.entities, market_size)
+
+    locked = [e for e in theme_set.entities if e.is_locked]
+    swappable = [e for e in theme_set.entities if not e.is_locked]
+    if len(locked) > market_size:
+        raise IllegalCommandError(
+            f"theme set {theme_set.theme_set_id!r} has {len(locked)} locked entities but the {market_size}-entity market for {n} players can't fit them all"
+        )
+    # Locked entities are always dealt in; the swappable pool fills whatever's
+    # left. Both are still shuffled together below — "locked" means always
+    # present, not fixed to a particular market position.
+    order = locked + rng.sample(swappable, market_size - len(locked))
     rng.shuffle(order)
     for i, entity in enumerate(order, start=1):
         # entity_id and theme_key coincide by construction — each theme_key

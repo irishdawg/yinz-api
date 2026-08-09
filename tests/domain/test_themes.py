@@ -62,3 +62,35 @@ def test_unknown_theme_set_is_rejected_cleanly():
         engine.handle_command(
             game, command_type="START_GAME", payload={}, actor_game_player_id=game.host_player_id, expected_version=None, now=now()
         )
+
+
+def test_locked_entity_is_always_dealt_into_the_market():
+    # fictional_companies_v1 has 18 entities (daveco locked) but a 2-player
+    # market only holds 9 — real sampling pressure on the swappable pool,
+    # not the trivial case where everything fits regardless.
+    game, _ = _start_with_theme("fictional_companies_v1", player_count=2)
+    theme_keys = {m["theme_key"] for m in project(game, PlayerAudience(game.host_player_id))["market"]}
+    assert "daveco" in theme_keys
+
+
+def test_too_many_locked_entities_for_market_size_is_rejected_cleanly():
+    game, _ = engine.create_game(
+        actor_auth_user_id="auth-0",
+        display_name="Host",
+        now=now(),
+        config=GameConfig(theme_set_id="dragons_v1", market_size_by_players={2: 0}),
+    )
+    engine.join_game(game, actor_auth_user_id="auth-1", display_name="P1", now=now())
+
+    with pytest.raises(IllegalCommandError):
+        engine.handle_command(
+            game, command_type="START_GAME", payload={}, actor_game_player_id=game.host_player_id, expected_version=None, now=now()
+        )
+
+
+def test_market_entities_carry_a_ticker_symbol():
+    game, _ = _start_with_theme("fictional_companies_v1", player_count=2)
+    view = project(game, PlayerAudience(game.host_player_id))
+    for entity in view["market"]:
+        assert entity["ticker_symbol"]
+        assert len(entity["ticker_symbol"]) <= 6

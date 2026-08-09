@@ -31,6 +31,8 @@ from gotiate.domain.errors import NotFoundError
 class ThemeEntityDefinition(BaseModel):
     theme_key: str
     display_name: str
+    ticker_symbol: str  # short, for compact display — a proposed swap can't fit two full names
+    is_locked: bool = False  # always dealt into the market for this theme set, never part of the swappable pool
 
 
 class ThemeSet(BaseModel):
