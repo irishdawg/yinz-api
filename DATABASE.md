@@ -61,11 +61,41 @@ dashboard env vars, never here.
   lives as the JSON files already in `src/gotiate/domain/theme_data/` and
   gets seeded from there — not typed into the Supabase UI, and not
   hand-duplicated into a second SQL source that can drift from the JSON.
-- **FastAPI remains the only authoritative gameplay writer.** RLS exists to
-  stop accidental/unauthorized direct browser access to Postgres — it is
-  not a substitute for domain validation, and nothing about having RLS
-  changes the "Supabase stores and distributes state, FastAPI decides
-  state" principle from the domain model.
+- **FastAPI remains the only authoritative gameplay writer, full stop.**
+  Every table's grants revoke `INSERT`/`UPDATE`/`DELETE` from the
+  `authenticated` and `anon` roles explicitly — not relying on RLS alone to
+  block writes it would already block, matching Supabase's own
+  grants-plus-RLS guidance (two independent layers, not one).
+- **Reads split in two, deliberately, not duplicated.** Data that's
+  intrinsically public to every player *seated in that specific game* —
+  market order, phase, public proposal/pool fields, existence/status of
+  private pools (not their contents), public Influence balances, reserve
+  counts, clock/cutoff state — may be read and subscribed to (Postgres
+  Changes, V1) directly from Supabase. RLS on those tables is scoped to
+  game membership, e.g. `exists (select 1 from game_players gp where
+  gp.game_id = t.game_id and gp.auth_user_id = auth.uid())` — never a bare
+  `true`, since "public" means public to that game's players, not to every
+  authenticated Gotiate account. Index the membership lookup; Supabase
+  explicitly recommends indexing columns used in RLS checks.
+  Everything else — holdings, reserve identities, private-pool contents,
+  `ready_to_close`, the frozen pending-pickup view, portfolio values, the
+  Waterline pre-close, postgame replay — stays exclusively behind
+  FastAPI's `project()`. That logic (§03/§06 of the domain model) is
+  already built and tested; re-expressing it as RLS policies would mean
+  maintaining the same visibility rules in two languages that can drift
+  apart. Never duplicate it.
+  Non-seated spectator access (`PublicAudience`, already supported by
+  `GET /games/{id}`) isn't covered by the direct-read fast path at all —
+  it falls back to the FastAPI path, which already handles it.
+- **Realtime consumption stays encapsulated on the frontend.** Postgres
+  Changes has a real scaling ceiling (Supabase's own guidance: usable to
+  roughly low thousands of concurrent subscribers on a table, likely
+  counted across *all* games sharing that table, not per game) — fine for
+  V1 at 2-6 players/game, not a permanent guarantee once enough concurrent
+  games are running. Broadcast is Supabase's recommended path past that
+  point. The frontend should never scatter direct `postgres_changes`
+  subscriptions through game UI code — wrap it once, so switching to
+  Broadcast later is a swap behind that wrapper, not a rewrite.
 - **Migrations never run automatically from Render's startup command.**
   Database deployment is a deliberate, separate step from the API process
   booting. A container that boots uvicorn and then casually runs pending
@@ -104,12 +134,8 @@ schema is still moving weekly.
 
 ## What's not decided yet
 
-- **Table shape for the RLS split.** The domain model already establishes
-  that private fields (portfolio holdings, `ready_to_close`, the waterline
-  entity, reserve identities) can't share a table with public fields
-  (market position, Influence counters) or Postgres Changes broadcasts
-  them to everyone regardless of RLS. Translating `Game`/`GamePlayer`/
-  `Holding`/`Proposal`/`Pool`/`PendingPickup` into actual tables along that
-  boundary is real design work, not a mechanical dump of the Pydantic
-  models — worth its own reviewed pass before the first migration gets
-  written, same as the domain model doc got reviewed before code did.
+- **The literal table list.** The read/write split above is settled;
+  translating `Game`/`GamePlayer`/`Holding`/`Proposal`/`Pool`/
+  `PendingPickup`/`CommandReceipt`/`EventLedgerEntry` into actual tables
+  along that boundary is the next reviewed pass — same treatment as the
+  domain model doc got before code did. Not written yet.
