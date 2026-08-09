@@ -23,20 +23,26 @@ yinz-api/
 
 ## Remote project
 
-Not yet created — to be added under the existing Supabase Pro org.
+Created and linked.
 
-**Region: East US (North Virginia), `us-east-1`.** Chosen over Oregon
-because it lands exactly on Render's `virginia` region (now set explicitly
-in `render.yaml`) *and* Vercel's default function region (`iad1`,
-Washington D.C.) — the only pairing where all three services share a
-physical region with zero extra Vercel-side configuration. Also closer to
-the larger population center for a US-facing app. This is a real decision,
-not a placeholder — Supabase's region is effectively permanent once chosen
-(new project + data migration to change later, not a config edit), so
-don't re-litigate this without a concrete reason.
+- Name: `Gotiate`
+- Ref: `vomnvmnsdhvwtqkjtoal`
+- Region: `us-east-1` (East US, North Virginia) — confirmed at creation
+- Postgres: 17 (engine release `17.6.1.155`, GA channel)
+- Status: `ACTIVE_HEALTHY`
 
-When creating the project: name it `Gotiate`, region `East US (North
-Virginia)`. Once it exists, the project ref goes into the link step below.
+Region was chosen over Oregon because it lands exactly on Render's
+`virginia` region (set explicitly in `render.yaml`) *and* Vercel's default
+function region (`iad1`, Washington D.C.) — the only pairing where all
+three services share a physical region with zero extra Vercel-side
+configuration. Also closer to the larger US population center. This was a
+real decision, not a placeholder — Supabase's region is effectively
+permanent once chosen, so don't re-litigate it without a concrete reason.
+
+The project ref is not sensitive (it's the subdomain in the project's
+public URL) and is safe to have in this file. The database password and
+service-role key are not — those stay in `.env` (gitignored) and Render's
+dashboard env vars, never here.
 
 ## Rules
 
@@ -72,14 +78,19 @@ Virginia)`. Once it exists, the project ref goes into the link step below.
 
 ## Deploying migrations (current stage — manual, deliberate)
 
+Already linked (`supabase/.temp/`, gitignored, holds the local link state —
+re-run `link` if that directory ever gets wiped):
+
 ```bash
-npx supabase link --project-ref <GOTIATE_PROJECT_REF>
+npx supabase link --project-ref vomnvmnsdhvwtqkjtoal
 npx supabase db push
 ```
 
 `db push` applies whatever local migrations haven't been applied to the
 linked remote yet. No local Docker stack required just to push — that's
 only needed for things like `db dump` or running the full stack locally.
+No migrations exist yet, so there's nothing to push until the schema design
+pass below is done.
 
 Flow while the schema's still actively changing:
 
