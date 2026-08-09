@@ -46,7 +46,7 @@ _JOIN_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I ambiguity
 
 
 def new_id() -> str:
-    return uuid.uuid4().hex
+    return str(uuid.uuid4())
 
 
 def new_join_code(length: int) -> str:

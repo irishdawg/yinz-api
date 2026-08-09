@@ -50,10 +50,22 @@ direct PostgreSQL role FastAPI holds a connection pool against — it runs
 row lock, which the Supabase Data API (PostgREST) can't express. Supabase's
 `service_role` API key is separate: only relevant if FastAPI ever calls
 Supabase's HTTP APIs directly (Auth admin, Storage) instead of talking to
-Postgres. `SUPABASE_SERVICE_ROLE_KEY` is already in `.env`; a direct
-Postgres connection string for `gotiate_backend` is a **new** credential
-still needed once the role exists (created in migration #1) — not yet in
-`.env` or Render.
+Postgres. Both are in `.env` now: `SUPABASE_SERVICE_ROLE_KEY` and
+`GOTIATE_BACKEND_DATABASE_URL`. Still needs adding to Render's dashboard
+env vars before deploy.
+
+**Connection path: Supavisor session pooler, not the direct connection.**
+Render has no IPv6 outbound, and Supabase's direct Postgres connection is
+IPv6-only by default. Two ways around that: the $4/month IPv4 add-on, or
+Supabase's Supavisor pooler, which is IPv4-compatible and free. Went with
+Supavisor in **session mode** (port 5432, not the 6543 transaction-mode
+port) — session mode holds one dedicated connection per client for the
+connection's lifetime, same behavior as a direct connection, which is what
+`SELECT ... FOR UPDATE` across a multi-statement transaction needs.
+Transaction-mode pooling can't be relied on for that. Username format is
+`<role>.<project-ref>` (Supavisor's tenant-routing convention, not a
+Postgres username), host is `aws-0-<region>.pooler.supabase.com`. Verified
+live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
 
 ## Rules
 
@@ -131,9 +143,26 @@ npx supabase db push
 
 `db push` applies whatever local migrations haven't been applied to the
 linked remote yet. No local Docker stack required just to push — that's
-only needed for things like `db dump` or running the full stack locally.
-No migrations exist yet, so there's nothing to push until the schema design
-pass below is done.
+only needed for things like `db dump` or running the full stack locally
+(Docker Desktop's absence only breaks the migration-catalog cache, not the
+push itself — safe to ignore that warning).
+
+If `db push` (or the CLI generally) fails with `LegacyDbConfigIpv6Error`,
+re-run `supabase link --project-ref vomnvmnsdhvwtqkjtoal` — the CLI's own
+push path needs the IPv4-compatible link too, not just FastAPI's runtime
+connection.
+
+The role's password is never in a migration file (roles are global to the
+Postgres instance, not scoped to a migration's transaction) — set/rotate it
+out-of-band with:
+
+```bash
+npx supabase db query --linked "ALTER ROLE gotiate_backend WITH PASSWORD '<new-password>';"
+```
+
+`--linked` runs the query via the Management API against the linked
+project, no direct Postgres connection (or its own IPv6 problem) needed
+just to set a password.
 
 Flow while the schema's still actively changing:
 
@@ -147,17 +176,33 @@ schema is still moving weekly.
 
 ## What's done, what's next
 
-Table list is designed and reviewed (13 tables: 5 direct-read, 6
-FastAPI-only, 2 global content) — see §11 of the domain model doc. Not yet
-written as actual migration files.
+Schema is designed, reviewed, written, and **live on the Gotiate project**
+— 13 tables (5 direct-read, 6 FastAPI-only, 2 global content), the
+`is_game_member()` helper, RLS, grants, and the `supabase_realtime`
+publication, as six migrations under `supabase/migrations/`
+(`create_backend_role`, `theme_content_schema`, `game_schema`,
+`rls_policies`, `grants_and_realtime`, `seed_theme_content`). See §11 of
+the domain model doc for the design rationale. Theme content is seeded
+via `scripts/generate_theme_seed.py`, which reads
+`src/gotiate/domain/theme_data/*.json` — re-run it and paste the output
+into a fresh migration whenever theme content changes; never hand-edit an
+applied migration.
 
-Two small code changes to land alongside migration #1, not before:
-- `engine.new_id()` → `str(uuid.uuid4())` (canonical dashed form, not
-  `.hex`) for clean Postgres `uuid` column compatibility.
-- A `reserve_count_remaining`-vs-`holdings` invariant test, since that
-  column is a deliberate denormalization FastAPI has to keep in sync by
-  hand — worth catching drift immediately rather than silently.
+`gotiate_backend`'s password is set and `GOTIATE_BACKEND_DATABASE_URL` is
+in `.env`, verified against the live project.
 
-Next: write `supabase/migrations/0001_initial_schema.sql` — tables,
-constraints, the `is_game_member()` helper, RLS, grants, and the
-`supabase_realtime` publication — for review before `db push`.
+`engine.new_id()` now returns `str(uuid.uuid4())` (canonical dashed form)
+for clean Postgres `uuid` column compatibility. Full test suite (77
+tests) still green.
+
+Next up:
+- A `reserve_count_remaining`-vs-`holdings` invariant test — deferred
+  until the Postgres-backed `GameRepository` exists, since the in-memory
+  repository has no second source of truth to drift against yet.
+- Build the actual Supabase-backed `GameRepository` (satisfies the
+  existing `GameRepository` Protocol in `persistence/repository.py`),
+  swapping it in for `InMemoryGameRepository`.
+- Real Supabase JWT verification in `api/deps.py`, replacing the current
+  stub — the actual blocker before any public deployment.
+- Add `GOTIATE_BACKEND_DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to
+  Render's dashboard env vars once the Supabase-backed repository lands.
