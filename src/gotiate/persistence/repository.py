@@ -1,0 +1,70 @@
+"""GameRepository — the interface the engine and API code depend on. Currently
+an in-memory implementation; a Supabase/Postgres implementation satisfies the
+same Protocol later without engine or API code changing (domain model §08,
+"Supabase stores and distributes state. FastAPI decides state.")."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Protocol
+
+from gotiate.domain.entities import CommandReceipt, Game
+from gotiate.domain.events import GameEvent
+
+
+class GameRepository(Protocol):
+    async def create(self, game: Game) -> None: ...
+    async def get(self, game_id: str) -> Game | None: ...
+    async def get_by_join_code(self, join_code: str) -> Game | None: ...
+    async def save(self, game: Game) -> None: ...
+    async def append_events(self, events: list[GameEvent]) -> None: ...
+    async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None: ...
+    async def record_receipt(self, receipt: CommandReceipt) -> None: ...
+    def lock_for(self, game_id: str) -> asyncio.Lock: ...
+
+
+class InMemoryGameRepository:
+    def __init__(self) -> None:
+        self._games: dict[str, Game] = {}
+        self._by_code: dict[str, str] = {}
+        self._events: list[GameEvent] = []
+        # Keyed by (game_id, command_id) — command_id is only a client-side
+        # idempotency key, unique per request, never globally unique on its
+        # own. Keying by command_id alone would let a stale/reused id from
+        # one game short-circuit straight to a cached result in another,
+        # skipping authorization entirely.
+        self._receipts: dict[tuple[str, str], CommandReceipt] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def create(self, game: Game) -> None:
+        self._games[game.id] = game
+        self._by_code[game.join_code] = game.id
+
+    async def get(self, game_id: str) -> Game | None:
+        return self._games.get(game_id)
+
+    async def get_by_join_code(self, join_code: str) -> Game | None:
+        game_id = self._by_code.get(join_code)
+        return self._games.get(game_id) if game_id else None
+
+    async def save(self, game: Game) -> None:
+        self._games[game.id] = game
+
+    async def append_events(self, events: list[GameEvent]) -> None:
+        self._events.extend(events)
+
+    async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None:
+        return self._receipts.get((game_id, command_id))
+
+    async def record_receipt(self, receipt: CommandReceipt) -> None:
+        self._receipts[(receipt.game_id, receipt.command_id)] = receipt
+
+    def lock_for(self, game_id: str) -> asyncio.Lock:
+        # Stands in for `SELECT ... FOR UPDATE` on the games row (§08,
+        # "one writer per game"). One asyncio.Lock per game_id, created
+        # lazily, held for the duration of a single command.
+        lock = self._locks.get(game_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[game_id] = lock
+        return lock
