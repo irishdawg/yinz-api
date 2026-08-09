@@ -3,14 +3,245 @@
   "name": "Dragons",
   "version": 1,
   "entities": [
-    {"theme_key": "emberclaw", "display_name": "Emberclaw", "ticker_symbol": "EMBR", "is_locked": true},
-    {"theme_key": "frostwing", "display_name": "Frostwing", "ticker_symbol": "FRST", "is_locked": false},
-    {"theme_key": "duskfang", "display_name": "Duskfang", "ticker_symbol": "DUSK", "is_locked": false},
-    {"theme_key": "stormscale", "display_name": "Stormscale", "ticker_symbol": "STRM", "is_locked": false},
-    {"theme_key": "ashmaw", "display_name": "Ashmaw", "ticker_symbol": "ASHM", "is_locked": false},
-    {"theme_key": "glimmertail", "display_name": "Glimmertail", "ticker_symbol": "GLIM", "is_locked": false},
-    {"theme_key": "boneshard", "display_name": "Boneshard", "ticker_symbol": "BONE", "is_locked": false},
-    {"theme_key": "verdigris", "display_name": "Verdigris", "ticker_symbol": "VERD", "is_locked": false},
-    {"theme_key": "nightgale", "display_name": "Nightgale", "ticker_symbol": "NGAL", "is_locked": false}
+    {
+      "theme_key": "dr_001",
+      "display_name": "Emberclaw",
+      "ticker_symbol": "EMBR",
+      "is_locked": true
+    },
+    {
+      "theme_key": "dr_002",
+      "display_name": "Frostwing",
+      "ticker_symbol": "FRST",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_003",
+      "display_name": "Duskfang",
+      "ticker_symbol": "DUSK",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_004",
+      "display_name": "Stormscale",
+      "ticker_symbol": "STRM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_005",
+      "display_name": "Ashmaw",
+      "ticker_symbol": "ASHM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_006",
+      "display_name": "Glimmertail",
+      "ticker_symbol": "GLIM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_007",
+      "display_name": "Boneshard",
+      "ticker_symbol": "BONE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_008",
+      "display_name": "Verdigris",
+      "ticker_symbol": "VERD",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_009",
+      "display_name": "Nightgale",
+      "ticker_symbol": "NGAL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_010",
+      "display_name": "Cinderback",
+      "ticker_symbol": "CNDR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_011",
+      "display_name": "Ironbelly",
+      "ticker_symbol": "IRON",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_012",
+      "display_name": "Mossfire",
+      "ticker_symbol": "MOSS",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_013",
+      "display_name": "Cloudspine",
+      "ticker_symbol": "CLSP",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_014",
+      "display_name": "Brassjaw",
+      "ticker_symbol": "BRSJ",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_015",
+      "display_name": "Rimehorn",
+      "ticker_symbol": "RIME",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_016",
+      "display_name": "Sootscale",
+      "ticker_symbol": "SOOT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_017",
+      "display_name": "Thornwing",
+      "ticker_symbol": "THRN",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_018",
+      "display_name": "Moonfang",
+      "ticker_symbol": "MOON",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_019",
+      "display_name": "Copperhide",
+      "ticker_symbol": "COPR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_020",
+      "display_name": "Gravelmaw",
+      "ticker_symbol": "GRVL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_021",
+      "display_name": "Sunscar",
+      "ticker_symbol": "SUNS",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_022",
+      "display_name": "Hollowflame",
+      "ticker_symbol": "HOLL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_023",
+      "display_name": "Mireclaw",
+      "ticker_symbol": "MIRE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_024",
+      "display_name": "Blue Ruin",
+      "ticker_symbol": "BLUR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_025",
+      "display_name": "Red Mercy",
+      "ticker_symbol": "RMRC",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_026",
+      "display_name": "Black Lantern",
+      "ticker_symbol": "BLAN",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_027",
+      "display_name": "Old Smoke",
+      "ticker_symbol": "SMOK",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_028",
+      "display_name": "Glasswing",
+      "ticker_symbol": "GLAS",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_029",
+      "display_name": "Cragtooth",
+      "ticker_symbol": "CRAG",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_030",
+      "display_name": "Pyrestep",
+      "ticker_symbol": "PYRE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_031",
+      "display_name": "Velvet Doom",
+      "ticker_symbol": "VELV",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_032",
+      "display_name": "Wyrmwood",
+      "ticker_symbol": "WYRM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_033",
+      "display_name": "Charbone",
+      "ticker_symbol": "CHAR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_034",
+      "display_name": "Tinwhistle",
+      "ticker_symbol": "TINW",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_035",
+      "display_name": "Skyrend",
+      "ticker_symbol": "SKYR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_036",
+      "display_name": "Goldgrin",
+      "ticker_symbol": "GOLD",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_037",
+      "display_name": "Boglight",
+      "ticker_symbol": "BOGL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_038",
+      "display_name": "Shivercoil",
+      "ticker_symbol": "SHIV",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_039",
+      "display_name": "Coalheart",
+      "ticker_symbol": "COAL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "dr_040",
+      "display_name": "Thunderpuff",
+      "ticker_symbol": "PUFF",
+      "is_locked": false
+    }
   ]
 }

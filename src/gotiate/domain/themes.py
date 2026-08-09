@@ -29,10 +29,11 @@ from gotiate.domain.errors import NotFoundError
 
 
 class ThemeEntityDefinition(BaseModel):
-    theme_key: str
+    theme_key: str  # unique within this ThemeSet only — never referenced across sets, so no global uniqueness requirement
     display_name: str
     ticker_symbol: str  # short, for compact display — a proposed swap can't fit two full names
     is_locked: bool = False  # always dealt into the market for this theme set, never part of the swappable pool
+    logo_url: str | None = None  # a reference only — FastAPI never fetches/serves the image itself, that's Supabase Storage/CDN + frontend
 
 
 class ThemeSet(BaseModel):
@@ -78,6 +79,10 @@ _repository: ThemeRepository = JsonFileThemeRepository(_DEFAULT_DIRECTORY)
 
 def get_theme_set(theme_set_id: str) -> ThemeSet:
     return _repository.get(theme_set_id)
+
+
+def get_theme_repository() -> ThemeRepository:
+    return _repository
 
 
 def set_theme_repository(repo: ThemeRepository) -> None:

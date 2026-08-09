@@ -84,8 +84,8 @@ def _theme_lookup(game: Game) -> dict[str, ThemeEntityDefinition]:
 def _entity_view(theme_key: str, lookup: dict[str, ThemeEntityDefinition]) -> dict:
     entity = lookup.get(theme_key)
     if entity is None:
-        return {"display_name": theme_key, "ticker_symbol": theme_key[:4].upper()}
-    return {"display_name": entity.display_name, "ticker_symbol": entity.ticker_symbol}
+        return {"display_name": theme_key, "ticker_symbol": theme_key[:4].upper(), "logo_url": None}
+    return {"display_name": entity.display_name, "ticker_symbol": entity.ticker_symbol, "logo_url": entity.logo_url}
 
 
 def _project_market(game: Game, lookup: dict[str, ThemeEntityDefinition]) -> list[dict]:
