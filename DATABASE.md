@@ -44,6 +44,17 @@ public URL) and is safe to have in this file. The database password and
 service-role key are not — those stay in `.env` (gitignored) and Render's
 dashboard env vars, never here.
 
+**Two distinct trusted credentials, not one.** `gotiate_backend` is a
+direct PostgreSQL role FastAPI holds a connection pool against — it runs
+`SELECT ... FOR UPDATE` and multi-statement transactions around a game's
+row lock, which the Supabase Data API (PostgREST) can't express. Supabase's
+`service_role` API key is separate: only relevant if FastAPI ever calls
+Supabase's HTTP APIs directly (Auth admin, Storage) instead of talking to
+Postgres. `SUPABASE_SERVICE_ROLE_KEY` is already in `.env`; a direct
+Postgres connection string for `gotiate_backend` is a **new** credential
+still needed once the role exists (created in migration #1) — not yet in
+`.env` or Render.
+
 ## Rules
 
 - All schema/RLS/Realtime changes are ordered SQL migration files under
@@ -71,12 +82,14 @@ dashboard env vars, never here.
   market order, phase, public proposal/pool fields, existence/status of
   private pools (not their contents), public Influence balances, reserve
   counts, clock/cutoff state — may be read and subscribed to (Postgres
-  Changes, V1) directly from Supabase. RLS on those tables is scoped to
-  game membership, e.g. `exists (select 1 from game_players gp where
-  gp.game_id = t.game_id and gp.auth_user_id = auth.uid())` — never a bare
-  `true`, since "public" means public to that game's players, not to every
-  authenticated Gotiate account. Index the membership lookup; Supabase
-  explicitly recommends indexing columns used in RLS checks.
+  Changes, V1) directly from Supabase. RLS on those tables is
+  `using (private.is_game_member(game_id))` — one audited `SECURITY
+  DEFINER` helper, not a repeated inline subquery. The obvious inline
+  version is fine on other tables but a real recursion risk when applied to
+  `game_players`' own policy (evaluating it re-triggers the same RLS-gated
+  query); the helper breaks that cycle by design. Never a bare `true` —
+  "public" means public to that game's players, not to every authenticated
+  Gotiate account.
   Everything else — holdings, reserve identities, private-pool contents,
   `ready_to_close`, the frozen pending-pickup view, portfolio values, the
   Waterline pre-close, postgame replay — stays exclusively behind
@@ -132,10 +145,19 @@ Once the schema stabilizes, this can move to Supabase's GitHub integration
 (deploy-on-merge-to-main) — not worth building that automation while the
 schema is still moving weekly.
 
-## What's not decided yet
+## What's done, what's next
 
-- **The literal table list.** The read/write split above is settled;
-  translating `Game`/`GamePlayer`/`Holding`/`Proposal`/`Pool`/
-  `PendingPickup`/`CommandReceipt`/`EventLedgerEntry` into actual tables
-  along that boundary is the next reviewed pass — same treatment as the
-  domain model doc got before code did. Not written yet.
+Table list is designed and reviewed (13 tables: 5 direct-read, 6
+FastAPI-only, 2 global content) — see §11 of the domain model doc. Not yet
+written as actual migration files.
+
+Two small code changes to land alongside migration #1, not before:
+- `engine.new_id()` → `str(uuid.uuid4())` (canonical dashed form, not
+  `.hex`) for clean Postgres `uuid` column compatibility.
+- A `reserve_count_remaining`-vs-`holdings` invariant test, since that
+  column is a deliberate denormalization FastAPI has to keep in sync by
+  hand — worth catching drift immediately rather than silently.
+
+Next: write `supabase/migrations/0001_initial_schema.sql` — tables,
+constraints, the `is_game_member()` helper, RLS, grants, and the
+`supabase_realtime` publication — for review before `db push`.
