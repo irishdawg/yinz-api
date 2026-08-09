@@ -64,3 +64,36 @@ def test_only_seated_players_can_submit_commands():
         headers=_auth("auth-stranger"),
     )
     assert response.status_code == 403
+
+
+def test_cannot_create_second_active_game_while_hosting_one():
+    client = TestClient(create_app())
+    first = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
+    assert first.status_code == 200
+
+    second = client.post("/games", json={"display_name": "Tedy again"}, headers=_auth("auth-tedy"))
+    assert second.status_code == 409
+    assert second.json()["detail"]["error_code"] == "active_game_exists"
+
+
+def test_create_game_is_rate_limited_per_ip():
+    client = TestClient(create_app())
+    # Different hosts each time so the one-active-game-per-host rule (tested
+    # above) doesn't shadow what's actually being tested here.
+    for i in range(5):
+        response = client.post("/games", json={"display_name": f"P{i}"}, headers=_auth(f"auth-rl-{i}"))
+        assert response.status_code == 200
+
+    sixth = client.post("/games", json={"display_name": "P5"}, headers=_auth("auth-rl-5"))
+    assert sixth.status_code == 429
+    assert sixth.json() == {"error": "rate_limited"}  # boring on purpose — no limit numbers echoed back
+
+
+def test_join_game_is_rate_limited_per_ip():
+    client = TestClient(create_app())
+    for _ in range(10):
+        response = client.post("/games/join", json={"join_code": "NOSUCH1", "display_name": "X"}, headers=_auth("auth-prober"))
+        assert response.status_code == 404
+
+    eleventh = client.post("/games/join", json={"join_code": "NOSUCH1", "display_name": "X"}, headers=_auth("auth-prober"))
+    assert eleventh.status_code == 429

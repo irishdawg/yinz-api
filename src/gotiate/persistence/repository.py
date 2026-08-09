@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
-from gotiate.domain.entities import CommandReceipt, Game
+from gotiate.domain.entities import CommandReceipt, Game, GamePhase
 from gotiate.domain.events import GameEvent
 
 
@@ -20,6 +20,7 @@ class GameRepository(Protocol):
     async def append_events(self, events: list[GameEvent]) -> None: ...
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None: ...
     async def record_receipt(self, receipt: CommandReceipt) -> None: ...
+    async def find_active_game_hosted_by(self, auth_user_id: str) -> Game | None: ...
     def lock_for(self, game_id: str) -> asyncio.Lock: ...
 
 
@@ -58,6 +59,21 @@ class InMemoryGameRepository:
 
     async def record_receipt(self, receipt: CommandReceipt) -> None:
         self._receipts[(receipt.game_id, receipt.command_id)] = receipt
+
+    async def find_active_game_hosted_by(self, auth_user_id: str) -> Game | None:
+        # One in-flight hosted game per user — a real constraint, not just a
+        # time-windowed rate limit, so someone can't spin up unlimited games
+        # by simply spacing requests out. Full table scan is fine at V1
+        # scale; a real Postgres implementation would index on
+        # (host_player_id) joined through to auth_user_id, or denormalize
+        # host_auth_user_id onto the games row directly.
+        for game in self._games.values():
+            if game.phase == GamePhase.SCORED or game.host_player_id is None:
+                continue
+            host = game.player_by_id(game.host_player_id)
+            if host.auth_user_id == auth_user_id:
+                return game
+        return None
 
     def lock_for(self, game_id: str) -> asyncio.Lock:
         # Stands in for `SELECT ... FOR UPDATE` on the games row (§08,

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from gotiate.api.deps import get_auth_user_id, get_repository
+from gotiate.api.rate_limit import limiter
 from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest
 from gotiate.domain import engine
 from gotiate.domain.entities import CommandReceipt, CommandStatus
@@ -26,11 +27,22 @@ def _now() -> datetime:
 
 
 @router.post("", response_model=GameSummary)
+@limiter.limit("5/hour")
 async def create_game(
+    request: Request,
     body: CreateGameRequest,
     auth_user_id: str = Depends(get_auth_user_id),
     repo: GameRepository = Depends(get_repository),
 ) -> GameSummary:
+    # One in-flight hosted game per user — deliberately not just a time-
+    # windowed rate limit, so spacing requests out doesn't get around it.
+    existing_game = await repo.find_active_game_hosted_by(auth_user_id)
+    if existing_game is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "active_game_exists", "message": "finish or end your current game before starting another", "game_id": existing_game.id},
+        )
+
     game, events = engine.create_game(actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now())
     await repo.create(game)
     await repo.append_events(events)
@@ -39,7 +51,9 @@ async def create_game(
 
 
 @router.post("/join", response_model=GameSummary)
+@limiter.limit("10/5minutes")
 async def join_game(
+    request: Request,
     body: JoinGameRequest,
     auth_user_id: str = Depends(get_auth_user_id),
     repo: GameRepository = Depends(get_repository),

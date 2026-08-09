@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from gotiate.domain import engine
-from gotiate.domain.entities import GamePhase
+from gotiate.domain.entities import GameConfig, GamePhase
 from gotiate.domain.errors import IllegalCommandError
 from tests.conftest import now
 
@@ -16,6 +18,33 @@ def test_create_game_makes_host_seat_zero():
     assert game.host_player_id == game.players[0].game_player_id
     assert game.join_code
     assert {e.type.value for e in events} == {"GAME_CREATED", "PLAYER_JOINED"}
+
+
+def test_join_code_is_seven_characters_by_default():
+    game, _ = engine.create_game(actor_auth_user_id="auth-host", display_name="Tedy", now=now())
+    assert len(game.join_code) == 7 == game.config.join_code_length
+
+
+def test_join_code_length_is_configurable():
+    game, _ = engine.create_game(
+        actor_auth_user_id="auth-host", display_name="Tedy", now=now(), config=GameConfig(join_code_length=4)
+    )
+    assert len(game.join_code) == 4
+
+
+def test_join_code_expires_after_configured_lifetime():
+    t0 = now()
+    game, _ = engine.create_game(
+        actor_auth_user_id="auth-host", display_name="Tedy", now=t0, config=GameConfig(join_code_lifetime_minutes=30)
+    )
+
+    # Still within the window — joining works normally.
+    engine.join_game(game, actor_auth_user_id="auth-2", display_name="Mortia", now=t0 + timedelta(minutes=29))
+
+    # Past it — even though the game is still sitting in LOBBY, nobody's
+    # started it, and the code was never rate-limited into oblivion.
+    with pytest.raises(IllegalCommandError):
+        engine.join_game(game, actor_auth_user_id="auth-3", display_name="Hanky", now=t0 + timedelta(minutes=31))
 
 
 def test_join_game_adds_seats_and_rejects_duplicates():

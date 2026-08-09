@@ -49,7 +49,7 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
-def new_join_code(length: int = 5) -> str:
+def new_join_code(length: int) -> str:
     return "".join(random.choices(_JOIN_CODE_ALPHABET, k=length))
 
 
@@ -61,7 +61,8 @@ def new_join_code(length: int = 5) -> str:
 def create_game(
     *, actor_auth_user_id: str, display_name: str, now: datetime, config: GameConfig | None = None
 ) -> tuple[Game, list[GameEvent]]:
-    game = Game(id=new_id(), join_code=new_join_code(), config=config or GameConfig())
+    resolved_config = config or GameConfig()
+    game = Game(id=new_id(), created_at=now, join_code=new_join_code(resolved_config.join_code_length), config=resolved_config)
     host = GamePlayer(
         game_player_id=new_id(),
         auth_user_id=actor_auth_user_id,
@@ -85,6 +86,8 @@ def join_game(
 ) -> tuple[GamePlayer, list[GameEvent]]:
     if game.phase != GamePhase.LOBBY:
         raise IllegalCommandError("game is no longer accepting players")
+    if now > game.created_at + timedelta(minutes=game.config.join_code_lifetime_minutes):
+        raise IllegalCommandError("join code has expired")
     if len(game.players) >= 6:
         raise IllegalCommandError("game is full")
     if game.player_by_auth_id(actor_auth_user_id) is not None:

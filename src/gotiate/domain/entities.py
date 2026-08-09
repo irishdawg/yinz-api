@@ -104,6 +104,13 @@ class GameConfig(BaseModel):
     allow_private_pools: bool = True
     ready_to_close_revealed_in_replay: bool = False
 
+    join_code_length: int = 7
+    # Bounds the brute-force window on a live join code independent of how
+    # long the lobby happens to sit open. 30 is a placeholder default, not a
+    # locked number — flagged for confirmation, easy to tighten (e.g. to 5)
+    # or loosen with a one-line config change.
+    join_code_lifetime_minutes: int = 30
+
     theme_set_id: str = "fictional_companies_v1"
     theme_set_version: int = 1
     valuation_policy_id: str = "linear_rank_v1"
@@ -210,6 +217,7 @@ class Game(BaseModel):
     version: int = 0
     next_seq_no: int = 1
     phase: GamePhase = GamePhase.LOBBY
+    created_at: datetime
     join_code: str
     host_player_id: str | None = None
     config: GameConfig = Field(default_factory=GameConfig)
