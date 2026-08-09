@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from gotiate.domain import engine
+from gotiate.domain import engine, themes
 from gotiate.domain.entities import GameConfig
 from gotiate.domain.errors import IllegalCommandError
 from gotiate.domain.projections import PlayerAudience, project
@@ -65,12 +65,17 @@ def test_unknown_theme_set_is_rejected_cleanly():
 
 
 def test_locked_entity_is_always_dealt_into_the_market():
-    # fictional_companies_v1 has 18 entities (daveco locked) but a 2-player
-    # market only holds 9 — real sampling pressure on the swappable pool,
-    # not the trivial case where everything fits regardless.
+    # fictional_companies_v1 has far more entities than a 2-player market
+    # holds (9) — real sampling pressure on the swappable pool, not the
+    # trivial case where everything fits regardless. Locked keys are read
+    # from the theme set itself rather than hardcoded, so this doesn't
+    # silently stop testing anything the next time content changes.
+    locked_keys = {e.theme_key for e in themes.get_theme_set("fictional_companies_v1").entities if e.is_locked}
+    assert locked_keys, "fixture has no locked entities to actually test against"
+
     game, _ = _start_with_theme("fictional_companies_v1", player_count=2)
     theme_keys = {m["theme_key"] for m in project(game, PlayerAudience(game.host_player_id))["market"]}
-    assert "daveco" in theme_keys
+    assert locked_keys <= theme_keys
 
 
 def test_too_many_locked_entities_for_market_size_is_rejected_cleanly():

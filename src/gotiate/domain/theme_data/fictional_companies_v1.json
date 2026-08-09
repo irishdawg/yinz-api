@@ -3,23 +3,245 @@
   "name": "Fictional Companies",
   "version": 1,
   "entities": [
-    {"theme_key": "daveco", "display_name": "DaveCo", "ticker_symbol": "DAVE", "is_locked": true},
-    {"theme_key": "tiny_horse_motors", "display_name": "Tiny Horse Motors", "ticker_symbol": "THM", "is_locked": false},
-    {"theme_key": "grandmas_pharma", "display_name": "Grandma's Pharmaceuticals", "ticker_symbol": "GMAP", "is_locked": false},
-    {"theme_key": "cryptomatic", "display_name": "Crypt-o-Matic", "ticker_symbol": "CRYP", "is_locked": false},
-    {"theme_key": "big_tuna", "display_name": "Big Tuna Seafood", "ticker_symbol": "TUNA", "is_locked": false},
-    {"theme_key": "moonshot_ai", "display_name": "Moonshot AI", "ticker_symbol": "MOON", "is_locked": false},
-    {"theme_key": "questionable_meats", "display_name": "Questionable Meats", "ticker_symbol": "MEAT", "is_locked": false},
-    {"theme_key": "emotional_support_robotics", "display_name": "Emotional Support Robotics", "ticker_symbol": "HUGZ", "is_locked": false},
-    {"theme_key": "uncle_larrys_lasers", "display_name": "Uncle Larry's Lasers", "ticker_symbol": "LASR", "is_locked": false},
-    {"theme_key": "nocturnal_notary", "display_name": "Nocturnal Notary Co.", "ticker_symbol": "NOTR", "is_locked": false},
-    {"theme_key": "spite_industries", "display_name": "Spite Industries", "ticker_symbol": "SPYT", "is_locked": false},
-    {"theme_key": "driftwood_analytics", "display_name": "Driftwood Analytics", "ticker_symbol": "DRFT", "is_locked": false},
-    {"theme_key": "hush_money_hvac", "display_name": "Hush Money HVAC", "ticker_symbol": "HVAC", "is_locked": false},
-    {"theme_key": "feral_logistics", "display_name": "Feral Logistics", "ticker_symbol": "FERL", "is_locked": false},
-    {"theme_key": "second_breakfast_capital", "display_name": "Second Breakfast Capital", "ticker_symbol": "SBC", "is_locked": false},
-    {"theme_key": "gullible_gullwing", "display_name": "Gullible Gullwing Motors", "ticker_symbol": "GULL", "is_locked": false},
-    {"theme_key": "pterodactyl_courier", "display_name": "Pterodactyl Courier", "ticker_symbol": "PTRC", "is_locked": false},
-    {"theme_key": "aunt_ruths_arbitrage", "display_name": "Aunt Ruth's Arbitrage", "ticker_symbol": "RUTH", "is_locked": false}
+    {
+      "theme_key": "fc_001",
+      "display_name": "DaveCo",
+      "ticker_symbol": "DAVE",
+      "is_locked": true
+    },
+    {
+      "theme_key": "fc_002",
+      "display_name": "Grandma's Pharmaceuticals",
+      "ticker_symbol": "GRAM",
+      "is_locked": true
+    },
+    {
+      "theme_key": "fc_003",
+      "display_name": "Frobisher Fasteners",
+      "ticker_symbol": "FROB",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_004",
+      "display_name": "Krumholtz Office Machines",
+      "ticker_symbol": "KRUM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_005",
+      "display_name": "Crypt-O-Matic",
+      "ticker_symbol": "CRYP",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_006",
+      "display_name": "Consolidated Ham",
+      "ticker_symbol": "HAM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_007",
+      "display_name": "Standard Banana",
+      "ticker_symbol": "BANA",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_008",
+      "display_name": "Digler Telecom",
+      "ticker_symbol": "DIGL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_009",
+      "display_name": "Pickleman Pumps",
+      "ticker_symbol": "PUMP",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_010",
+      "display_name": "Dandy Rivet Co.",
+      "ticker_symbol": "RIVT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_011",
+      "display_name": "Meisterburger Ink",
+      "ticker_symbol": "INK",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_012",
+      "display_name": "Muncie Biscuit Works",
+      "ticker_symbol": "MUNC",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_013",
+      "display_name": "Crandall Conveyance",
+      "ticker_symbol": "CRAN",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_014",
+      "display_name": "Gusset, Gusset & Grant",
+      "ticker_symbol": "GUS",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_015",
+      "display_name": "Grizzly Bearings",
+      "ticker_symbol": "GRIZ",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_016",
+      "display_name": "Tocksin Chemical",
+      "ticker_symbol": "TOCK",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_017",
+      "display_name": "Tremendous Paper Company",
+      "ticker_symbol": "TREM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_018",
+      "display_name": "Snodgrass Refrigeration",
+      "ticker_symbol": "SNOD",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_019",
+      "display_name": "Stucky Brothers Adhesives",
+      "ticker_symbol": "STUK",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_020",
+      "display_name": "Butler Motor Works",
+      "ticker_symbol": "BUTL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_021",
+      "display_name": "Reliable Novelty & Fuse",
+      "ticker_symbol": "FUSE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_022",
+      "display_name": "Jury Creek Telecom",
+      "ticker_symbol": "JURY",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_023",
+      "display_name": "National Thimble & Tack",
+      "ticker_symbol": "THIM",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_024",
+      "display_name": "Hertzman Electric",
+      "ticker_symbol": "HERT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_025",
+      "display_name": "Drule Heavy Equipment",
+      "ticker_symbol": "DRUL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_026",
+      "display_name": "Wunderbar Sausage Machinery",
+      "ticker_symbol": "WURST",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_027",
+      "display_name": "Scuttleworth Marine",
+      "ticker_symbol": "SCUT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_028",
+      "display_name": "Tiny Giant Mining",
+      "ticker_symbol": "TINY",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_029",
+      "display_name": "Stout Brothers Elastic",
+      "ticker_symbol": "STBE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_030",
+      "display_name": "Fogg Precision Optics",
+      "ticker_symbol": "FOGG",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_031",
+      "display_name": "Oxide Tractor",
+      "ticker_symbol": "OXID",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_032",
+      "display_name": "Pinebox Studios",
+      "ticker_symbol": "PINE",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_033",
+      "display_name": "Grossman Gasket",
+      "ticker_symbol": "GROS",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_034",
+      "display_name": "Umbrage Mutual",
+      "ticker_symbol": "UMBR",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_035",
+      "display_name": "Quillan Wire & Cable",
+      "ticker_symbol": "QUIL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_036",
+      "display_name": "Feral Logistics",
+      "ticker_symbol": "FERL",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_037",
+      "display_name": "Spite Industries",
+      "ticker_symbol": "SPIT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_038",
+      "display_name": "Hush Money HVAC",
+      "ticker_symbol": "HUSH",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_039",
+      "display_name": "Driftwood Analytics",
+      "ticker_symbol": "DRFT",
+      "is_locked": false
+    },
+    {
+      "theme_key": "fc_040",
+      "display_name": "Marble Falls Meats",
+      "ticker_symbol": "MRBL",
+      "is_locked": false
+    }
   ]
 }
