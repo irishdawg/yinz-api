@@ -221,6 +221,10 @@ class Game(BaseModel):
     join_code: str
     host_player_id: str | None = None
     config: GameConfig = Field(default_factory=GameConfig)
+    # A soft hint, not a cap — never blocks JOIN_GAME or START_GAME.
+    # Purely so the UI can show "3 of 4 joined" and the host can revise it
+    # (via SET_EXPECTED_PLAYER_COUNT) if someone declines. LOBBY-only.
+    expected_player_count: int | None = None
 
     started_at: datetime | None = None
     max_duration_s: int | None = None

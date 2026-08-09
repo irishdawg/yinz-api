@@ -43,7 +43,9 @@ async def create_game(
             detail={"error_code": "active_game_exists", "message": "finish or end your current game before starting another", "game_id": existing_game.id},
         )
 
-    game, events = engine.create_game(actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now())
+    game, events = engine.create_game(
+        actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now(), expected_player_count=body.expected_player_count
+    )
     await repo.create(game)
     await repo.append_events(events)
     assert game.host_player_id is not None

@@ -59,6 +59,7 @@ def project(game: Game, audience: Audience) -> dict:
         "version": game.version,
         "phase": game.phase.value,
         "join_code": game.join_code if isinstance(audience, PlayerAudience) else None,
+        "expected_player_count": game.expected_player_count,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         "proposals": [_project_proposal(p) for p in game.proposals.values()],

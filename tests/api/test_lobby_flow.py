@@ -66,6 +66,22 @@ def test_only_seated_players_can_submit_commands():
     assert response.status_code == 403
 
 
+def test_create_game_accepts_expected_player_count():
+    client = TestClient(create_app())
+    created = client.post("/games", json={"display_name": "Tedy", "expected_player_count": 4}, headers=_auth("auth-tedy"))
+    assert created.status_code == 200
+    game_id = created.json()["game_id"]
+
+    view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy"))
+    assert view.json()["expected_player_count"] == 4
+
+
+def test_create_game_rejects_out_of_range_expected_player_count():
+    client = TestClient(create_app())
+    response = client.post("/games", json={"display_name": "Tedy", "expected_player_count": 1}, headers=_auth("auth-tedy"))
+    assert response.status_code == 422  # Pydantic schema validation, not a domain error
+
+
 def test_cannot_create_second_active_game_while_hosting_one():
     client = TestClient(create_app())
     first = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))

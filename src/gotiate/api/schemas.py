@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateGameRequest(BaseModel):
     display_name: str
+    # Soft hint, not a cap — see Game.expected_player_count. Optional; if the
+    # host doesn't specify one, they just trigger START_GAME whenever ready.
+    expected_player_count: int | None = Field(default=None, ge=2, le=6)
 
 
 class JoinGameRequest(BaseModel):

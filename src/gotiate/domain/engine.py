@@ -59,10 +59,24 @@ def new_join_code(length: int) -> str:
 
 
 def create_game(
-    *, actor_auth_user_id: str, display_name: str, now: datetime, config: GameConfig | None = None
+    *,
+    actor_auth_user_id: str,
+    display_name: str,
+    now: datetime,
+    config: GameConfig | None = None,
+    expected_player_count: int | None = None,
 ) -> tuple[Game, list[GameEvent]]:
+    if expected_player_count is not None and not (2 <= expected_player_count <= 6):
+        raise IllegalCommandError("expected player count must be between 2 and 6")
+
     resolved_config = config or GameConfig()
-    game = Game(id=new_id(), created_at=now, join_code=new_join_code(resolved_config.join_code_length), config=resolved_config)
+    game = Game(
+        id=new_id(),
+        created_at=now,
+        join_code=new_join_code(resolved_config.join_code_length),
+        config=resolved_config,
+        expected_player_count=expected_player_count,
+    )
     host = GamePlayer(
         game_player_id=new_id(),
         auth_user_id=actor_auth_user_id,
@@ -308,6 +322,30 @@ def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: 
 # --------------------------------------------------------------------------
 # Command handlers
 # --------------------------------------------------------------------------
+
+
+def _handle_set_expected_player_count(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    if game.phase != GamePhase.LOBBY:
+        raise IllegalCommandError("can only be changed while still in the lobby")
+    if actor_game_player_id != game.host_player_id:
+        raise IllegalCommandError("only the host can change this")
+
+    new_value = payload.get("expected_player_count")
+    if new_value is not None:
+        if not (2 <= new_value <= 6):
+            raise IllegalCommandError("expected player count must be between 2 and 6")
+        if new_value < len(game.players):
+            raise IllegalCommandError(f"{len(game.players)} players have already joined")
+
+    if game.expected_player_count == new_value:
+        return []  # no-op: applied, nothing observable changed — same rule as SET_READY_TO_CLOSE
+
+    game.expected_player_count = new_value
+    return [
+        _emit(
+            game, now, EventType.EXPECTED_PLAYER_COUNT_CHANGED, actor=actor_game_player_id, payload={"expected_player_count": new_value}
+        )
+    ]
 
 
 def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -674,6 +712,7 @@ def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_i
 
 
 _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
+    "SET_EXPECTED_PLAYER_COUNT": _handle_set_expected_player_count,
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,
     "WITHDRAW_PROPOSAL": _handle_withdraw_proposal,
