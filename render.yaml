@@ -3,6 +3,10 @@ services:
     name: gotiate-api
     runtime: python
     plan: free
+    region: virginia  # us-east-1 — matches Supabase (East US, North Virginia)
+                       # and Vercel's default function region (iad1), so all
+                       # three land in the same physical region with zero
+                       # extra config on the Vercel side
     branch: main
     buildCommand: "uv sync --frozen"
     startCommand: "uv run uvicorn gotiate.main:app --host 0.0.0.0 --port $PORT"

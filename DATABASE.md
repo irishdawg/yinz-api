@@ -23,9 +23,20 @@ yinz-api/
 
 ## Remote project
 
-Not yet created. Region is chosen once, at project creation, and is
-expensive to change afterward (a new project + data migration, not a config
-edit) — so this happens **before** any migration work, not after.
+Not yet created — to be added under the existing Supabase Pro org.
+
+**Region: East US (North Virginia), `us-east-1`.** Chosen over Oregon
+because it lands exactly on Render's `virginia` region (now set explicitly
+in `render.yaml`) *and* Vercel's default function region (`iad1`,
+Washington D.C.) — the only pairing where all three services share a
+physical region with zero extra Vercel-side configuration. Also closer to
+the larger population center for a US-facing app. This is a real decision,
+not a placeholder — Supabase's region is effectively permanent once chosen
+(new project + data migration to change later, not a config edit), so
+don't re-litigate this without a concrete reason.
+
+When creating the project: name it `Gotiate`, region `East US (North
+Virginia)`. Once it exists, the project ref goes into the link step below.
 
 ## Rules
 
@@ -82,13 +93,6 @@ schema is still moving weekly.
 
 ## What's not decided yet
 
-- **Region.** Render defaults to Oregon (US West) unless `render.yaml` sets
-  `region:` explicitly — ours doesn't yet. Supabase-to-Render proximity is
-  the most latency-critical relationship in the stack (every command's
-  transaction round-trips Postgres, likely more than once, inside the row
-  lock), more so than the Vercel↔Render hop, and it's the one that's
-  hardest to fix after the fact. This needs an answer before the project
-  gets created, not after.
 - **Table shape for the RLS split.** The domain model already establishes
   that private fields (portfolio holdings, `ready_to_close`, the waterline
   entity, reserve identities) can't share a table with public fields
