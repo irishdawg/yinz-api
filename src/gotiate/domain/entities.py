@@ -76,7 +76,10 @@ class CommandStatus(StrEnum):
     APPLIED = "applied"
     REJECTED_STALE_VERSION = "rejected_stale_version"
     REJECTED_ILLEGAL = "rejected_illegal"
-    REJECTED_DUPLICATE_REPLAY = "rejected_duplicate_replay"
+    # No REJECTED_DUPLICATE_REPLAY — idempotent replay returns the *original*
+    # receipt's status verbatim (see routes.submit_command), it never creates
+    # a new receipt describing itself as a duplicate. That's the whole point
+    # of idempotency: the second request doesn't have its own outcome.
 
 
 # --------------------------------------------------------------------------
