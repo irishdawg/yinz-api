@@ -203,18 +203,28 @@ in `apps/api/.env`, verified against the live project.
 for clean Postgres `uuid` column compatibility. Full test suite (77
 tests) still green.
 
+Real Supabase JWT verification landed in `api/deps.py`/`api/auth.py`
+(ES256/JWKS, confirmed live against the project), plus a shared-secret
+gateway header (`GOTIATE_GATEWAY_SECRET`) so Render's public URL is
+useless to anyone who isn't the Next.js gateway. Anonymous sign-in →
+create game → join-code + QR → join is live end to end (`apps/web`),
+verified against the live Supabase project in a real browser, not just
+unit-tested. That was the last blocker before any public deployment.
+
 Next up:
 - A `reserve_count_remaining`-vs-`holdings` invariant test — deferred
   until the Postgres-backed `GameRepository` exists, since the in-memory
   repository has no second source of truth to drift against yet.
 - Build the actual Supabase-backed `GameRepository` (satisfies the
   existing `GameRepository` Protocol in `persistence/repository.py`),
-  swapping it in for `InMemoryGameRepository`.
-- Real Supabase JWT verification in `api/deps.py`, replacing the current
-  stub — the actual blocker before any public deployment.
-- Add `GOTIATE_BACKEND_DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to
-  Render's dashboard env vars once the Supabase-backed repository lands.
+  swapping it in for `InMemoryGameRepository` — currently every created
+  game only survives for the life of one running `uvicorn` process.
+- Add `GOTIATE_BACKEND_DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+  `GOTIATE_GATEWAY_SECRET` to Render's dashboard env vars, and the
+  matching Vercel env vars (`NEXT_PUBLIC_SUPABASE_URL`,
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `GOTIATE_API_URL`,
+  `GOTIATE_GATEWAY_SECRET`), once the Render/Vercel projects exist.
 - Create the actual Render service and Vercel project — neither exists
   yet. Render: point at this repo, `render.yaml` already scopes it to
-  `apps/api`. Vercel: set Root Directory to `apps/web` once that app is
-  scaffolded (see `apps/web/README.md`).
+  `apps/api`. Vercel: set Root Directory to `apps/web` (see
+  `apps/web/README.md`).
