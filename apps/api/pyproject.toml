@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "slowapi>=0.1.9",
+    "pyjwt[crypto]>=2.13.0",
 ]
 
 [dependency-groups]

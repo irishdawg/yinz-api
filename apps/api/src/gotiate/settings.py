@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
-    supabase_jwt_secret: str | None = None
+    supabase_jwt_secret: str | None = None  # legacy HS256 fallback — this project is on ES256/JWKS, unused
+    gotiate_gateway_secret: str | None = None
 
 
 settings = Settings()

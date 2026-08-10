@@ -3,9 +3,7 @@ exercises routes.py's locking, receipts, and error handling."""
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
-from gotiate.main import create_app
+from .conftest import make_client
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -13,7 +11,7 @@ def _auth(token: str) -> dict[str, str]:
 
 
 def test_create_join_start_flow():
-    client = TestClient(create_app())
+    client = make_client()
 
     created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
     assert created.status_code == 200
@@ -38,7 +36,7 @@ def test_create_join_start_flow():
 
 
 def test_duplicate_command_id_is_idempotent():
-    client = TestClient(create_app())
+    client = make_client()
     created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
     game_id = created.json()["game_id"]
     join_code = created.json()["join_code"]
@@ -54,7 +52,7 @@ def test_duplicate_command_id_is_idempotent():
 
 
 def test_only_seated_players_can_submit_commands():
-    client = TestClient(create_app())
+    client = make_client()
     created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
     game_id = created.json()["game_id"]
 
@@ -67,7 +65,7 @@ def test_only_seated_players_can_submit_commands():
 
 
 def test_create_game_accepts_expected_player_count():
-    client = TestClient(create_app())
+    client = make_client()
     created = client.post("/games", json={"display_name": "Tedy", "expected_player_count": 4}, headers=_auth("auth-tedy"))
     assert created.status_code == 200
     game_id = created.json()["game_id"]
@@ -77,13 +75,13 @@ def test_create_game_accepts_expected_player_count():
 
 
 def test_create_game_rejects_out_of_range_expected_player_count():
-    client = TestClient(create_app())
+    client = make_client()
     response = client.post("/games", json={"display_name": "Tedy", "expected_player_count": 1}, headers=_auth("auth-tedy"))
     assert response.status_code == 422  # Pydantic schema validation, not a domain error
 
 
 def test_cannot_create_second_active_game_while_hosting_one():
-    client = TestClient(create_app())
+    client = make_client()
     first = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
     assert first.status_code == 200
 
@@ -93,7 +91,7 @@ def test_cannot_create_second_active_game_while_hosting_one():
 
 
 def test_create_game_is_rate_limited_per_ip():
-    client = TestClient(create_app())
+    client = make_client()
     # Different hosts each time so the one-active-game-per-host rule (tested
     # above) doesn't shadow what's actually being tested here.
     for i in range(5):
@@ -106,7 +104,7 @@ def test_create_game_is_rate_limited_per_ip():
 
 
 def test_join_game_is_rate_limited_per_ip():
-    client = TestClient(create_app())
+    client = make_client()
     for _ in range(10):
         response = client.post("/games/join", json={"join_code": "NOSUCH1", "display_name": "X"}, headers=_auth("auth-prober"))
         assert response.status_code == 404
