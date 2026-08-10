@@ -1,8 +1,8 @@
+# Python (apps/api)
 __pycache__/
 *.pyc
 .venv/
 venv/
-.env
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
@@ -10,4 +10,14 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# Node (apps/web)
+node_modules/
+.next/
+.vercel/
+*.tsbuildinfo
+
+# Shared
+.env
+.env.local
 .DS_Store

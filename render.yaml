@@ -8,6 +8,12 @@ services:
                        # three land in the same physical region with zero
                        # extra config on the Vercel side
     branch: main
+    rootDir: apps/api  # monorepo: apps/api (this service) + apps/web (Vercel)
+                        # + supabase/ (migrations, applied separately) share
+                        # one repo — see root README.md
+    buildFilter:
+      paths:
+        - apps/api/**
     buildCommand: "uv sync --frozen"
     startCommand: "uv run uvicorn gotiate.main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health

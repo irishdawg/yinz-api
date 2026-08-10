@@ -2,24 +2,31 @@
 
 ## Source of truth
 
-`supabase/migrations/` in **this repo** — the same one Render deploys the
-FastAPI backend from. There is no separate database repo. Schema changes and
-the domain code that depends on them land in the same commit; that's the
-whole point of keeping them together.
+`supabase/migrations/` in **this repo** — a monorepo, the same one Render
+deploys `apps/api` from and Vercel will deploy `apps/web` from (see root
+`README.md`). There is no separate database repo. Schema changes and the
+domain code that depends on them land in the same commit; that's the whole
+point of keeping them together.
 
 ```
 yinz-api/
-├── src/gotiate/domain/theme_data/   # theme content — JSON stays here,
-│                                     # seeded into Postgres, not hand-entered
-│                                     # in the Supabase dashboard
+├── apps/
+│   ├── api/
+│   │   └── src/gotiate/domain/theme_data/   # theme content — JSON stays
+│   │                                         # here, seeded into Postgres,
+│   │                                         # not hand-entered in the
+│   │                                         # Supabase dashboard
+│   └── web/
 ├── supabase/
 │   ├── migrations/                  # ordered, timestamped .sql files
-│   ├── config.toml                  # safe to commit — no secrets in it
-│   └── seed.sql                     # once it exists — generated from
-│                                     # theme_data/*.json, not hand-maintained
+│   └── config.toml                  # safe to commit — no secrets in it
 ├── DATABASE.md                      # this file
-└── render.yaml
+└── render.yaml                      # scoped to apps/api (rootDir + buildFilter)
 ```
+
+`supabase/` sits at the repo root, outside both `apps/`, because it isn't
+deployed by either platform — migrations are pushed manually (below), not
+triggered by Render or Vercel's build steps.
 
 ## Remote project
 
@@ -41,8 +48,8 @@ permanent once chosen, so don't re-litigate it without a concrete reason.
 
 The project ref is not sensitive (it's the subdomain in the project's
 public URL) and is safe to have in this file. The database password and
-service-role key are not — those stay in `.env` (gitignored) and Render's
-dashboard env vars, never here.
+service-role key are not — those stay in `apps/api/.env` (gitignored) and
+Render's dashboard env vars, never here.
 
 **Two distinct trusted credentials, not one.** `gotiate_backend` is a
 direct PostgreSQL role FastAPI holds a connection pool against — it runs
@@ -81,9 +88,10 @@ live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
 - Never edit a migration once it's been applied to a shared project. Fix
   mistakes with a new forward migration.
 - Theme content (`fictional_companies_v1`, `dragons_v1`, `cats_v1`, ...)
-  lives as the JSON files already in `src/gotiate/domain/theme_data/` and
-  gets seeded from there — not typed into the Supabase UI, and not
-  hand-duplicated into a second SQL source that can drift from the JSON.
+  lives as the JSON files already in
+  `apps/api/src/gotiate/domain/theme_data/` and gets seeded from there —
+  not typed into the Supabase UI, and not hand-duplicated into a second
+  SQL source that can drift from the JSON.
 - **FastAPI remains the only authoritative gameplay writer, full stop.**
   Every table's grants revoke `INSERT`/`UPDATE`/`DELETE` from the
   `authenticated` and `anon` roles explicitly — not relying on RLS alone to
@@ -183,13 +191,13 @@ publication, as six migrations under `supabase/migrations/`
 (`create_backend_role`, `theme_content_schema`, `game_schema`,
 `rls_policies`, `grants_and_realtime`, `seed_theme_content`). See §11 of
 the domain model doc for the design rationale. Theme content is seeded
-via `scripts/generate_theme_seed.py`, which reads
-`src/gotiate/domain/theme_data/*.json` — re-run it and paste the output
-into a fresh migration whenever theme content changes; never hand-edit an
-applied migration.
+via `apps/api/scripts/generate_theme_seed.py`, which reads
+`apps/api/src/gotiate/domain/theme_data/*.json` — re-run it and paste the
+output into a fresh migration whenever theme content changes; never
+hand-edit an applied migration.
 
 `gotiate_backend`'s password is set and `GOTIATE_BACKEND_DATABASE_URL` is
-in `.env`, verified against the live project.
+in `apps/api/.env`, verified against the live project.
 
 `engine.new_id()` now returns `str(uuid.uuid4())` (canonical dashed form)
 for clean Postgres `uuid` column compatibility. Full test suite (77
@@ -206,3 +214,7 @@ Next up:
   stub — the actual blocker before any public deployment.
 - Add `GOTIATE_BACKEND_DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to
   Render's dashboard env vars once the Supabase-backed repository lands.
+- Create the actual Render service and Vercel project — neither exists
+  yet. Render: point at this repo, `render.yaml` already scopes it to
+  `apps/api`. Vercel: set Root Directory to `apps/web` once that app is
+  scaffolded (see `apps/web/README.md`).
