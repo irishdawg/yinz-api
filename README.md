@@ -57,9 +57,11 @@ push` is still a deliberate, manual step (see `DATABASE.md`).
   one creates a game and gets a scannable QR (encoding the real
   `https://gotiate-atlasrising.vercel.app/join/<code>` URL, not a bare
   path), the other joins via the code, both land in the same game.
-  Real server-side processing time on Render for that test: 1.9ms
-  (create), 2.9ms (join) — Vercel's `iad1` and Render's `virginia` are
-  effectively network neighbors.
+- Games now actually persist — `PostgresGameRepository` replaced the
+  in-memory one (see `DATABASE.md`). Verified on the live Render
+  deployment specifically, not just locally: created a real game, killed
+  the server process entirely, confirmed a brand new process still had
+  it.
 
 `FastAPI remains the sole authoritative source of truth.` Supabase stores
 and distributes state; it never decides it. The frontend talks to

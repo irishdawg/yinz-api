@@ -211,20 +211,44 @@ create game → join-code + QR → join is live end to end (`apps/web`),
 verified against the live Supabase project in a real browser, not just
 unit-tested. That was the last blocker before any public deployment.
 
+`PostgresGameRepository` (`apps/api/src/gotiate/persistence/postgres_repository.py`)
+is live, replacing `InMemoryGameRepository` in production — games created
+through the UI now actually persist. Verified against the live project
+both locally and on the real Render deployment: real rows confirmed via
+direct SQL query, and a game created by one server process confirmed
+readable, correctly, after that process was fully killed and a brand new
+one queried it. `create_app()` now requires an explicit `repository`
+argument (no default) specifically so the test suite can never fall
+through to a real Postgres connection just because `.env` has
+`GOTIATE_BACKEND_DATABASE_URL` loaded — every test passes
+`InMemoryGameRepository()` explicitly; only the module-level `app` in
+`main.py` (what `uvicorn` actually serves) builds the real one.
+
+Two correctness issues specific to a real concurrent store (not
+translation busywork) were caught and fixed as part of this, not left as
+latent gaps — see the commit message on `PostgresGameRepository` for
+detail: a stale-pre-lock-read bug in `join_game`/`submit_command` that
+the in-memory implementation's shared-object-reference semantics had been
+silently masking, and a torn-read risk on the unlocked `get()` path
+(9 sequential SELECTs reconstructing one `Game` aggregate) fixed with a
+`REPEATABLE READ READ ONLY` snapshot transaction.
+
 Next up:
-- A `reserve_count_remaining`-vs-`holdings` invariant test — deferred
-  until the Postgres-backed `GameRepository` exists, since the in-memory
-  repository has no second source of truth to drift against yet.
-- Build the actual Supabase-backed `GameRepository` (satisfies the
-  existing `GameRepository` Protocol in `persistence/repository.py`),
-  swapping it in for `InMemoryGameRepository` — currently every created
-  game only survives for the life of one running `uvicorn` process.
-- Add `GOTIATE_BACKEND_DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
-  `GOTIATE_GATEWAY_SECRET` to Render's dashboard env vars, and the
-  matching Vercel env vars (`NEXT_PUBLIC_SUPABASE_URL`,
-  `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `GOTIATE_API_URL`,
-  `GOTIATE_GATEWAY_SECRET`), once the Render/Vercel projects exist.
-- Create the actual Render service and Vercel project — neither exists
-  yet. Render: point at this repo, `render.yaml` already scopes it to
-  `apps/api`. Vercel: set Root Directory to `apps/web` (see
-  `apps/web/README.md`).
+- A `reserve_count_remaining`-vs-`holdings` invariant test, and more
+  generally a small opt-in integration test suite against real Postgres
+  (marked/skipped by default so the 84-test offline suite stays
+  untouched) — deliberately deferred past this pass; verification here
+  was manual, matching how Vercel/Render themselves were stood up.
+- `get()`/`get_by_join_code()` do 9 sequential per-table SELECTs rather
+  than one aggregate query — fine while every UI-reachable game is
+  LOBBY-phase (5 of those 9 return empty), real optimization work once
+  gameplay commands (proposals/pools/holdings) are UI-reachable.
+- Add `SUPABASE_SERVICE_ROLE_KEY` and the matching Vercel env vars
+  (`GOTIATE_API_URL` now points at the real Render URL,
+  `NEXT_PUBLIC_SITE_URL` at the real Vercel URL — both already set) to
+  round out parity between the two platforms' dashboards.
+- Staging/production split on both Render and Vercel — deliberately
+  deferred; both currently deploy from `main` only. Render's service is
+  already grouped under a **Gotiate** Render Project with a `Staging`
+  environment specifically so a `Production` environment can join it
+  later without restructuring.
