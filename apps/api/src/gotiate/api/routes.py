@@ -46,8 +46,13 @@ async def create_game(
     game, events = engine.create_game(
         actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now(), expected_player_count=body.expected_player_count
     )
-    await repo.create(game)
-    await repo.append_events(events)
+    # No existing row to lock for a brand-new game id -- lock_for() here is
+    # supplying the same atomic transaction context every other mutating
+    # route gets (create + append_events land together or not at all), not
+    # protecting a row that doesn't exist yet.
+    async with repo.lock_for(game.id):
+        await repo.create(game)
+        await repo.append_events(events)
     assert game.host_player_id is not None
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=game.host_player_id)
 
@@ -65,6 +70,14 @@ async def join_game(
         raise HTTPException(status_code=404, detail="no game with that code")
 
     async with repo.lock_for(game.id):
+        # Re-fetch under the lock -- the read above is existence-check-only.
+        # A Postgres get() returns a fresh snapshot every call (unlike the
+        # in-memory repository, where it's the same live object reference),
+        # so without this the engine could validate expected_version against
+        # a game.version that's already stale by the time the lock lands.
+        game = await repo.get(game.id)
+        if game is None:
+            raise HTTPException(status_code=404, detail="no game with that code")
         try:
             player, events = engine.join_game(game, actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now())
         except DomainError as exc:
@@ -101,6 +114,15 @@ async def submit_command(
         raise HTTPException(status_code=404, detail="no such game")
 
     async with repo.lock_for(game_id):
+        # Re-fetch under the lock, same reasoning as join_game -- and
+        # re-derive `player` from this fresh game, not the pre-lock one,
+        # since it's the same class of staleness (a player's
+        # ready_to_close/influence could equally be stale between the two
+        # reads, even though today's 403 check below doesn't depend on it).
+        game = await repo.get(game_id)
+        if game is None:
+            raise HTTPException(status_code=404, detail="no such game")
+
         existing = await repo.get_receipt(game_id, body.command_id)
         if existing is not None:
             # Idempotent replay — same command_id, don't reprocess (§08).

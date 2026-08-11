@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "slowapi>=0.1.9",
     "pyjwt[crypto]>=2.13.0",
+    "psycopg[binary,pool]>=3.3.4",
 ]
 
 [dependency-groups]

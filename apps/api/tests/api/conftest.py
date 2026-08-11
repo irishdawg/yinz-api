@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from gotiate.api.deps import get_auth_user_id
 from gotiate.main import create_app
+from gotiate.persistence.repository import InMemoryGameRepository
 from gotiate.settings import settings
 
 
@@ -27,6 +28,9 @@ def make_client() -> TestClient:
     secret (GatewaySecretMiddleware is app-wide ASGI middleware, so
     dependency_overrides can't reach it — every request needs the header,
     same as a real Next.js gateway call would send)."""
-    app = create_app()
+    # Explicit InMemoryGameRepository, always -- create_app() has no default
+    # specifically so tests can never accidentally fall through to a real
+    # Postgres connection (see main.py's create_app docstring).
+    app = create_app(repository=InMemoryGameRepository())
     app.dependency_overrides[get_auth_user_id] = _stub_get_auth_user_id
     return TestClient(app, headers={"x-gotiate-gateway-key": settings.gotiate_gateway_secret or ""})

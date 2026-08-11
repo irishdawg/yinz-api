@@ -4,6 +4,7 @@ import logging
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,11 +15,21 @@ from starlette.types import ASGIApp
 
 from gotiate.api.rate_limit import limiter
 from gotiate.api.routes import router
-from gotiate.persistence.repository import InMemoryGameRepository
+from gotiate.persistence.repository import GameRepository, InMemoryGameRepository
 from gotiate.settings import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("gotiate")
+
+# NOTE for local Windows dev only (Render/Linux is unaffected either way):
+# psycopg's async mode needs a selector-based event loop. uvicorn hardcodes
+# asyncio.ProactorEventLoop on Windows (uvicorn/loops/asyncio.py) UNLESS
+# use_subprocess is true (reload or workers > 1) — a global
+# set_event_loop_policy() here would have no effect, since uvicorn passes an
+# explicit loop_factory to asyncio.Runner, bypassing the policy entirely.
+# Confirmed empirically: `uvicorn gotiate.main:app --reload` gets a working
+# SelectorEventLoop for free; the same command without --reload doesn't.
+# Always run local dev with --reload (already the documented command).
 
 _GATEWAY_HEADER = "x-gotiate-gateway-key"
 _REQUEST_ID_HEADER = "x-request-id"
@@ -94,10 +105,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def create_app() -> FastAPI:
+def create_app(*, repository: GameRepository, lifespan=None) -> FastAPI:
     """Factory rather than a bare module-level app — tests need a fresh
-    repository (and rate-limit state) per test rather than sharing either
-    across the whole session."""
+    rate-limit state per test rather than sharing it across the whole
+    session. `repository` is required, not defaulted: `.env` already has a
+    live `GOTIATE_BACKEND_DATABASE_URL` loaded unconditionally for every
+    process including test runs, so any design that picked in-memory-vs-
+    Postgres by checking whether that value is set would make the test
+    suite start hitting real Supabase the moment this landed. Requiring it
+    explicitly removes that failure mode structurally: every test passes
+    InMemoryGameRepository(); only the module-level `app` below (what
+    `uvicorn gotiate.main:app` actually serves, never imported by tests)
+    constructs and passes a real PostgresGameRepository."""
     limiter.reset()
 
     is_production = settings.environment != "development"
@@ -106,8 +125,9 @@ def create_app() -> FastAPI:
         docs_url=None if is_production else "/docs",
         redoc_url=None if is_production else "/redoc",
         openapi_url=None if is_production else "/openapi.json",
+        lifespan=lifespan,
     )
-    app.state.repository = InMemoryGameRepository()
+    app.state.repository = repository
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _boring_rate_limit_handler)
 
@@ -132,4 +152,40 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+def _create_production_app() -> FastAPI:
+    if not settings.gotiate_backend_database_url:
+        logger.warning("GOTIATE_BACKEND_DATABASE_URL is not set — falling back to InMemoryGameRepository. Games will not persist.")
+        return create_app(repository=InMemoryGameRepository())
+
+    # Local import: only pulls in psycopg/psycopg_pool when actually needed,
+    # so an InMemoryGameRepository-only environment (e.g. a contributor's
+    # machine without a DB configured) doesn't need them installed to run
+    # the app at all.
+    from gotiate.persistence.postgres_repository import PostgresGameRepository, create_pool
+
+    # Constructing the pool is synchronous (only .open() is a coroutine),
+    # so PostgresGameRepository can be built right away and handed to
+    # create_app() like any other repository — the lifespan below just
+    # opens/closes the same pool object around the app's actual runtime.
+    pool = create_pool(
+        settings.gotiate_backend_database_url,
+        min_size=settings.gotiate_db_pool_min_size,
+        max_size=settings.gotiate_db_pool_max_size,
+    )
+    repository = PostgresGameRepository(pool)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await pool.open()
+        # Fail loudly at process start if the connection string is broken,
+        # not on the first real request.
+        async with pool.connection() as conn:
+            await conn.execute("select 1")
+        logger.info("Postgres pool opened and health-checked")
+        yield
+        await pool.close()
+
+    return create_app(repository=repository, lifespan=lifespan)
+
+
+app = _create_production_app()

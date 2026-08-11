@@ -6,6 +6,7 @@ same Protocol later without engine or API code changing (domain model §08,
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from gotiate.domain.entities import CommandReceipt, Game, GamePhase
@@ -21,7 +22,14 @@ class GameRepository(Protocol):
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None: ...
     async def record_receipt(self, receipt: CommandReceipt) -> None: ...
     async def find_active_game_hosted_by(self, auth_user_id: str) -> Game | None: ...
-    def lock_for(self, game_id: str) -> asyncio.Lock: ...
+
+    def lock_for(self, game_id: str) -> AbstractAsyncContextManager[None]:
+        # asyncio.Lock (InMemoryGameRepository) and a real `SELECT ... FOR
+        # UPDATE`-backed transaction (PostgresGameRepository) are both valid
+        # async context managers satisfying "one writer per game" (§08) --
+        # deliberately not typed as `asyncio.Lock` specifically, since that
+        # was always just the in-memory stand-in, not the actual contract.
+        ...
 
 
 class InMemoryGameRepository:
