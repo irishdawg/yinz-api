@@ -12,17 +12,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from gotiate.api.deps import get_auth_user_id, get_player_name_repository, get_repository
 from gotiate.api.rate_limit import limiter
-from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest
+from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest, PlayerNameOffer
 from gotiate.domain import engine
 from gotiate.domain.entities import CommandReceipt, CommandStatus
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
-from gotiate.persistence.player_names import PlayerNameRepository
+from gotiate.persistence.player_names import NoAvailableNameError, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
 _INVALID_NAME_DETAIL = {"error_code": "invalid_display_name", "message": "choose a name from the provided list"}
+_NO_NAMES_AVAILABLE_DETAIL = {"error_code": "no_names_available", "message": "try again in a moment"}
 
 router = APIRouter(prefix="/games", tags=["games"])
+player_names_router = APIRouter(prefix="/player-names", tags=["player-names"])
 
 
 def _now() -> datetime:
@@ -204,3 +206,54 @@ async def submit_command(
         )
 
     return project(game, PlayerAudience(player.game_player_id))
+
+
+async def _names_already_in_game(repo: GameRepository, join_code: str | None) -> set[str]:
+    # join_code is only present when offering a name for the *join* flow --
+    # create_game has no roster yet to collide with. A bad/expired code
+    # just means an empty exclude set, not an error; the actual join
+    # attempt (routes above) is where a bad code gets a real 404.
+    if not join_code:
+        return set()
+    game = await repo.get_by_join_code(join_code.upper())
+    return {p.display_name for p in game.players} if game else set()
+
+
+@player_names_router.get("/initial", response_model=PlayerNameOffer)
+@limiter.limit("5/hour")
+async def offer_initial_name(
+    request: Request,
+    join_code: str | None = None,
+    auth_user_id: str = Depends(get_auth_user_id),
+    repo: GameRepository = Depends(get_repository),
+    name_repo: PlayerNameRepository = Depends(get_player_name_repository),
+) -> PlayerNameOffer:
+    # Golden-eligible -- strictly rate-limited (unlike reroll below) since
+    # each call is an independent 1/500 draw and there's no game/player row
+    # yet at this point to pin "you already got your one initial roll" to.
+    exclude = await _names_already_in_game(repo, join_code)
+    try:
+        name, is_golden = await name_repo.offer_initial_name(exclude=exclude)
+    except NoAvailableNameError:
+        raise HTTPException(status_code=503, detail=_NO_NAMES_AVAILABLE_DETAIL)
+    return PlayerNameOffer(name=name, is_golden=is_golden)
+
+
+@player_names_router.get("/reroll", response_model=PlayerNameOffer)
+async def offer_reroll_name(
+    request: Request,
+    exclude: str,
+    join_code: str | None = None,
+    auth_user_id: str = Depends(get_auth_user_id),
+    repo: GameRepository = Depends(get_repository),
+    name_repo: PlayerNameRepository = Depends(get_player_name_repository),
+) -> PlayerNameOffer:
+    # Never golden -- no extra rate limit beyond the global default, since
+    # there's nothing here worth farming.
+    already_taken = await _names_already_in_game(repo, join_code)
+    already_taken.add(exclude)
+    try:
+        name = await name_repo.offer_reroll_name(exclude=already_taken)
+    except NoAvailableNameError:
+        raise HTTPException(status_code=503, detail=_NO_NAMES_AVAILABLE_DETAIL)
+    return PlayerNameOffer(name=name, is_golden=False)

@@ -26,3 +26,8 @@ class GameSummary(BaseModel):
     game_id: str
     join_code: str
     game_player_id: str
+
+
+class PlayerNameOffer(BaseModel):
+    name: str
+    is_golden: bool
