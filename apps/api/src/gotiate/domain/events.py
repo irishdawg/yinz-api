@@ -42,6 +42,7 @@ class EventType(StrEnum):
     PORTFOLIOS_REVEALED = "PORTFOLIOS_REVEALED"
     GAME_SCORED = "GAME_SCORED"
     GAME_ENDED = "GAME_ENDED"
+    GAME_CANCELLED = "GAME_CANCELLED"
 
 
 class GameEvent(BaseModel):

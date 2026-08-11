@@ -65,6 +65,7 @@ def create_game(
     now: datetime,
     config: GameConfig | None = None,
     expected_player_count: int | None = None,
+    is_golden_name: bool = False,
 ) -> tuple[Game, list[GameEvent]]:
     if expected_player_count is not None and not (2 <= expected_player_count <= 6):
         raise IllegalCommandError("expected player count must be between 2 and 6")
@@ -82,6 +83,7 @@ def create_game(
         auth_user_id=actor_auth_user_id,
         seat=0,
         display_name=display_name,
+        is_golden_name=is_golden_name,
         influence_available=game.config.starting_influence,
     )
     game.host_player_id = host.game_player_id
@@ -96,7 +98,7 @@ def create_game(
 
 
 def join_game(
-    game: Game, *, actor_auth_user_id: str, display_name: str, now: datetime
+    game: Game, *, actor_auth_user_id: str, display_name: str, now: datetime, is_golden_name: bool = False
 ) -> tuple[GamePlayer, list[GameEvent]]:
     if game.phase != GamePhase.LOBBY:
         raise IllegalCommandError("game is no longer accepting players")
@@ -112,6 +114,7 @@ def join_game(
         auth_user_id=actor_auth_user_id,
         seat=len(game.players),
         display_name=display_name,
+        is_golden_name=is_golden_name,
         influence_available=game.config.starting_influence,
     )
     game.players.append(player)
@@ -322,6 +325,16 @@ def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: 
 # --------------------------------------------------------------------------
 # Command handlers
 # --------------------------------------------------------------------------
+
+
+def _handle_cancel_game(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    if game.phase in (GamePhase.SCORED, GamePhase.CANCELLED):
+        raise IllegalCommandError("game has already ended")
+    if actor_game_player_id != game.host_player_id:
+        raise IllegalCommandError("only the host can cancel")
+
+    game.phase = GamePhase.CANCELLED
+    return [_emit(game, now, EventType.GAME_CANCELLED, actor=actor_game_player_id, payload={})]
 
 
 def _handle_set_expected_player_count(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -712,6 +725,7 @@ def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_i
 
 
 _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
+    "CANCEL_GAME": _handle_cancel_game,
     "SET_EXPECTED_PLAYER_COUNT": _handle_set_expected_player_count,
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,

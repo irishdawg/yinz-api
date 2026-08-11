@@ -5,19 +5,36 @@ import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
 import { usePlayerName } from "@/lib/usePlayerName";
 
+interface ThemeSetSummary {
+  theme_set_id: string;
+  name: string;
+}
+
 export default function Home() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [expectedPlayerCount, setExpectedPlayerCount] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [existingGameId, setExistingGameId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const { name, isGolden, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName();
+  const { name, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName();
+  const [themeSets, setThemeSets] = useState<ThemeSetSummary[]>([]);
+  const [themeSetId, setThemeSetId] = useState("");
 
   useEffect(() => {
     ensureAnonymousSession()
       .then(() => {
         setReady(true);
         requestInitial();
+        fetch("/api/theme-sets")
+          .then((response) => response.json())
+          .then((data: ThemeSetSummary[]) => {
+            setThemeSets(data);
+            if (data.length > 0) setThemeSetId(data[0].theme_set_id);
+          })
+          .catch(() => {
+            // Non-fatal -- create_game just falls back to the server's default theme set.
+          });
       })
       .catch(() => setError("Couldn't start a session. Refresh and try again."));
     // requestInitial is stable (no joinCode on this page) -- fine to omit re-runs on every render.
@@ -29,6 +46,7 @@ export default function Home() {
     if (!name) return;
     setSubmitting(true);
     setError(null);
+    setExistingGameId(null);
     try {
       const response = await fetch("/api/games", {
         method: "POST",
@@ -36,10 +54,17 @@ export default function Home() {
         body: JSON.stringify({
           display_name: name,
           expected_player_count: expectedPlayerCount ? Number(expectedPlayerCount) : undefined,
+          theme_set_id: themeSetId || undefined,
         }),
       });
       const data = await response.json();
       if (!response.ok) {
+        // active_game_exists carries the existing game's id -- surface a
+        // way back into it instead of just a dead-end error string, since
+        // there's nothing else on this page that could tell you it exists.
+        if (data.detail?.error_code === "active_game_exists" && data.detail?.game_id) {
+          setExistingGameId(data.detail.game_id);
+        }
         throw new Error(typeof data.detail === "string" ? data.detail : (data.detail?.message ?? "Couldn't create the game."));
       }
       router.push(`/game/${data.game_id}?code=${data.join_code}`);
@@ -57,12 +82,9 @@ export default function Home() {
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1">
             <span className="text-sm font-medium text-zinc-700">Your name</span>
-            <div className={`flex items-center justify-between rounded border px-3 py-2 ${isGolden ? "border-amber-400 bg-amber-50" : "border-zinc-300 bg-white"}`}>
-              <span data-testid="assigned-name" className={`font-medium ${isGolden ? "text-amber-700" : "text-zinc-900"}`}>
+            <div className="flex items-center justify-between rounded border border-zinc-300 bg-white px-3 py-2">
+              <span data-testid="assigned-name" className="font-medium text-zinc-900">
                 {nameLoading ? "…" : (name ?? "—")}
-                {isGolden && !nameLoading && (
-                  <span className="ml-2 rounded-full bg-amber-400 px-2 py-0.5 text-xs font-bold text-white">GOLDEN</span>
-                )}
               </span>
               <button
                 type="button"
@@ -74,6 +96,22 @@ export default function Home() {
               </button>
             </div>
           </div>
+          {themeSets.length > 0 && (
+            <label className="flex flex-col gap-1">
+              <span className="text-sm font-medium text-zinc-700">Theme</span>
+              <select
+                value={themeSetId}
+                onChange={(event) => setThemeSetId(event.target.value)}
+                className="rounded border border-zinc-300 bg-white px-3 py-2 text-zinc-900"
+              >
+                {themeSets.map((t) => (
+                  <option key={t.theme_set_id} value={t.theme_set_id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="flex flex-col gap-1">
             <span className="text-sm font-medium text-zinc-700">Expected players (optional)</span>
             <input
@@ -86,6 +124,15 @@ export default function Home() {
             />
           </label>
           {(error || nameError) && <p className="text-sm text-red-600">{error ?? nameError}</p>}
+          {existingGameId && (
+            <button
+              type="button"
+              onClick={() => router.push(`/game/${existingGameId}`)}
+              className="text-sm font-medium text-zinc-700 underline"
+            >
+              Go to your existing game
+            </button>
+          )}
           <button
             type="submit"
             disabled={!ready || !name || submitting}

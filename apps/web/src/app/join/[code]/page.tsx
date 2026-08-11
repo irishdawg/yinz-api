@@ -11,7 +11,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const { name, isGolden, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName(code);
+  const { name, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName(code);
 
   useEffect(() => {
     ensureAnonymousSession()
@@ -54,12 +54,9 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1">
             <span className="text-sm font-medium text-zinc-700">Your name</span>
-            <div className={`flex items-center justify-between rounded border px-3 py-2 ${isGolden ? "border-amber-400 bg-amber-50" : "border-zinc-300 bg-white"}`}>
-              <span data-testid="assigned-name" className={`font-medium ${isGolden ? "text-amber-700" : "text-zinc-900"}`}>
+            <div className="flex items-center justify-between rounded border border-zinc-300 bg-white px-3 py-2">
+              <span data-testid="assigned-name" className="font-medium text-zinc-900">
                 {nameLoading ? "…" : (name ?? "—")}
-                {isGolden && !nameLoading && (
-                  <span className="ml-2 rounded-full bg-amber-400 px-2 py-0.5 text-xs font-bold text-white">GOLDEN</span>
-                )}
               </span>
               <button
                 type="button"

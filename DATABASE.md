@@ -239,6 +239,37 @@ create_game/join_game time, and frozen from then on. The original
 `gotiate_backend`'s password is set and `GOTIATE_BACKEND_DATABASE_URL` is
 in `apps/api/.env`, verified against the live project.
 
+**Golden-name odds moved off the free-preview endpoints and onto actual
+seat creation.** `game_players` gained an `is_golden_name` boolean
+(`20260811223018_game_players_is_golden_name.sql`). Previously the 1/500
+golden coin-flip happened on `/player-names/initial` — a free, unbound
+call anyone could hit repeatedly with a fresh anonymous JWT, no seat ever
+consumed. Now `offer_name`/`reroll` never roll golden at all;
+`create_game`/`join_game` each roll independently, exactly once, at the
+moment a real seat is created — so getting more attempts means actually
+filling seats (capped at 6/game) or creating more games
+(`create_game`'s existing 5/hour-per-IP limit already bounds that). Also
+dropped the old 5/hour limit on `/player-names/initial` specifically,
+since there's nothing left on that path worth rate-limiting. Persisted
+per-player rather than kept as a one-time event, so every seated player
+can see who's golden live via the ordinary roster projection — the whole
+point of it being rare is that it's visible to everyone, not a private
+flag only the golden player's own client knows about.
+
+**`games.phase` gained a `CANCELLED` terminal state**
+(`20260811232821_games_phase_cancelled.sql`, extending the existing
+`games_phase_check` constraint). `find_active_game_hosted_by`'s
+one-active-game-per-host rule had no escape hatch short of playing a
+game all the way to `SCORED` — a host who abandons a lobby or a
+negotiation-in-progress was permanently blocked from creating another.
+`CANCEL_GAME` (host-only, legal in any phase before `SCORED`) is the
+fix. Deliberately a distinct phase from `SCORED`, not a reuse of it —
+a cancelled game has no waterline, no winner, nothing meaningful to
+replay, and reusing `SCORED` would mean either running the real scoring
+algorithm against a possibly-still-in-lobby game or special-casing
+`project()`'s scored branch to detect "fake" scores. A new enum value
+was cheaper and more honest than either.
+
 `engine.new_id()` now returns `str(uuid.uuid4())` (canonical dashed form)
 for clean Postgres `uuid` column compatibility. Full test suite (77
 tests) still green.

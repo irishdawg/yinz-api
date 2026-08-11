@@ -23,6 +23,12 @@ class GamePhase(StrEnum):
     NEGOTIATION = "NEGOTIATION"
     CLOSING = "CLOSING"
     SCORED = "SCORED"
+    # Host-initiated, any phase before SCORED (CANCEL_GAME) -- terminal,
+    # like SCORED, but deliberately distinct from it: no waterline, no
+    # winner, nothing to replay. Exists specifically so
+    # find_active_game_hosted_by's one-active-game-per-host rule has an
+    # escape hatch other than waiting out real gameplay to completion.
+    CANCELLED = "CANCELLED"
 
 
 class HoldingZone(StrEnum):
@@ -201,6 +207,11 @@ class GamePlayer(BaseModel):
     auth_user_id: str
     seat: int
     display_name: str
+    # Rolled once, server-side, at the moment this player was actually
+    # seated (create_game's host / join_game's joiner) -- never at the
+    # free-preview/reroll stage, so farming it means actually consuming one
+    # of a game's <=6 seats, not just reloading a page. See player_names.py.
+    is_golden_name: bool = False
     influence_available: int
     influence_committed: int = 0
     influence_spent: int = 0

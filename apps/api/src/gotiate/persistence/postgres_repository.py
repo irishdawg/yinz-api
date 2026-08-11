@@ -274,11 +274,12 @@ class PostgresGameRepository:
         # versioning already exists for elsewhere in this schema.
         await cur.execute(
             """
-            insert into game_players (id, game_id, seat, display_name, influence_available,
+            insert into game_players (id, game_id, seat, display_name, is_golden_name, influence_available,
                                        influence_committed, influence_spent, reserve_count_remaining)
-            values (%s, %s, %s, %s, %s, %s, %s, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             on conflict (id) do update set
                 seat = excluded.seat, display_name = excluded.display_name,
+                is_golden_name = excluded.is_golden_name,
                 influence_available = excluded.influence_available,
                 influence_committed = excluded.influence_committed,
                 influence_spent = excluded.influence_spent,
@@ -289,6 +290,7 @@ class PostgresGameRepository:
                 game_id,
                 player.seat,
                 player.display_name,
+                player.is_golden_name,
                 player.influence_available,
                 player.influence_committed,
                 player.influence_spent,
@@ -453,7 +455,7 @@ class PostgresGameRepository:
                     select g.id from games g
                     join game_players gp on gp.id = g.host_player_id
                     join game_player_private gpp on gpp.game_player_id = gp.id
-                    where gpp.auth_user_id = %s and g.phase != 'SCORED'
+                    where gpp.auth_user_id = %s and g.phase not in ('SCORED', 'CANCELLED')
                     limit 1
                     """,
                     (auth_user_id,),
@@ -488,6 +490,7 @@ def _to_game(
                 auth_user_id=str(priv["auth_user_id"]) if priv.get("auth_user_id") is not None else "",
                 seat=pr["seat"],
                 display_name=pr["display_name"],
+                is_golden_name=pr["is_golden_name"],
                 influence_available=pr["influence_available"],
                 influence_committed=pr["influence_committed"],
                 influence_spent=pr["influence_spent"],

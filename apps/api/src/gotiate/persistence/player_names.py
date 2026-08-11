@@ -7,14 +7,20 @@ content-moderation surface to build at all.
 Two distinct "already taken" concerns, both handled via `exclude`, not two
 separate mechanisms: the name currently shown on screen (reroll only, so
 "change name" always gives something different) and every display name
-already held by a seated player in the game being joined (both initial
-offer and reroll, resolved by routes.py from `join_code` before calling
-in here) — this repository only tracks the global pool and usage counts,
-it has no notion of "this game's roster" itself.
+already held by a seated player in the game being joined (both offer and
+reroll, resolved by routes.py from `join_code` before calling in here) —
+this repository only tracks the global pool and usage counts, it has no
+notion of "this game's roster" itself.
 
-Golden names: rare (1/500), drawn only on the very first name offered,
-never via reroll. The draw logic lives here, not in SQL or routes.py, so
-it's one place, testable with an injectable RNG.
+Golden names: rare (1/500), rolled only by `roll_golden_name` -- called by
+routes.py exactly once per *actual seat* (create_game's host, join_game's
+joiner), never by the free-preview `offer_name`/reroll endpoints. This is
+the whole point: `offer_name` structurally cannot draw gold no matter how
+many times it's called, so farming it means actually filling a real seat
+in a real game (capped at 6, and creating a fresh game to get more seats
+is already rate-limited at the route level) rather than just reloading a
+page. The draw logic lives here, not in SQL or routes.py, so it's one
+place, testable with an injectable RNG.
 """
 
 from __future__ import annotations
@@ -46,8 +52,8 @@ class NoAvailableNameError(Exception):
 class PlayerNameRepository(Protocol):
     async def is_valid_name(self, name: str) -> bool: ...
     async def mark_name_used(self, name: str) -> None: ...
-    async def offer_initial_name(self, *, exclude: set[str] = ..., rng: RandomLike = ...) -> tuple[str, bool]: ...
-    async def offer_reroll_name(self, *, exclude: set[str]) -> str: ...
+    async def offer_name(self, *, exclude: set[str] = ...) -> str: ...
+    async def roll_golden_name(self, *, exclude: set[str] = ...) -> str | None: ...
 
 
 class InMemoryPlayerNameRepository:
@@ -55,15 +61,19 @@ class InMemoryPlayerNameRepository:
     and has nothing to offer) so the existing tests using arbitrary display
     names ("Tedy", "Mortia", ...) don't need to know about the seed pool at
     all. Pass explicit `names`/`golden_names` for tests that actually
-    exercise offering. Deliberately doesn't model `is_active` or the
+    exercise offering. `rng` is constructor-level (not per-call) so a
+    forced RNG can be wired all the way through `make_client()` and
+    exercised via real HTTP requests to create_game/join_game, not just
+    called directly. Deliberately doesn't model `is_active` or the
     least-used-K weighting the real Postgres implementation does -- picks
     deterministically (sorted-first) for simple, predictable test
     assertions; nothing here currently needs to assert on distribution
     fairness specifically."""
 
-    def __init__(self, names: set[str] | None = None, golden_names: set[str] | None = None) -> None:
+    def __init__(self, names: set[str] | None = None, golden_names: set[str] | None = None, rng: RandomLike = _random_module) -> None:
         self._names = names
         self._golden_names = golden_names or set()
+        self._rng = rng
         self.usage: dict[str, int] = {}
 
     async def is_valid_name(self, name: str) -> bool:
@@ -72,23 +82,25 @@ class InMemoryPlayerNameRepository:
     async def mark_name_used(self, name: str) -> None:
         self.usage[name] = self.usage.get(name, 0) + 1
 
-    async def offer_initial_name(self, *, exclude: set[str] = frozenset(), rng: RandomLike = _random_module) -> tuple[str, bool]:
-        if rng.random() < _GOLDEN_ODDS:
-            golden_pool = self._golden_names - exclude
-            if golden_pool:
-                return sorted(golden_pool)[0], True
-        return await self.offer_reroll_name(exclude=exclude), False
-
-    async def offer_reroll_name(self, *, exclude: set[str]) -> str:
+    async def offer_name(self, *, exclude: set[str] = frozenset()) -> str:
         pool = (self._names or set()) - self._golden_names - exclude
         if not pool:
             raise NoAvailableNameError("no eligible names left to offer")
         return sorted(pool)[0]
 
+    async def roll_golden_name(self, *, exclude: set[str] = frozenset()) -> str | None:
+        if self._rng.random() >= _GOLDEN_ODDS:
+            return None
+        golden_pool = self._golden_names - exclude
+        if not golden_pool:
+            return None
+        return sorted(golden_pool)[0]
+
 
 class PostgresPlayerNameRepository:
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(self, pool: AsyncConnectionPool, rng: RandomLike = _random_module) -> None:
         self._pool = pool
+        self._rng = rng
 
     async def is_valid_name(self, name: str) -> bool:
         async with self._pool.connection() as conn:
@@ -107,21 +119,16 @@ class PostgresPlayerNameRepository:
             async with conn.cursor() as cur:
                 await cur.execute("update player_name_seeds set usage_count = usage_count + 1 where name = %s", (name,))
 
-    async def offer_initial_name(self, *, exclude: set[str] = frozenset(), rng: RandomLike = _random_module) -> tuple[str, bool]:
-        if rng.random() < _GOLDEN_ODDS:
-            golden = await self._draw(is_golden=True, exclude=exclude)
-            if golden is not None:
-                return golden, True
-        name = await self._draw(is_golden=False, exclude=exclude)
-        if name is None:
-            raise NoAvailableNameError("no eligible names left to offer")
-        return name, False
-
-    async def offer_reroll_name(self, *, exclude: set[str]) -> str:
+    async def offer_name(self, *, exclude: set[str] = frozenset()) -> str:
         name = await self._draw(is_golden=False, exclude=exclude)
         if name is None:
             raise NoAvailableNameError("no eligible names left to offer")
         return name
+
+    async def roll_golden_name(self, *, exclude: set[str] = frozenset()) -> str | None:
+        if self._rng.random() >= _GOLDEN_ODDS:
+            return None
+        return await self._draw(is_golden=True, exclude=exclude)
 
     async def _draw(self, *, is_golden: bool, exclude: set[str]) -> str | None:
         # is_active = true -- deliberately not checked in is_valid_name(),

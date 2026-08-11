@@ -80,6 +80,93 @@ def test_create_game_rejects_out_of_range_expected_player_count():
     assert response.status_code == 422  # Pydantic schema validation, not a domain error
 
 
+def test_create_game_accepts_a_real_theme_set_id():
+    from gotiate.domain import themes
+
+    client = make_client()
+    created = client.post("/games", json={"display_name": "Tedy", "theme_set_id": "dragons_v1"}, headers=_auth("auth-tedy"))
+    assert created.status_code == 200
+    game_id = created.json()["game_id"]
+
+    client.post("/games/join", json={"join_code": created.json()["join_code"], "display_name": "Mortia"}, headers=_auth("auth-mortia"))
+    client.post(f"/games/{game_id}/commands", json={"command_id": "cmd-1", "type": "START_GAME", "payload": {}}, headers=_auth("auth-tedy"))
+
+    view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy"))
+    dragon_names = {e.display_name for e in themes.get_theme_set("dragons_v1").entities}
+    assert {m["display_name"] for m in view.json()["market"]} <= dragon_names
+
+
+def test_create_game_rejects_unknown_theme_set_id():
+    client = make_client()
+    response = client.post("/games", json={"display_name": "Tedy", "theme_set_id": "does_not_exist_v1"}, headers=_auth("auth-tedy"))
+    assert response.status_code == 422
+    assert response.json()["detail"]["error_code"] == "unknown_theme_set"
+
+
+def test_list_theme_sets_returns_the_real_sets():
+    client = make_client()
+    response = client.get("/theme-sets", headers=_auth("auth-tedy"))
+    assert response.status_code == 200
+    ids = {t["theme_set_id"] for t in response.json()}
+    assert {"fictional_companies_v1", "dragons_v1", "cats_v1"} <= ids
+
+
+def test_host_can_cancel_a_lobby_game_and_then_create_a_new_one():
+    client = make_client()
+    first = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
+    game_id = first.json()["game_id"]
+
+    cancelled = client.post(
+        f"/games/{game_id}/commands", json={"command_id": "cmd-1", "type": "CANCEL_GAME", "payload": {}}, headers=_auth("auth-tedy")
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["phase"] == "CANCELLED"
+
+    second = client.post("/games", json={"display_name": "Tedy again"}, headers=_auth("auth-tedy"))
+    assert second.status_code == 200
+
+
+def test_host_can_cancel_a_game_already_in_negotiation():
+    client = make_client()
+    created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
+    game_id = created.json()["game_id"]
+    join_code = created.json()["join_code"]
+    client.post("/games/join", json={"join_code": join_code, "display_name": "Mortia"}, headers=_auth("auth-mortia"))
+    client.post(f"/games/{game_id}/commands", json={"command_id": "cmd-1", "type": "START_GAME", "payload": {}}, headers=_auth("auth-tedy"))
+
+    cancelled = client.post(
+        f"/games/{game_id}/commands", json={"command_id": "cmd-2", "type": "CANCEL_GAME", "payload": {}}, headers=_auth("auth-tedy")
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["phase"] == "CANCELLED"
+
+
+def test_only_the_host_can_cancel():
+    client = make_client()
+    created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
+    game_id = created.json()["game_id"]
+    join_code = created.json()["join_code"]
+    client.post("/games/join", json={"join_code": join_code, "display_name": "Mortia"}, headers=_auth("auth-mortia"))
+
+    response = client.post(
+        f"/games/{game_id}/commands", json={"command_id": "cmd-1", "type": "CANCEL_GAME", "payload": {}}, headers=_auth("auth-mortia")
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "illegal_command"
+
+
+def test_cancelling_an_already_cancelled_game_is_rejected():
+    client = make_client()
+    created = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))
+    game_id = created.json()["game_id"]
+    client.post(f"/games/{game_id}/commands", json={"command_id": "cmd-1", "type": "CANCEL_GAME", "payload": {}}, headers=_auth("auth-tedy"))
+
+    response = client.post(
+        f"/games/{game_id}/commands", json={"command_id": "cmd-2", "type": "CANCEL_GAME", "payload": {}}, headers=_auth("auth-tedy")
+    )
+    assert response.status_code == 409
+
+
 def test_cannot_create_second_active_game_while_hosting_one():
     client = make_client()
     first = client.post("/games", json={"display_name": "Tedy"}, headers=_auth("auth-tedy"))

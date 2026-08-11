@@ -14,7 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from gotiate.api.rate_limit import limiter
-from gotiate.api.routes import player_names_router, router
+from gotiate.api.routes import player_names_router, router, theme_sets_router
 from gotiate.persistence.player_names import InMemoryPlayerNameRepository, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository, InMemoryGameRepository
 from gotiate.settings import settings
@@ -148,6 +148,7 @@ def create_app(*, repository: GameRepository, player_name_repository: PlayerName
 
     app.include_router(router)
     app.include_router(player_names_router)
+    app.include_router(theme_sets_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

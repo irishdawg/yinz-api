@@ -76,7 +76,7 @@ class InMemoryGameRepository:
         # (host_player_id) joined through to auth_user_id, or denormalize
         # host_auth_user_id onto the games row directly.
         for game in self._games.values():
-            if game.phase == GamePhase.SCORED or game.host_player_id is None:
+            if game.phase in (GamePhase.SCORED, GamePhase.CANCELLED) or game.host_player_id is None:
                 continue
             host = game.player_by_id(game.host_player_id)
             if host.auth_user_id == auth_user_id:

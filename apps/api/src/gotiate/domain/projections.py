@@ -60,6 +60,19 @@ def project(game: Game, audience: Audience) -> dict:
         "phase": game.phase.value,
         "join_code": game.join_code if isinstance(audience, PlayerAudience) else None,
         "expected_player_count": game.expected_player_count,
+        # Who's hosting is public narrative, same as a pool's initiator_id --
+        # the client needs it to show a host-only Start button.
+        "host_player_id": game.host_player_id,
+        # Which roster entry is "me" -- never inferred client-side from
+        # matching some other identifier, just handed over directly.
+        "you": audience.game_player_id if isinstance(audience, PlayerAudience) else None,
+        # Set together at START_GAME (engine._handle_start_game) -- all
+        # three are always non-null once phase is NEGOTIATION or later.
+        # Public: the clock and the unilateral-window cutoff are shared
+        # facts about the match, not private state.
+        "started_at": game.started_at,
+        "max_duration_s": game.max_duration_s,
+        "unilateral_cutoff_at": game.unilateral_cutoff_at,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         "proposals": [_project_proposal(p) for p in game.proposals.values()],
@@ -107,6 +120,10 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
         "game_player_id": player.game_player_id,
         "seat": player.seat,
         "display_name": player.display_name,
+        # Rolled at seating, not at name-preview time -- always public, same
+        # as any other roster fact. The entire point of it being rare is
+        # that other players can see it, not just the player themselves.
+        "is_golden_name": player.is_golden_name,
         "influence": {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent},
         "reserve_count_remaining": sum(
             1 for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.RESERVE_UNREVEALED

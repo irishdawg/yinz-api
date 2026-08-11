@@ -12,19 +12,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from gotiate.api.deps import get_auth_user_id, get_player_name_repository, get_repository
 from gotiate.api.rate_limit import limiter
-from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest, PlayerNameOffer
-from gotiate.domain import engine
-from gotiate.domain.entities import CommandReceipt, CommandStatus
+from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest, PlayerNameOffer, ThemeSetSummary
+from gotiate.domain import engine, themes
+from gotiate.domain.entities import CommandReceipt, CommandStatus, GameConfig
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
+from gotiate.domain.errors import NotFoundError as DomainNotFoundError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
 from gotiate.persistence.player_names import NoAvailableNameError, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
 _INVALID_NAME_DETAIL = {"error_code": "invalid_display_name", "message": "choose a name from the provided list"}
 _NO_NAMES_AVAILABLE_DETAIL = {"error_code": "no_names_available", "message": "try again in a moment"}
+_UNKNOWN_THEME_SET_DETAIL = {"error_code": "unknown_theme_set", "message": "choose one of the available theme sets"}
 
 router = APIRouter(prefix="/games", tags=["games"])
 player_names_router = APIRouter(prefix="/player-names", tags=["player-names"])
+theme_sets_router = APIRouter(prefix="/theme-sets", tags=["theme-sets"])
 
 
 def _now() -> datetime:
@@ -47,6 +50,17 @@ async def create_game(
     if not await name_repo.is_valid_name(body.display_name):
         raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
 
+    # Validated here, eagerly, so a bad theme_set_id 422s immediately —
+    # engine.create_game would otherwise happily store it and only fail
+    # later at START_GAME (themes are resolved lazily there today).
+    config = None
+    if body.theme_set_id is not None:
+        try:
+            themes.get_theme_set(body.theme_set_id)
+        except DomainNotFoundError:
+            raise HTTPException(status_code=422, detail=_UNKNOWN_THEME_SET_DETAIL)
+        config = GameConfig(theme_set_id=body.theme_set_id)
+
     # One in-flight hosted game per user — deliberately not just a time-
     # windowed rate limit, so spacing requests out doesn't get around it.
     existing_game = await repo.find_active_game_hosted_by(auth_user_id)
@@ -56,8 +70,24 @@ async def create_game(
             detail={"error_code": "active_game_exists", "message": "finish or end your current game before starting another", "game_id": existing_game.id},
         )
 
+    # Golden odds rolled here, once, at the moment a real seat is actually
+    # created -- never on the free-preview offer endpoints (see
+    # player_names.roll_golden_name). Overrides the previewed display_name
+    # outright rather than just flagging it, so "golden" always means a
+    # real golden name, not an arbitrary chosen one wearing a badge.
+    display_name = body.display_name
+    golden_name = await name_repo.roll_golden_name()
+    is_golden_name = golden_name is not None
+    if golden_name is not None:
+        display_name = golden_name
+
     game, events = engine.create_game(
-        actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now(), expected_player_count=body.expected_player_count
+        actor_auth_user_id=auth_user_id,
+        display_name=display_name,
+        now=_now(),
+        expected_player_count=body.expected_player_count,
+        config=config,
+        is_golden_name=is_golden_name,
     )
     # No existing row to lock for a brand-new game id -- lock_for() here is
     # supplying the same atomic transaction context every other mutating
@@ -66,7 +96,7 @@ async def create_game(
     async with repo.lock_for(game.id):
         await repo.create(game)
         await repo.append_events(events)
-    await name_repo.mark_name_used(body.display_name)
+    await name_repo.mark_name_used(display_name)
     assert game.host_player_id is not None
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=game.host_player_id)
 
@@ -98,16 +128,29 @@ async def join_game(
             raise HTTPException(status_code=404, detail="no game with that code")
         # Checked against this game's own already-loaded players, not
         # player_name_seeds -- that table only tracks the global pool, not
-        # who's using what name in which game right now.
-        if any(p.display_name == body.display_name for p in game.players):
+        # who's using what name in which game right now. Checked against
+        # what was actually submitted, before any golden override below.
+        existing_names = {p.display_name for p in game.players}
+        if body.display_name in existing_names:
             raise HTTPException(status_code=409, detail={"error_code": "name_taken", "message": "that name is already taken in this game — pick another"})
+
+        # Same seat-bound golden roll as create_game -- see the comment
+        # there. `existing_names` also keeps this game's own golden roll
+        # (if any) from colliding with a golden name someone else in this
+        # same lobby already landed.
+        display_name = body.display_name
+        golden_name = await name_repo.roll_golden_name(exclude=existing_names)
+        is_golden_name = golden_name is not None
+        if golden_name is not None:
+            display_name = golden_name
+
         try:
-            player, events = engine.join_game(game, actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now())
+            player, events = engine.join_game(game, actor_auth_user_id=auth_user_id, display_name=display_name, now=_now(), is_golden_name=is_golden_name)
         except DomainError as exc:
             raise HTTPException(status_code=409, detail={"error_code": exc.error_code, "message": str(exc)}) from exc
         await repo.save(game)
         await repo.append_events(events)
-    await name_repo.mark_name_used(body.display_name)
+    await name_repo.mark_name_used(display_name)
 
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=player.game_player_id)
 
@@ -208,6 +251,12 @@ async def submit_command(
     return project(game, PlayerAudience(player.game_player_id))
 
 
+@theme_sets_router.get("", response_model=list[ThemeSetSummary])
+async def list_theme_sets(auth_user_id: str = Depends(get_auth_user_id)) -> list[ThemeSetSummary]:
+    repo = themes.get_theme_repository()
+    return [ThemeSetSummary(theme_set_id=tid, name=repo.get(tid).name) for tid in repo.list_ids()]
+
+
 async def _names_already_in_game(repo: GameRepository, join_code: str | None) -> set[str]:
     # join_code is only present when offering a name for the *join* flow --
     # create_game has no roster yet to collide with. A bad/expired code
@@ -220,7 +269,6 @@ async def _names_already_in_game(repo: GameRepository, join_code: str | None) ->
 
 
 @player_names_router.get("/initial", response_model=PlayerNameOffer)
-@limiter.limit("5/hour")
 async def offer_initial_name(
     request: Request,
     join_code: str | None = None,
@@ -228,15 +276,15 @@ async def offer_initial_name(
     repo: GameRepository = Depends(get_repository),
     name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> PlayerNameOffer:
-    # Golden-eligible -- strictly rate-limited (unlike reroll below) since
-    # each call is an independent 1/500 draw and there's no game/player row
-    # yet at this point to pin "you already got your one initial roll" to.
+    # Never golden -- see player_names.roll_golden_name. No special rate
+    # limit beyond the global default: with gold off this path entirely,
+    # there's nothing here worth farming, only a plain name preview.
     exclude = await _names_already_in_game(repo, join_code)
     try:
-        name, is_golden = await name_repo.offer_initial_name(exclude=exclude)
+        name = await name_repo.offer_name(exclude=exclude)
     except NoAvailableNameError:
         raise HTTPException(status_code=503, detail=_NO_NAMES_AVAILABLE_DETAIL)
-    return PlayerNameOffer(name=name, is_golden=is_golden)
+    return PlayerNameOffer(name=name)
 
 
 @player_names_router.get("/reroll", response_model=PlayerNameOffer)
@@ -248,12 +296,10 @@ async def offer_reroll_name(
     repo: GameRepository = Depends(get_repository),
     name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> PlayerNameOffer:
-    # Never golden -- no extra rate limit beyond the global default, since
-    # there's nothing here worth farming.
     already_taken = await _names_already_in_game(repo, join_code)
     already_taken.add(exclude)
     try:
-        name = await name_repo.offer_reroll_name(exclude=already_taken)
+        name = await name_repo.offer_name(exclude=already_taken)
     except NoAvailableNameError:
         raise HTTPException(status_code=503, detail=_NO_NAMES_AVAILABLE_DETAIL)
-    return PlayerNameOffer(name=name, is_golden=False)
+    return PlayerNameOffer(name=name)
