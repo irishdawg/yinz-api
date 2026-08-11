@@ -209,24 +209,32 @@ against the game's own loaded players, not this table). That's the
 entire content-moderation story for display names: nothing here was ever
 typed by a user, so there's nothing to filter.
 
-Since then, three more migrations closed the gap between "validated"
-and "actually enforced everywhere": `player_name_seeds` gained an
-`is_golden` boolean (rare, 1/500, drawn only on the very first name
-offered — never via reroll, which structurally can't reach the golden
-pool at all); the original 100-name list was purged (table is empty
-until a curated ~50-name replacement list, including the golden one,
-lands in its own migration); and `game_players.display_name` (text) was
-replaced with `name_seed_id` (FK to `player_name_seeds`) — one source of
-truth for the name, the same normalization pattern `market_entities`
-already uses for `theme_entities`. `PostgresGameRepository` resolves the
-join on read and a subquery on write; the domain model
-(`entities.py`/`engine.py`/`projections.py`) never changed —
-`GamePlayer.display_name` still means exactly what it always did as far
-as the engine is concerned. Two new endpoints (`GET /player-names/initial`,
-`GET /player-names/reroll`) replace free-text entirely in the UI; both
-take an optional `join_code` so a game's existing roster is excluded
-from the offer too, not just whatever's currently on screen — the actual
-fix for two players ending up with the same name in one game.
+Since then: `player_name_seeds` gained an `is_golden` boolean (rare,
+1/500, drawn only on the very first name offered — never via reroll,
+which structurally can't reach the golden pool at all) and an `is_active`
+boolean (retire a name from future offers without deleting the row or
+breaking historical references — checked only in the offer methods, not
+in `is_valid_name()`, so a name offered while active but retired moments
+before submission doesn't become rejectable). Two new endpoints
+(`GET /player-names/initial`, `GET /player-names/reroll`) replace
+free-text entirely in the UI; both take an optional `join_code` so a
+game's existing roster is excluded from the offer too, not just
+whatever's currently on screen — the actual fix for two players ending
+up with the same name in one game. Offer selection narrows to the 10
+least-used eligible names before picking randomly among just those, so
+ordinary names stay roughly evenly exposed over time.
+
+**One reversal along the way, worth recording as a real correction, not
+just noise**: `game_players.display_name` briefly became `name_seed_id`
+(a FK, resolved via join) for one commit, then got reverted back to text.
+`player_name_seeds` is reference/catalog data — resolving a player's name
+dynamically via join would mean renaming or retiring a seed name later
+could retroactively change what an already-played game shows, the exact
+replay-integrity problem `theme_entities` versioning already exists to
+prevent elsewhere in this schema. `display_name` is assigned once, at
+create_game/join_game time, and frozen from then on. The original
+100-name placeholder list was purged and replaced with a real curated
+53-name list — exactly one golden (`Dave`).
 
 `gotiate_backend`'s password is set and `GOTIATE_BACKEND_DATABASE_URL` is
 in `apps/api/.env`, verified against the live project.
