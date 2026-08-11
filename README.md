@@ -32,10 +32,12 @@ Supabase migrations aren't deployed by either platform — `supabase db
 push` is still a deliberate, manual step (see `DATABASE.md`).
 
 **Live infra:**
-- Vercel: project `web` under the Atlas Rising team, connected to this
-  repo (auto-deploy on push to `main`). Deployment Protection (Vercel
-  Pro's default SSO wall) is still on — the production URL 302s to a
-  Vercel login until that's explicitly turned off in Project Settings.
+- Vercel: project `gotiate` under the Atlas Rising team (`atlasrising`;
+  they house multiple projects there, hence the specific name rather than
+  the `web` default), connected to this repo (auto-deploy on push to
+  `main`, confirmed live). Deployment Protection (Vercel Pro's default SSO
+  wall on every `*.vercel.app` URL without a custom domain) is off, so
+  https://gotiate-atlasrising.vercel.app is publicly reachable.
 - Render: not created yet. `render.yaml` (service `gotiate-api-staging`)
   is ready for a Blueprint import once that happens.
 - Both currently deploy from `main` — no separate staging branch yet.
