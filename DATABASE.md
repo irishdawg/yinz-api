@@ -185,7 +185,7 @@ schema is still moving weekly.
 ## What's done, what's next
 
 Schema is designed, reviewed, written, and **live on the Gotiate project**
-— 13 tables (5 direct-read, 6 FastAPI-only, 2 global content), the
+— 14 tables (5 direct-read, 6 FastAPI-only, 3 global content), the
 `is_game_member()` helper, RLS, grants, and the `supabase_realtime`
 publication, as six migrations under `supabase/migrations/`
 (`create_backend_role`, `theme_content_schema`, `game_schema`,
@@ -195,6 +195,19 @@ via `apps/api/scripts/generate_theme_seed.py`, which reads
 `apps/api/src/gotiate/domain/theme_data/*.json` — re-run it and paste the
 output into a fresh migration whenever theme content changes; never
 hand-edit an applied migration.
+
+`player_name_seeds` (2 more migrations: `player_name_seeds_schema`,
+`seed_player_name_seeds`) is a third global-content, direct-read table
+alongside `theme_sets`/`theme_entities` — same `using (true)` RLS
+reasoning (genuinely public, no membership question to scope against).
+100 curated "Adjective Creature" placeholder display names
+(`Sly Fox`, `Clever Badger`, ...) — no open text entry anywhere in the
+product. `create_game`/`join_game` validate every `display_name` against
+this table before the domain engine ever sees it, and reject a name
+already taken by another seated player in that specific game (checked
+against the game's own loaded players, not this table). That's the
+entire content-moderation story for display names: nothing here was ever
+typed by a user, so there's nothing to filter.
 
 `gotiate_backend`'s password is set and `GOTIATE_BACKEND_DATABASE_URL` is
 in `apps/api/.env`, verified against the live project.
