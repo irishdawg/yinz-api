@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: gotiate-api
+    name: gotiate-api-staging
     runtime: python
     plan: free
     region: virginia  # us-east-1 — matches Supabase (East US, North Virginia)
@@ -8,6 +8,7 @@ services:
                        # three land in the same physical region with zero
                        # extra config on the Vercel side
     branch: main
+    autoDeploy: true
     rootDir: apps/api  # monorepo: apps/api (this service) + apps/web (Vercel)
                         # + supabase/ (migrations, applied separately) share
                         # one repo — see root README.md
@@ -16,13 +17,21 @@ services:
         - apps/api/**
     buildCommand: "uv sync --frozen"
     startCommand: "uv run uvicorn gotiate.main:app --host 0.0.0.0 --port $PORT"
-    healthCheckPath: /health
+    healthCheckPath: /health  # exempt from GatewaySecretMiddleware (main.py) —
+                               # Render's own health checker doesn't send the
+                               # gateway header
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
+      - key: ENVIRONMENT
+        value: staging
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GOTIATE_GATEWAY_SECRET
+        sync: false
+      - key: GOTIATE_BACKEND_DATABASE_URL
         sync: false
