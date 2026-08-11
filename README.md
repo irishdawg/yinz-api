@@ -40,7 +40,10 @@ push` is still a deliberate, manual step (see `DATABASE.md`).
   https://gotiate-atlasrising.vercel.app is publicly reachable.
 - Render: service `gotiate-api-staging` (Virginia, free plan), created via
   Render's API and connected to this repo (`rootDir: apps/api`,
-  auto-deploy on push to `main`). Live at
+  auto-deploy on push to `main`). Grouped under a **Gotiate** Render
+  Project with a `Staging` environment (not ungrouped anymore) — same
+  Project the eventual `Production` environment will join when that
+  split happens. Live at
   https://gotiate-api-staging.onrender.com — `/health` is the one route
   exempt from the gateway-secret check; everything else 404s without it.
 - Both currently deploy from `main` — no separate staging branch yet.
