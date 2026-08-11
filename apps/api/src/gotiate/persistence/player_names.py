@@ -25,6 +25,12 @@ from typing import Protocol
 from psycopg_pool import AsyncConnectionPool
 
 _GOLDEN_ODDS = 1 / 500
+# Draws are weighted toward under-used names rather than pure uniform
+# random, so ordinary names stay roughly evenly exposed over time instead
+# of one getting picked 73 times while another gets picked twice purely by
+# chance -- narrow to the K least-used eligible names, then pick uniformly
+# at random among just those.
+_LEAST_USED_POOL_SIZE = 10
 
 
 class RandomLike(Protocol):
@@ -49,7 +55,11 @@ class InMemoryPlayerNameRepository:
     and has nothing to offer) so the existing tests using arbitrary display
     names ("Tedy", "Mortia", ...) don't need to know about the seed pool at
     all. Pass explicit `names`/`golden_names` for tests that actually
-    exercise offering."""
+    exercise offering. Deliberately doesn't model `is_active` or the
+    least-used-K weighting the real Postgres implementation does -- picks
+    deterministically (sorted-first) for simple, predictable test
+    assertions; nothing here currently needs to assert on distribution
+    fairness specifically."""
 
     def __init__(self, names: set[str] | None = None, golden_names: set[str] | None = None) -> None:
         self._names = names
@@ -114,17 +124,29 @@ class PostgresPlayerNameRepository:
         return name
 
     async def _draw(self, *, is_golden: bool, exclude: set[str]) -> str | None:
+        # is_active = true -- deliberately not checked in is_valid_name(),
+        # only here: this is what actually controls what gets offered
+        # going forward, without invalidating a name someone already has
+        # displayed or already submitted.
+        #
+        # Two-step, one query: narrow to the _LEAST_USED_POOL_SIZE eligible
+        # names ordered by usage_count (random tiebreak among equal
+        # counts), then pick uniformly at random from just that narrowed
+        # set -- biases toward under-used names without making the pick
+        # deterministic.
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                if exclude:
-                    await cur.execute(
-                        "select name from player_name_seeds where is_golden = %s and not (name = any(%s)) order by random() limit 1",
-                        (is_golden, list(exclude)),
+                await cur.execute(
+                    """
+                    with candidates as (
+                        select name from player_name_seeds
+                        where is_golden = %s and is_active = true and not (name = any(%s))
+                        order by usage_count asc, random()
+                        limit %s
                     )
-                else:
-                    await cur.execute(
-                        "select name from player_name_seeds where is_golden = %s order by random() limit 1",
-                        (is_golden,),
-                    )
+                    select name from candidates order by random() limit 1
+                    """,
+                    (is_golden, list(exclude), _LEAST_USED_POOL_SIZE),
+                )
                 row = await cur.fetchone()
                 return row[0] if row else None

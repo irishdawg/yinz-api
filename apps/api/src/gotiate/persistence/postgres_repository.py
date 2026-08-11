@@ -267,18 +267,18 @@ class PostgresGameRepository:
         reserve_count_remaining = sum(
             1 for h in holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.RESERVE_UNREVEALED
         )
-        # name_seed_id, not a text copy -- resolved via subquery from the
-        # name is_valid_name() already confirmed exists moments earlier in
-        # the same request. If it somehow doesn't (a bug/race), the
-        # subquery returns NULL and the not-null constraint fails loudly,
-        # which is the correct failure mode here, not a silent write.
+        # display_name stored as text, deliberately not a name_seed_id FK --
+        # player_name_seeds is reference/catalog data, and a game's roster
+        # must stay frozen at assignment time even if a seed name is later
+        # renamed or retired (is_active). Same reasoning theme_entities
+        # versioning already exists for elsewhere in this schema.
         await cur.execute(
             """
-            insert into game_players (id, game_id, seat, name_seed_id, influence_available,
+            insert into game_players (id, game_id, seat, display_name, influence_available,
                                        influence_committed, influence_spent, reserve_count_remaining)
-            values (%s, %s, %s, (select id from player_name_seeds where name = %s), %s, %s, %s, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
             on conflict (id) do update set
-                seat = excluded.seat, name_seed_id = excluded.name_seed_id,
+                seat = excluded.seat, display_name = excluded.display_name,
                 influence_available = excluded.influence_available,
                 influence_committed = excluded.influence_committed,
                 influence_spent = excluded.influence_spent,
@@ -397,19 +397,7 @@ class PostgresGameRepository:
                 return None
             game_id = str(game_row["id"])
 
-            # display_name resolved via join, not a native column -- the
-            # rest of this method (and _to_game) doesn't need to know that,
-            # it just reads pr["display_name"] like always.
-            await cur.execute(
-                """
-                select gp.*, pns.name as display_name
-                from game_players gp
-                join player_name_seeds pns on pns.id = gp.name_seed_id
-                where gp.game_id = %s
-                order by gp.seat
-                """,
-                (game_id,),
-            )
+            await cur.execute("select * from game_players where game_id = %s order by seat", (game_id,))
             player_rows = await cur.fetchall()
 
             await cur.execute("select * from game_player_private where game_id = %s", (game_id,))
