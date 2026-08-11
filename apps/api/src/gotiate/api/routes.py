@@ -10,14 +10,17 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from gotiate.api.deps import get_auth_user_id, get_repository
+from gotiate.api.deps import get_auth_user_id, get_player_name_repository, get_repository
 from gotiate.api.rate_limit import limiter
 from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest
 from gotiate.domain import engine
 from gotiate.domain.entities import CommandReceipt, CommandStatus
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
+from gotiate.persistence.player_names import PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
+
+_INVALID_NAME_DETAIL = {"error_code": "invalid_display_name", "message": "choose a name from the provided list"}
 
 router = APIRouter(prefix="/games", tags=["games"])
 
@@ -33,7 +36,15 @@ async def create_game(
     body: CreateGameRequest,
     auth_user_id: str = Depends(get_auth_user_id),
     repo: GameRepository = Depends(get_repository),
+    name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> GameSummary:
+    # No free-text display names, ever -- display_name must be one of the
+    # curated placeholders (player_name_seeds), never open text. This is
+    # the entire content-moderation story: nothing here needs a filter
+    # because nothing here was ever typed by a user.
+    if not await name_repo.is_valid_name(body.display_name):
+        raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
+
     # One in-flight hosted game per user — deliberately not just a time-
     # windowed rate limit, so spacing requests out doesn't get around it.
     existing_game = await repo.find_active_game_hosted_by(auth_user_id)
@@ -53,6 +64,7 @@ async def create_game(
     async with repo.lock_for(game.id):
         await repo.create(game)
         await repo.append_events(events)
+    await name_repo.mark_name_used(body.display_name)
     assert game.host_player_id is not None
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=game.host_player_id)
 
@@ -64,7 +76,11 @@ async def join_game(
     body: JoinGameRequest,
     auth_user_id: str = Depends(get_auth_user_id),
     repo: GameRepository = Depends(get_repository),
+    name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> GameSummary:
+    if not await name_repo.is_valid_name(body.display_name):
+        raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
+
     game = await repo.get_by_join_code(body.join_code.upper())
     if game is None:
         raise HTTPException(status_code=404, detail="no game with that code")
@@ -78,12 +94,18 @@ async def join_game(
         game = await repo.get(game.id)
         if game is None:
             raise HTTPException(status_code=404, detail="no game with that code")
+        # Checked against this game's own already-loaded players, not
+        # player_name_seeds -- that table only tracks the global pool, not
+        # who's using what name in which game right now.
+        if any(p.display_name == body.display_name for p in game.players):
+            raise HTTPException(status_code=409, detail={"error_code": "name_taken", "message": "that name is already taken in this game — pick another"})
         try:
             player, events = engine.join_game(game, actor_auth_user_id=auth_user_id, display_name=body.display_name, now=_now())
         except DomainError as exc:
             raise HTTPException(status_code=409, detail={"error_code": exc.error_code, "message": str(exc)}) from exc
         await repo.save(game)
         await repo.append_events(events)
+    await name_repo.mark_name_used(body.display_name)
 
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=player.game_player_id)
 

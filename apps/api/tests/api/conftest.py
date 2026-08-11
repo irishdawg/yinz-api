@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from gotiate.api.deps import get_auth_user_id
 from gotiate.main import create_app
+from gotiate.persistence.player_names import InMemoryPlayerNameRepository
 from gotiate.persistence.repository import InMemoryGameRepository
 from gotiate.settings import settings
 
@@ -23,14 +24,20 @@ async def _stub_get_auth_user_id(authorization: str | None = Header(default=None
     return token
 
 
-def make_client() -> TestClient:
+def make_client(*, allowed_names: set[str] | None = None) -> TestClient:
     """TestClient wired with the auth stub above and the real gateway
     secret (GatewaySecretMiddleware is app-wide ASGI middleware, so
     dependency_overrides can't reach it — every request needs the header,
-    same as a real Next.js gateway call would send)."""
-    # Explicit InMemoryGameRepository, always -- create_app() has no default
+    same as a real Next.js gateway call would send).
+
+    `allowed_names` defaults to None, which makes InMemoryPlayerNameRepository
+    permissive (any display_name is accepted) -- most tests here predate the
+    seed-name requirement and use arbitrary strings like "Tedy"/"Mortia", and
+    shouldn't need to know about it. Pass an explicit set only for tests
+    specifically about name validation."""
+    # Explicit repositories, always -- create_app() has no defaults
     # specifically so tests can never accidentally fall through to a real
     # Postgres connection (see main.py's create_app docstring).
-    app = create_app(repository=InMemoryGameRepository())
+    app = create_app(repository=InMemoryGameRepository(), player_name_repository=InMemoryPlayerNameRepository(allowed_names))
     app.dependency_overrides[get_auth_user_id] = _stub_get_auth_user_id
     return TestClient(app, headers={"x-gotiate-gateway-key": settings.gotiate_gateway_secret or ""})

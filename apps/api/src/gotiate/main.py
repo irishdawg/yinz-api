@@ -15,6 +15,7 @@ from starlette.types import ASGIApp
 
 from gotiate.api.rate_limit import limiter
 from gotiate.api.routes import router
+from gotiate.persistence.player_names import InMemoryPlayerNameRepository, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository, InMemoryGameRepository
 from gotiate.settings import settings
 
@@ -105,18 +106,19 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def create_app(*, repository: GameRepository, lifespan=None) -> FastAPI:
+def create_app(*, repository: GameRepository, player_name_repository: PlayerNameRepository, lifespan=None) -> FastAPI:
     """Factory rather than a bare module-level app — tests need a fresh
     rate-limit state per test rather than sharing it across the whole
-    session. `repository` is required, not defaulted: `.env` already has a
-    live `GOTIATE_BACKEND_DATABASE_URL` loaded unconditionally for every
-    process including test runs, so any design that picked in-memory-vs-
-    Postgres by checking whether that value is set would make the test
-    suite start hitting real Supabase the moment this landed. Requiring it
-    explicitly removes that failure mode structurally: every test passes
-    InMemoryGameRepository(); only the module-level `app` below (what
-    `uvicorn gotiate.main:app` actually serves, never imported by tests)
-    constructs and passes a real PostgresGameRepository."""
+    session. `repository`/`player_name_repository` are required, not
+    defaulted: `.env` already has a live `GOTIATE_BACKEND_DATABASE_URL`
+    loaded unconditionally for every process including test runs, so any
+    design that picked in-memory-vs-Postgres by checking whether that
+    value is set would make the test suite start hitting real Supabase the
+    moment this landed. Requiring both explicitly removes that failure
+    mode structurally: every test passes InMemoryGameRepository() and
+    InMemoryPlayerNameRepository(); only the module-level `app` below
+    (what `uvicorn gotiate.main:app` actually serves, never imported by
+    tests) constructs and passes the real Postgres-backed ones."""
     limiter.reset()
 
     is_production = settings.environment != "development"
@@ -128,6 +130,7 @@ def create_app(*, repository: GameRepository, lifespan=None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.repository = repository
+    app.state.player_name_repository = player_name_repository
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _boring_rate_limit_handler)
 
@@ -154,25 +157,26 @@ def create_app(*, repository: GameRepository, lifespan=None) -> FastAPI:
 
 def _create_production_app() -> FastAPI:
     if not settings.gotiate_backend_database_url:
-        logger.warning("GOTIATE_BACKEND_DATABASE_URL is not set — falling back to InMemoryGameRepository. Games will not persist.")
-        return create_app(repository=InMemoryGameRepository())
+        logger.warning("GOTIATE_BACKEND_DATABASE_URL is not set — falling back to in-memory repositories. Games will not persist.")
+        return create_app(repository=InMemoryGameRepository(), player_name_repository=InMemoryPlayerNameRepository())
 
     # Local import: only pulls in psycopg/psycopg_pool when actually needed,
-    # so an InMemoryGameRepository-only environment (e.g. a contributor's
-    # machine without a DB configured) doesn't need them installed to run
-    # the app at all.
+    # so an in-memory-only environment (e.g. a contributor's machine
+    # without a DB configured) doesn't need them installed to run the app.
+    from gotiate.persistence.player_names import PostgresPlayerNameRepository
     from gotiate.persistence.postgres_repository import PostgresGameRepository, create_pool
 
     # Constructing the pool is synchronous (only .open() is a coroutine),
-    # so PostgresGameRepository can be built right away and handed to
-    # create_app() like any other repository — the lifespan below just
-    # opens/closes the same pool object around the app's actual runtime.
+    # so both repositories can be built right away and handed to
+    # create_app() like any other — the lifespan below just opens/closes
+    # the one shared pool object around the app's actual runtime.
     pool = create_pool(
         settings.gotiate_backend_database_url,
         min_size=settings.gotiate_db_pool_min_size,
         max_size=settings.gotiate_db_pool_max_size,
     )
     repository = PostgresGameRepository(pool)
+    player_name_repository = PostgresPlayerNameRepository(pool)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -185,7 +189,7 @@ def _create_production_app() -> FastAPI:
         yield
         await pool.close()
 
-    return create_app(repository=repository, lifespan=lifespan)
+    return create_app(repository=repository, player_name_repository=player_name_repository, lifespan=lifespan)
 
 
 app = _create_production_app()

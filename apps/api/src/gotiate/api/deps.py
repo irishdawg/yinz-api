@@ -3,11 +3,16 @@ from __future__ import annotations
 from fastapi import Header, HTTPException, Request
 
 from gotiate.api.auth import JWTVerificationError, verify_supabase_jwt
+from gotiate.persistence.player_names import PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
 
 async def get_repository(request: Request) -> GameRepository:
     return request.app.state.repository
+
+
+async def get_player_name_repository(request: Request) -> PlayerNameRepository:
+    return request.app.state.player_name_repository
 
 
 async def get_auth_user_id(request: Request, authorization: str | None = Header(default=None)) -> str:
