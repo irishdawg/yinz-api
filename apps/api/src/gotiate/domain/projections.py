@@ -59,13 +59,17 @@ def project(game: Game, audience: Audience) -> dict:
         "version": game.version,
         "phase": game.phase.value,
         "join_code": game.join_code if isinstance(audience, PlayerAudience) else None,
-        "expected_player_count": game.expected_player_count,
         # Who's hosting is public narrative, same as a pool's initiator_id --
         # the client needs it to show a host-only Start button.
         "host_player_id": game.host_player_id,
         # Which roster entry is "me" -- never inferred client-side from
         # matching some other identifier, just handed over directly.
         "you": audience.game_player_id if isinstance(audience, PlayerAudience) else None,
+        # LOBBY-only. Raw deadline + the grace duration, not a precomputed
+        # countdown -- same pattern as started_at/max_duration_s below, the
+        # client derives its own display from authoritative timestamps.
+        "lobby_reminder_deadline_at": game.lobby_reminder_deadline_at,
+        "lobby_reminder_grace_seconds": game.config.lobby_reminder_grace_seconds,
         # Set together at START_GAME (engine._handle_start_game) -- all
         # three are always non-null once phase is NEGOTIATION or later.
         # Public: the clock and the unilateral-window cutoff are shared
@@ -73,6 +77,8 @@ def project(game: Game, audience: Audience) -> dict:
         "started_at": game.started_at,
         "max_duration_s": game.max_duration_s,
         "unilateral_cutoff_at": game.unilateral_cutoff_at,
+        # Only meaningful once phase is CANCELLED -- null otherwise.
+        "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         "proposals": [_project_proposal(p) for p in game.proposals.values()],

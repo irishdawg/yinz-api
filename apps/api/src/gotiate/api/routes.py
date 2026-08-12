@@ -14,7 +14,7 @@ from gotiate.api.deps import get_auth_user_id, get_player_name_repository, get_r
 from gotiate.api.rate_limit import limiter
 from gotiate.api.schemas import CommandRequest, CreateGameRequest, GameSummary, JoinGameRequest, PlayerNameOffer, ThemeSetSummary
 from gotiate.domain import engine, themes
-from gotiate.domain.entities import CommandReceipt, CommandStatus, GameConfig
+from gotiate.domain.entities import CommandReceipt, CommandStatus, Game, GameConfig
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.errors import NotFoundError as DomainNotFoundError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
@@ -85,7 +85,6 @@ async def create_game(
         actor_auth_user_id=auth_user_id,
         display_name=display_name,
         now=_now(),
-        expected_player_count=body.expected_player_count,
         config=config,
         is_golden_name=is_golden_name,
     )
@@ -155,6 +154,29 @@ async def join_game(
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=player.game_player_id)
 
 
+async def _sync_due_time_transitions(repo: GameRepository, game: Game, now: datetime) -> Game:
+    """GET is otherwise a pure read, but a time-based phase transition
+    (negotiation clock elapsing, lobby grace elapsing) can't happen until
+    *something* touches this game -- once the actor who'd otherwise submit
+    a command has gone quiet (an abandoned lobby, an idle negotiation),
+    polling is the only thing left that ever will. `is_time_transition_due`
+    is a cheap, lock-free check so this doesn't add lock/write overhead to
+    every ordinary poll -- only when something's genuinely due does it
+    acquire the lock, re-fetch, and persist for real."""
+    if not engine.is_time_transition_due(game, now):
+        return game
+    async with repo.lock_for(game.id):
+        locked_game = await repo.get(game.id)
+        if locked_game is None:
+            return game
+        events = engine.apply_due_time_transitions(locked_game, now)
+        if events:
+            locked_game.version += 1
+            await repo.save(locked_game)
+            await repo.append_events(events)
+        return locked_game
+
+
 @router.get("/{game_id}")
 async def get_game(
     game_id: str,
@@ -164,6 +186,7 @@ async def get_game(
     game = await repo.get(game_id)
     if game is None:
         raise HTTPException(status_code=404, detail="no such game")
+    game = await _sync_due_time_transitions(repo, game, _now())
     player = game.player_by_auth_id(auth_user_id)
     audience = PlayerAudience(player.game_player_id) if player else PublicAudience()
     return project(game, audience)

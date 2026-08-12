@@ -18,14 +18,20 @@ export interface GameView {
   version: number;
   phase: "LOBBY" | "NEGOTIATION" | "CLOSING" | "SCORED" | "CANCELLED";
   join_code: string | null;
-  expected_player_count: number | null;
   host_player_id: string | null;
   you: string | null;
+  // LOBBY-only. Once now() passes the deadline, the host sees a "start or
+  // ask for more time" prompt; lobby_reminder_grace_seconds after that
+  // with no response, the game auto-cancels.
+  lobby_reminder_deadline_at: string | null;
+  lobby_reminder_grace_seconds: number;
   // Set together at START_GAME -- always non-null once phase is NEGOTIATION
   // or later, always null in LOBBY.
   started_at: string | null;
   max_duration_s: number | null;
   unilateral_cutoff_at: string | null;
+  // Only meaningful once phase is CANCELLED.
+  cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
   proposals: unknown[];

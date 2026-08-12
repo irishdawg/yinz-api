@@ -78,6 +78,13 @@ class CloseReason(StrEnum):
     # No OPTIONALITY_EXHAUSTED for V1 — deliberately deferred, see decision log §10.
 
 
+class CancellationReason(StrEnum):
+    HOST_INITIATED = "HOST_INITIATED"
+    # The host let the lobby-reminder grace window lapse without starting
+    # or asking for more time — see GameConfig.lobby_reminder_seconds.
+    LOBBY_TIMEOUT = "LOBBY_TIMEOUT"
+
+
 class CommandStatus(StrEnum):
     APPLIED = "applied"
     REJECTED_STALE_VERSION = "rejected_stale_version"
@@ -119,6 +126,26 @@ class GameConfig(BaseModel):
     # locked number — flagged for confirmation, easy to tighten (e.g. to 5)
     # or loosen with a one-line config change.
     join_code_lifetime_minutes: int = 30
+
+    # The only way LOBBY -> NEGOTIATION happens is the host hitting Start --
+    # no auto-start, no headcount target. This pair exists purely so an
+    # abandoned lobby doesn't sit open forever: once lobby_reminder_seconds
+    # elapses, the host sees a "start now or ask for more time" prompt
+    # (EXTEND_LOBBY_TIMER pushes the deadline out by this same amount
+    # again, uncapped); if lobby_reminder_grace_seconds passes after that
+    # with no response, the game auto-cancels (CancellationReason.LOBBY_TIMEOUT).
+    lobby_reminder_seconds: int = 180
+    lobby_reminder_grace_seconds: int = 60
+
+    # The only way LOBBY -> NEGOTIATION happens is the host hitting Start --
+    # no auto-start, no headcount target. This pair exists purely so an
+    # abandoned lobby doesn't sit open forever: once lobby_reminder_seconds
+    # elapses, the host sees a "start now or ask for more time" prompt
+    # (EXTEND_LOBBY_TIMER pushes the deadline out by this same amount
+    # again, uncapped); if lobby_reminder_grace_seconds passes after that
+    # with no response, the game auto-cancels (CancellationReason.LOBBY_TIMEOUT).
+    lobby_reminder_seconds: int = 180
+    lobby_reminder_grace_seconds: int = 60
 
     theme_set_id: str = "fictional_companies_v1"
     theme_set_version: int = 1
@@ -235,10 +262,11 @@ class Game(BaseModel):
     join_code: str
     host_player_id: str | None = None
     config: GameConfig = Field(default_factory=GameConfig)
-    # A soft hint, not a cap — never blocks JOIN_GAME or START_GAME.
-    # Purely so the UI can show "3 of 4 joined" and the host can revise it
-    # (via SET_EXPECTED_PLAYER_COUNT) if someone declines. LOBBY-only.
-    expected_player_count: int | None = None
+
+    # LOBBY-only. Set at create_game to created_at + lobby_reminder_seconds;
+    # pushed forward by the same amount, uncapped, by EXTEND_LOBBY_TIMER.
+    # See apply_due_time_transitions for the reminder/grace/auto-cancel logic.
+    lobby_reminder_deadline_at: datetime | None = None
 
     started_at: datetime | None = None
     max_duration_s: int | None = None
@@ -249,6 +277,7 @@ class Game(BaseModel):
     closed_at: datetime | None = None
     close_reason: CloseReason | None = None
     scored_at: datetime | None = None
+    cancellation_reason: CancellationReason | None = None
 
     market: dict[str, MarketEntity] = Field(default_factory=dict)  # entity_id -> MarketEntity
     players: list[GamePlayer] = Field(default_factory=list)

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from gotiate.domain.entities import (
+    CancellationReason,
     CloseReason,
     Game,
     GameConfig,
@@ -64,19 +65,15 @@ def create_game(
     display_name: str,
     now: datetime,
     config: GameConfig | None = None,
-    expected_player_count: int | None = None,
     is_golden_name: bool = False,
 ) -> tuple[Game, list[GameEvent]]:
-    if expected_player_count is not None and not (2 <= expected_player_count <= 6):
-        raise IllegalCommandError("expected player count must be between 2 and 6")
-
     resolved_config = config or GameConfig()
     game = Game(
         id=new_id(),
         created_at=now,
         join_code=new_join_code(resolved_config.join_code_length),
         config=resolved_config,
-        expected_player_count=expected_player_count,
+        lobby_reminder_deadline_at=now + timedelta(seconds=resolved_config.lobby_reminder_seconds),
     )
     host = GamePlayer(
         game_player_id=new_id(),
@@ -172,6 +169,23 @@ def handle_command(
 def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     events: list[GameEvent] = []
 
+    if game.phase == GamePhase.LOBBY:
+        # Grace window past the reminder deadline, with no Start and no
+        # EXTEND_LOBBY_TIMER in between -- the host went quiet, auto-cancel.
+        # routes.get_game also runs this (see is_time_transition_due) --
+        # an abandoned lobby has nobody left to submit a command that
+        # would otherwise trigger it.
+        if (
+            game.lobby_reminder_deadline_at is not None
+            and now >= game.lobby_reminder_deadline_at + timedelta(seconds=game.config.lobby_reminder_grace_seconds)
+        ):
+            game.phase = GamePhase.CANCELLED
+            game.cancellation_reason = CancellationReason.LOBBY_TIMEOUT
+            events.append(
+                _emit(game, now, EventType.GAME_CANCELLED, actor=None, payload={"reason": CancellationReason.LOBBY_TIMEOUT.value})
+            )
+        return events
+
     if game.phase != GamePhase.NEGOTIATION:
         return events
 
@@ -192,6 +206,31 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
             events += close_market(game, CloseReason.TIME_EXPIRED, now)
 
     return events
+
+
+def is_time_transition_due(game: Game, now: datetime) -> bool:
+    """Side-effect-free mirror of apply_due_time_transitions' conditions --
+    lets a read path (routes.get_game) decide cheaply whether it's worth
+    acquiring the write lock and reapplying for real, without paying that
+    cost on every single poll. A negotiation clock elapsing or a lobby
+    grace window elapsing both need *something* to notice and persist the
+    transition; once the relevant actor has gone quiet, polling is the
+    only thing left that ever will. Keep in sync with
+    apply_due_time_transitions -- same conditions, no mutation."""
+    if game.phase == GamePhase.LOBBY:
+        return (
+            game.lobby_reminder_deadline_at is not None
+            and now >= game.lobby_reminder_deadline_at + timedelta(seconds=game.config.lobby_reminder_grace_seconds)
+        )
+    if game.phase != GamePhase.NEGOTIATION:
+        return False
+    for player in game.players:
+        pp = player.pending_pickup
+        if pp is not None and now > pp.decision_deadline_at + timedelta(milliseconds=game.config.pickup_transport_grace_ms):
+            return True
+    if game.unilateral_window_closed_at is None and game.unilateral_cutoff_at is not None and now >= game.unilateral_cutoff_at:
+        return True
+    return game.started_at is not None and game.max_duration_s is not None and now >= game.started_at + timedelta(seconds=game.max_duration_s)
 
 
 def can_burn_reserve_for_swap(game: Game, now: datetime) -> bool:
@@ -328,35 +367,35 @@ def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: 
 
 
 def _handle_cancel_game(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
-    if game.phase in (GamePhase.SCORED, GamePhase.CANCELLED):
-        raise IllegalCommandError("game has already ended")
+    # LOBBY-only, deliberately: once real gameplay is underway (Influence
+    # spent, holdings dealt), the host unilaterally nuking the match for
+    # everyone else is a bad power dynamic to allow. A NEGOTIATION-phase
+    # game that gets abandoned closes on its own via the negotiation clock
+    # regardless -- that's the only escape hatch past this point.
+    if game.phase != GamePhase.LOBBY:
+        raise IllegalCommandError("can only cancel while still in the lobby")
     if actor_game_player_id != game.host_player_id:
         raise IllegalCommandError("only the host can cancel")
 
     game.phase = GamePhase.CANCELLED
-    return [_emit(game, now, EventType.GAME_CANCELLED, actor=actor_game_player_id, payload={})]
+    game.cancellation_reason = CancellationReason.HOST_INITIATED
+    return [_emit(game, now, EventType.GAME_CANCELLED, actor=actor_game_player_id, payload={"reason": CancellationReason.HOST_INITIATED.value})]
 
 
-def _handle_set_expected_player_count(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+def _handle_extend_lobby_timer(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     if game.phase != GamePhase.LOBBY:
-        raise IllegalCommandError("can only be changed while still in the lobby")
+        raise IllegalCommandError("can only be extended while still in the lobby")
     if actor_game_player_id != game.host_player_id:
-        raise IllegalCommandError("only the host can change this")
+        raise IllegalCommandError("only the host can ask for more time")
 
-    new_value = payload.get("expected_player_count")
-    if new_value is not None:
-        if not (2 <= new_value <= 6):
-            raise IllegalCommandError("expected player count must be between 2 and 6")
-        if new_value < len(game.players):
-            raise IllegalCommandError(f"{len(game.players)} players have already joined")
-
-    if game.expected_player_count == new_value:
-        return []  # no-op: applied, nothing observable changed — same rule as SET_READY_TO_CLOSE
-
-    game.expected_player_count = new_value
+    game.lobby_reminder_deadline_at = now + timedelta(seconds=game.config.lobby_reminder_seconds)
     return [
         _emit(
-            game, now, EventType.EXPECTED_PLAYER_COUNT_CHANGED, actor=actor_game_player_id, payload={"expected_player_count": new_value}
+            game,
+            now,
+            EventType.LOBBY_TIMER_EXTENDED,
+            actor=actor_game_player_id,
+            payload={"lobby_reminder_deadline_at": game.lobby_reminder_deadline_at.isoformat()},
         )
     ]
 
@@ -726,7 +765,7 @@ def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_i
 
 _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "CANCEL_GAME": _handle_cancel_game,
-    "SET_EXPECTED_PLAYER_COUNT": _handle_set_expected_player_count,
+    "EXTEND_LOBBY_TIMER": _handle_extend_lobby_timer,
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,
     "WITHDRAW_PROPOSAL": _handle_withdraw_proposal,

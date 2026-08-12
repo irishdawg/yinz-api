@@ -270,6 +270,47 @@ algorithm against a possibly-still-in-lobby game or special-casing
 `project()`'s scored branch to detect "fake" scores. A new enum value
 was cheaper and more honest than either.
 
+**`expected_player_count` removed; `lobby_reminder_deadline_at` and
+`cancellation_reason` added**
+(`20260812153122_lobby_reminder_and_cancellation_reason.sql`). Live
+testing surfaced that `expected_player_count` was purely decorative — it
+never capped joins (only the hard 6-seat limit did that) and never
+triggered a start (only the host's Start button did). Dropped the column
+entirely rather than leave it as dead weight; the lobby always allows up
+to 6 now, no headcount question asked at all.
+
+In its place: the host is still the *only* way `LOBBY` becomes
+`NEGOTIATION` (no auto-start), but an abandoned lobby no longer sits open
+forever either. `lobby_reminder_deadline_at` is set at `create_game` to
+`created_at + lobby_reminder_seconds` (3 minutes); once passed, the host
+sees a "start now or ask for more time" prompt (`EXTEND_LOBBY_TIMER`
+pushes the deadline out by the same amount again, uncapped) while
+everyone else sees a read-only version of the same prompt. If
+`lobby_reminder_grace_seconds` (60s) passes with neither action, the game
+auto-cancels — `cancellation_reason` (`HOST_INITIATED` or
+`LOBBY_TIMEOUT`) distinguishes that from a deliberate host cancel so the
+terminal screen can say something accurate. `CANCEL_GAME` itself is now
+`LOBBY`-only too — once real gameplay is underway, the host loses the
+unilateral power to end it for everyone else; an abandoned
+`NEGOTIATION`-phase game just runs out its own negotiation clock instead.
+
+One correctness gap this surfaced, not obvious until actually testing it
+live: `apply_due_time_transitions` (the negotiation clock's own
+auto-close, and now this) only ever ran from inside `handle_command` —
+meaning a time-based transition would never actually fire unless
+*something* submitted a command after the deadline passed. For an
+abandoned lobby, by definition nobody is submitting anything anymore, so
+the auto-cancel would never have fired in practice. Fixed by having
+`GET /games/{id}` also apply due transitions
+(`routes._sync_due_time_transitions`) — cheaply: a lock-free
+`is_time_transition_due` check runs on every read, and only when
+something's genuinely due does it acquire the write lock and persist for
+real, so ordinary polling doesn't pay lock/write overhead on every tick.
+This same fix means the negotiation clock's `TIME_EXPIRED` auto-close is
+now also reachable from polling alone, not just from another command
+happening to land after the deadline — a latent gap in already-shipped
+behavior, caught as a side effect of building this.
+
 `engine.new_id()` now returns `str(uuid.uuid4())` (canonical dashed form)
 for clean Postgres `uuid` column compatibility. Full test suite (77
 tests) still green.

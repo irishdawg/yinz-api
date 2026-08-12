@@ -13,7 +13,6 @@ interface ThemeSetSummary {
 export default function Home() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
-  const [expectedPlayerCount, setExpectedPlayerCount] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [existingGameId, setExistingGameId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -54,7 +53,6 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           display_name: name,
-          expected_player_count: expectedPlayerCount ? Number(expectedPlayerCount) : undefined,
           theme_set_id: themeSetId || undefined,
         }),
       });
@@ -113,17 +111,6 @@ export default function Home() {
               </select>
             </label>
           )}
-          <label className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-zinc-700">Expected players (optional)</span>
-            <input
-              type="number"
-              min={2}
-              max={6}
-              value={expectedPlayerCount}
-              onChange={(event) => setExpectedPlayerCount(event.target.value)}
-              className="rounded border border-zinc-300 px-3 py-2 text-zinc-900"
-            />
-          </label>
           {(error || nameError) && <p className="text-sm text-red-600">{error ?? nameError}</p>}
           {existingGameId && (
             <button

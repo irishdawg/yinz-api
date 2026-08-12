@@ -39,6 +39,7 @@ from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from gotiate.domain.entities import (
+    CancellationReason,
     CloseReason,
     CommandReceipt,
     CommandStatus,
@@ -110,7 +111,7 @@ class PostgresGameRepository:
                 await cur.execute(
                     """
                     insert into games (id, version, next_seq_no, phase, created_at, join_code,
-                                        config, expected_player_count)
+                                        config, lobby_reminder_deadline_at)
                     values (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -121,7 +122,7 @@ class PostgresGameRepository:
                         game.created_at,
                         game.join_code,
                         Json(game.config.model_dump(mode="json")),
-                        game.expected_player_count,
+                        game.lobby_reminder_deadline_at,
                     ),
                 )
                 for player in game.players:
@@ -136,10 +137,10 @@ class PostgresGameRepository:
                     """
                     update games set
                         version = %s, next_seq_no = %s, phase = %s, host_player_id = %s,
-                        config = %s, expected_player_count = %s, started_at = %s,
+                        config = %s, lobby_reminder_deadline_at = %s, started_at = %s,
                         max_duration_s = %s, unilateral_cutoff_at = %s, unilateral_window_closed_at = %s,
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
-                        waterline_revealed = %s
+                        waterline_revealed = %s, cancellation_reason = %s
                     where id = %s
                     """,
                     (
@@ -148,7 +149,7 @@ class PostgresGameRepository:
                         game.phase.value,
                         game.host_player_id,
                         Json(game.config.model_dump(mode="json")),
-                        game.expected_player_count,
+                        game.lobby_reminder_deadline_at,
                         game.started_at,
                         game.max_duration_s,
                         game.unilateral_cutoff_at,
@@ -158,6 +159,7 @@ class PostgresGameRepository:
                         game.close_reason.value if game.close_reason else None,
                         game.scored_at,
                         game.waterline_revealed,
+                        game.cancellation_reason.value if game.cancellation_reason else None,
                         game.id,
                     ),
                 )
@@ -556,7 +558,7 @@ def _to_game(
         join_code=game_row["join_code"],
         host_player_id=str(game_row["host_player_id"]) if game_row["host_player_id"] else None,
         config=GameConfig.model_validate(game_row["config"]),
-        expected_player_count=game_row["expected_player_count"],
+        lobby_reminder_deadline_at=game_row["lobby_reminder_deadline_at"],
         started_at=game_row["started_at"],
         max_duration_s=game_row["max_duration_s"],
         unilateral_cutoff_at=game_row["unilateral_cutoff_at"],
@@ -565,6 +567,7 @@ def _to_game(
         closed_at=game_row["closed_at"],
         close_reason=CloseReason(game_row["close_reason"]) if game_row["close_reason"] else None,
         scored_at=game_row["scored_at"],
+        cancellation_reason=CancellationReason(game_row["cancellation_reason"]) if game_row["cancellation_reason"] else None,
         market=market,
         players=players,
         holdings=holdings,

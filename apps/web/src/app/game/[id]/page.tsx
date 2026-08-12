@@ -32,10 +32,14 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
   const isHost = view.you !== null && view.you === view.host_player_id;
 
   if (view.phase === "CANCELLED") {
-    return <CenteredMessage showHomeLink>This game was cancelled.</CenteredMessage>;
+    const message =
+      view.cancellation_reason === "LOBBY_TIMEOUT"
+        ? "This game was cancelled — the host didn't start it in time."
+        : "This game was cancelled.";
+    return <CenteredMessage showHomeLink>{message}</CenteredMessage>;
   }
   if (view.phase === "NEGOTIATION") {
-    return <MarketView gameId={gameId} view={view} isHost={isHost} onChanged={refetch} />;
+    return <MarketView view={view} />;
   }
   if (view.phase !== "LOBBY") {
     // Stages 6-8 (close/scoring/replay) aren't built yet -- this keeps the
@@ -53,13 +57,23 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
   );
 }
 
-function formatCountdown(startedAt: string | null, maxDurationS: number | null): string {
-  if (!startedAt || maxDurationS === null) return "--:--";
-  const elapsedS = (Date.now() - new Date(startedAt).getTime()) / 1000;
-  const remainingS = Math.max(0, Math.round(maxDurationS - elapsedS));
+function formatCountdownTo(deadlineMs: number): string {
+  const remainingS = Math.max(0, Math.round((deadlineMs - Date.now()) / 1000));
   const minutes = Math.floor(remainingS / 60);
   const seconds = remainingS % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function formatMarketCountdown(startedAt: string | null, maxDurationS: number | null): string {
+  if (!startedAt || maxDurationS === null) return "--:--";
+  return formatCountdownTo(new Date(startedAt).getTime() + maxDurationS * 1000);
+}
+
+// A bare `Date.now()` read directly in a component body trips the
+// react-hooks/purity rule (impure-during-render); routed through a plain
+// helper instead, same as the countdown formatters above never trip it.
+function isPastDeadline(deadlineMs: number): boolean {
+  return Date.now() >= deadlineMs;
 }
 
 /** Host-only, any pre-SCORED phase -- the one escape hatch out of the
@@ -89,26 +103,15 @@ function CancelGameButton({ gameId, version, onChanged }: { gameId: string; vers
   );
 }
 
-function MarketView({
-  gameId,
-  view,
-  isHost,
-  onChanged,
-}: {
-  gameId: string;
-  view: import("@/lib/useGameView").GameView;
-  isHost: boolean;
-  onChanged: () => void;
-}) {
+function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
 
   return (
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-zinc-900">Market</h1>
-        <span className="font-mono text-2xl font-bold tabular-nums text-zinc-900">{formatCountdown(view.started_at, view.max_duration_s)}</span>
+        <span className="font-mono text-2xl font-bold tabular-nums text-zinc-900">{formatMarketCountdown(view.started_at, view.max_duration_s)}</span>
       </div>
-      {isHost && <CancelGameButton gameId={gameId} version={view.version} onChanged={onChanged} />}
 
       {self && (
         <div className="flex gap-4 rounded border border-zinc-200 bg-white p-3 text-sm">
@@ -172,6 +175,59 @@ function CenteredMessage({ children, showHomeLink = false }: { children: React.R
   );
 }
 
+/** Only renders once now() has passed the reminder deadline -- before
+ * that, the lobby is just the roster + Start button, no time pressure
+ * shown at all. Visible to everyone (transparency about why the game
+ * might auto-cancel), but only the host gets the actions that prevent it. */
+function LobbyReminderBanner({
+  gameId,
+  view,
+  isHost,
+  onChanged,
+}: {
+  gameId: string;
+  view: import("@/lib/useGameView").GameView;
+  isHost: boolean;
+  onChanged: () => void;
+}) {
+  const [extending, setExtending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!view.lobby_reminder_deadline_at) return null;
+  const reminderMs = new Date(view.lobby_reminder_deadline_at).getTime();
+  if (!isPastDeadline(reminderMs)) return null;
+  const graceDeadlineMs = reminderMs + view.lobby_reminder_grace_seconds * 1000;
+
+  async function handleExtend() {
+    setError(null);
+    setExtending(true);
+    const result = await submitCommand(gameId, "EXTEND_LOBBY_TIMER", {}, { expectedVersion: view.version, onSettled: onChanged });
+    setExtending(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't extend."));
+  }
+
+  return (
+    <div className="flex w-full max-w-sm flex-col gap-2 rounded border border-amber-300 bg-amber-50 p-3">
+      <p className="text-sm text-amber-900">
+        {isHost
+          ? `Start now, or ask for more time? Auto-cancels in ${formatCountdownTo(graceDeadlineMs)}.`
+          : `Waiting on the host — auto-cancels in ${formatCountdownTo(graceDeadlineMs)} if they don't respond.`}
+      </p>
+      {isHost && (
+        <button
+          type="button"
+          onClick={handleExtend}
+          disabled={extending}
+          className="self-start rounded border border-amber-400 px-3 py-1 text-sm font-medium text-amber-900 disabled:opacity-50"
+        >
+          {extending ? "…" : "Need more time"}
+        </button>
+      )}
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
 function LobbyRoom({
   gameId,
   view,
@@ -185,28 +241,12 @@ function LobbyRoom({
   isHost: boolean;
   onChanged: () => void;
 }) {
-  const [expectedInput, setExpectedInput] = useState(view.expected_player_count?.toString() ?? "");
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [updatingCount, setUpdatingCount] = useState(false);
 
   const joinUrl = joinCode ? `${process.env.NEXT_PUBLIC_SITE_URL ?? ""}/join/${joinCode}` : null;
   const playerCount = view.players.length;
   const canStart = playerCount >= 2 && playerCount <= 6;
-
-  async function handleUpdateExpectedCount(event: React.FormEvent) {
-    event.preventDefault();
-    setActionError(null);
-    setUpdatingCount(true);
-    const result = await submitCommand(
-      gameId,
-      "SET_EXPECTED_PLAYER_COUNT",
-      { expected_player_count: expectedInput ? Number(expectedInput) : null },
-      { expectedVersion: view.version, onSettled: onChanged },
-    );
-    setUpdatingCount(false);
-    if (!result.ok) setActionError(commandErrorMessage(result.data, "Couldn't update expected player count."));
-  }
 
   async function handleStart() {
     setActionError(null);
@@ -233,10 +273,7 @@ function LobbyRoom({
       </div>
 
       <div className="w-full max-w-sm">
-        <h2 className="mb-2 text-sm font-medium text-zinc-700">
-          Players ({playerCount}
-          {view.expected_player_count ? ` of ${view.expected_player_count}` : ""})
-        </h2>
+        <h2 className="mb-2 text-sm font-medium text-zinc-700">Players ({playerCount})</h2>
         <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
           {view.players.map((p) => (
             <li key={p.game_player_id} className="flex items-center justify-between text-zinc-900">
@@ -253,25 +290,10 @@ function LobbyRoom({
         </ul>
       </div>
 
+      <LobbyReminderBanner gameId={gameId} view={view} isHost={isHost} onChanged={onChanged} />
+
       {isHost && (
         <div className="flex w-full max-w-sm flex-col gap-4">
-          <form onSubmit={handleUpdateExpectedCount} className="flex items-end gap-2">
-            <label className="flex flex-1 flex-col gap-1">
-              <span className="text-sm font-medium text-zinc-700">Expected players (optional)</span>
-              <input
-                type="number"
-                min={2}
-                max={6}
-                value={expectedInput}
-                onChange={(event) => setExpectedInput(event.target.value)}
-                className="rounded border border-zinc-300 px-3 py-2 text-zinc-900"
-              />
-            </label>
-            <button type="submit" disabled={updatingCount} className="rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-700 disabled:opacity-50">
-              Update
-            </button>
-          </form>
-
           <button
             type="button"
             onClick={handleStart}
