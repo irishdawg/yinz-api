@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { ensureAnonymousSession } from "@/lib/auth";
@@ -23,7 +24,7 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
   const { view, error, refetch } = useGameView(gameId, { enabled: sessionReady });
 
   if (sessionError || error) {
-    return <CenteredMessage>{sessionError ?? error}</CenteredMessage>;
+    return <CenteredMessage showHomeLink>{sessionError ?? error}</CenteredMessage>;
   }
   if (!view) {
     return <CenteredMessage>Loading…</CenteredMessage>;
@@ -31,7 +32,7 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
   const isHost = view.you !== null && view.you === view.host_player_id;
 
   if (view.phase === "CANCELLED") {
-    return <CenteredMessage>This game was cancelled.</CenteredMessage>;
+    return <CenteredMessage showHomeLink>This game was cancelled.</CenteredMessage>;
   }
   if (view.phase === "NEGOTIATION") {
     return <MarketView gameId={gameId} view={view} isHost={isHost} onChanged={refetch} />;
@@ -40,7 +41,9 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
     // Stages 6-8 (close/scoring/replay) aren't built yet -- this keeps the
     // flow from dead-ending once the market closes, without pretending
     // there's a results screen here.
-    return <CenteredMessage>Game is live (phase: {view.phase}). The close/scoring screen is coming in a later build.</CenteredMessage>;
+    return (
+      <CenteredMessage showHomeLink>Game is live (phase: {view.phase}). The close/scoring screen is coming in a later build.</CenteredMessage>
+    );
   }
 
   const joinCode = view.join_code ?? codeFromUrl;
@@ -156,10 +159,15 @@ function MarketView({
   );
 }
 
-function CenteredMessage({ children }: { children: React.ReactNode }) {
+function CenteredMessage({ children, showHomeLink = false }: { children: React.ReactNode; showHomeLink?: boolean }) {
   return (
-    <div className="flex flex-1 items-center justify-center bg-zinc-50 px-6">
+    <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-zinc-50 px-6">
       <p className="text-center text-zinc-600">{children}</p>
+      {showHomeLink && (
+        <Link href="/" className="text-sm font-medium text-zinc-700 underline">
+          Return to start
+        </Link>
+      )}
     </div>
   );
 }
