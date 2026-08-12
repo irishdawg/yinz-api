@@ -20,6 +20,8 @@ export default function Home() {
   const [themeSets, setThemeSets] = useState<ThemeSetSummary[]>([]);
   const [themeSetId, setThemeSetId] = useState("");
   const [joinCodeInput, setJoinCodeInput] = useState("");
+  const [joining, setJoining] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
 
   useEffect(() => {
     ensureAnonymousSession()
@@ -71,6 +73,37 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleJoinByCode() {
+    const code = joinCodeInput.trim().toUpperCase();
+    if (!code || !name) return;
+    setJoining(true);
+    setJoinError(null);
+    try {
+      const response = await fetch("/api/games/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ join_code: code, display_name: name }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        // The name shown here was drawn from the unscoped global pool, not
+        // excluding this specific game's roster (that only happens once a
+        // code is known) -- a collision is rare but real. Reroll and let
+        // them try again with one more click, instead of a dead-end error.
+        if (data.detail?.error_code === "name_taken") {
+          await reroll();
+          throw new Error("That name's already taken in this game -- got you a new one, try again.");
+        }
+        throw new Error(typeof data.detail === "string" ? data.detail : (data.detail?.message ?? "Couldn't join that game."));
+      }
+      router.push(`/game/${data.game_id}?code=${code}`);
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setJoining(false);
     }
   }
 
@@ -143,13 +176,14 @@ export default function Home() {
             />
             <button
               type="button"
-              onClick={() => router.push(`/join/${joinCodeInput.trim().toUpperCase()}`)}
-              disabled={!joinCodeInput.trim()}
+              onClick={handleJoinByCode}
+              disabled={!joinCodeInput.trim() || !name || joining}
               className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
             >
-              Join game
+              {joining ? "Joining…" : "Join game"}
             </button>
           </div>
+          {joinError && <p className="text-sm text-red-600">{joinError}</p>}
         </div>
       </main>
     </div>

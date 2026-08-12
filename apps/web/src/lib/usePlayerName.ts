@@ -40,7 +40,7 @@ export function usePlayerName(joinCode?: string) {
 
   const requestInitial = useCallback(() => fetchName(), [fetchName]);
   const reroll = useCallback(() => {
-    if (state.name) fetchName(state.name);
+    return state.name ? fetchName(state.name) : Promise.resolve();
   }, [fetchName, state.name]);
 
   return { ...state, requestInitial, reroll };
