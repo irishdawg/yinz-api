@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { useGameView } from "@/lib/useGameView";
+import { useGameView, type GameView } from "@/lib/useGameView";
+import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 
 export default function GamePage({ params }: { params: Promise<{ id: string }> }) {
@@ -39,7 +40,7 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
     return <CenteredMessage showHomeLink>{message}</CenteredMessage>;
   }
   if (view.phase === "NEGOTIATION") {
-    return <MarketView view={view} />;
+    return <MarketView gameId={gameId} view={view} onChanged={refetch} />;
   }
   if (view.phase !== "LOBBY") {
     // Stages 6-8 (close/scoring/replay) aren't built yet -- this keeps the
@@ -74,6 +75,15 @@ function formatMarketCountdown(startedAt: string | null, maxDurationS: number | 
 // helper instead, same as the countdown formatters above never trip it.
 function isPastDeadline(deadlineMs: number): boolean {
   return Date.now() >= deadlineMs;
+}
+
+function entityLabel(entityId: string, view: GameView): string {
+  return view.market.find((m) => m.entity_id === entityId)?.display_name ?? entityId;
+}
+
+function playerLabel(playerId: string | null, view: GameView): string {
+  if (!playerId) return "The market";
+  return view.players.find((p) => p.game_player_id === playerId)?.display_name ?? "Someone";
 }
 
 /** Host-only, any pre-SCORED phase -- the one escape hatch out of the
@@ -124,9 +134,12 @@ function useValueDelta(value: number | undefined): number | null {
   return delta;
 }
 
-function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
+function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
   const valueDelta = useValueDelta(self?.portfolio_value);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [proposeError, setProposeError] = useState<string | null>(null);
+  const [proposing, setProposing] = useState(false);
 
   // Ownership is projected directly onto the scale (a bold border, plus a
   // xN badge for duplicates) rather than shown as a separate portfolio
@@ -139,6 +152,33 @@ function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
     if (h.zone === "portfolio" && h.entity_id) {
       ownedCounts.set(h.entity_id, (ownedCounts.get(h.entity_id) ?? 0) + 1);
     }
+  }
+
+  function toggleSelect(entityId: string) {
+    setProposeError(null);
+    setSelected((prev) => {
+      if (prev.includes(entityId)) return prev.filter((id) => id !== entityId);
+      if (prev.length >= 2) return [entityId]; // start fresh rather than growing past a pair
+      return [...prev, entityId];
+    });
+  }
+
+  async function handlePropose() {
+    if (selected.length !== 2) return;
+    setProposeError(null);
+    setProposing(true);
+    const result = await submitCommand(
+      gameId,
+      "PROPOSE_SWAP",
+      { entity_a: selected[0], entity_b: selected[1] },
+      { expectedVersion: view.version, onSettled: onChanged },
+    );
+    setProposing(false);
+    if (!result.ok) {
+      setProposeError(commandErrorMessage(result.data, "Couldn't propose that swap."));
+      return;
+    }
+    setSelected([]);
   }
 
   return (
@@ -173,26 +213,55 @@ function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
       )}
 
       <div>
-        <h2 className="mb-2 text-sm font-medium text-zinc-700">Scale ({view.market.length})</h2>
+        <h2 className="mb-2 text-sm font-medium text-zinc-700">
+          Scale ({view.market.length}) <span className="font-normal text-zinc-400">— tap two to propose a swap</span>
+        </h2>
         <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-2">
           {view.market.map((entity) => {
             const owned = ownedCounts.get(entity.entity_id) ?? 0;
+            const isSelected = selected.includes(entity.entity_id);
             return (
-              <div
+              <button
                 key={entity.entity_id}
-                className={`flex w-24 flex-shrink-0 flex-col items-center gap-1 rounded bg-white p-2 text-center ${
+                type="button"
+                onClick={() => toggleSelect(entity.entity_id)}
+                className={`flex w-24 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${
                   owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                }`}
+                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"}`}
               >
                 <span className="text-xs text-zinc-400">{entity.position}</span>
                 <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
                 <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
                 {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
-              </div>
+              </button>
             );
           })}
         </div>
       </div>
+
+      {selected.length === 2 && (
+        <div className="flex items-center justify-between gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
+          <span className="text-blue-900">
+            Propose {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
+          </span>
+          <div className="flex flex-shrink-0 gap-2">
+            <button type="button" onClick={() => setSelected([])} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handlePropose}
+              disabled={proposing}
+              className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
+            >
+              {proposing ? "…" : "Propose"}
+            </button>
+          </div>
+        </div>
+      )}
+      {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
+
+      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} />
 
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
@@ -208,6 +277,119 @@ function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
           ))}
         </ul>
       </div>
+
+      <ActivityStream gameId={gameId} view={view} />
+    </div>
+  );
+}
+
+/** Open, actionable proposals -- sourced from view.proposals (the current
+ * -state projection), not the event log. Accept/Withdraw only, no Reject:
+ * a bare proposal you don't like either gets accepted, left to expire, or
+ * countered with a Pool (Stage 4). */
+function OpenProposals({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const open = view.proposals.filter((p) => p.status === "open");
+
+  async function handleAccept(proposalId: string) {
+    setError(null);
+    setBusyId(proposalId);
+    const result = await submitCommand(gameId, "ACCEPT_PROPOSAL", { proposal_id: proposalId }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusyId(null);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't accept."));
+  }
+
+  async function handleWithdraw(proposalId: string) {
+    setError(null);
+    setBusyId(proposalId);
+    const result = await submitCommand(gameId, "WITHDRAW_PROPOSAL", { proposal_id: proposalId }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusyId(null);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't withdraw."));
+  }
+
+  if (open.length === 0) return null;
+
+  return (
+    <div>
+      <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({open.length})</h2>
+      <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3 text-sm">
+        {open.map((p) => {
+          const isMine = p.proposer_id === view.you;
+          return (
+            <li key={p.proposal_id} className="flex items-center justify-between gap-2 text-zinc-900">
+              <span>
+                {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
+              </span>
+              <button
+                type="button"
+                onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
+                disabled={busyId === p.proposal_id}
+                className={`flex-shrink-0 rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
+                  isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
+                }`}
+              >
+                {busyId === p.proposal_id ? "…" : isMine ? "Withdraw" : "Accept"}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+const _ACTIVITY_EVENT_TYPES = new Set(["PROPOSAL_CREATED", "PROPOSAL_RESOLVED"]);
+const _TONE_CLASSES: Record<string, string> = {
+  open: "text-blue-700",
+  success: "text-emerald-700",
+  muted: "text-zinc-500",
+  warning: "text-amber-700",
+};
+
+function describeEvent(event: EventView, view: GameView): { text: string; tone: keyof typeof _TONE_CLASSES } {
+  if (event.type === "PROPOSAL_CREATED") {
+    const a = entityLabel(event.payload.entity_a as string, view);
+    const b = entityLabel(event.payload.entity_b as string, view);
+    return { text: `${playerLabel(event.actor_game_player_id, view)} proposed ${a} ↔ ${b}`, tone: "open" };
+  }
+  if (event.type === "PROPOSAL_RESOLVED") {
+    const proposal = view.proposals.find((p) => p.proposal_id === event.payload.proposal_id);
+    const swap = proposal ? `${entityLabel(proposal.entity_a, view)} ↔ ${entityLabel(proposal.entity_b, view)}` : "A proposal";
+    const reason = event.payload.reason as string;
+    if (reason === "executed") return { text: `${swap} — accepted`, tone: "success" };
+    if (reason === "withdrawn_by_initiator") return { text: `${swap} — withdrawn`, tone: "muted" };
+    if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
+    return { text: `${swap} — resolved`, tone: "muted" };
+  }
+  return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
+}
+
+/** Chronological narrative, distinct from OpenProposals' actionable
+ * current-state list -- the event log is what makes "still actionable" vs
+ * "history" legible over time, especially once Pools (Stage 4) add
+ * preemption into the mix. */
+function ActivityStream({ gameId, view }: { gameId: string; view: GameView }) {
+  const { events } = useGameEvents(gameId);
+  const relevant = events.filter((e) => _ACTIVITY_EVENT_TYPES.has(e.type));
+
+  return (
+    <div>
+      <h2 className="mb-2 text-sm font-medium text-zinc-700">Activity</h2>
+      <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3 text-sm">
+        {relevant.length === 0 && <li className="text-zinc-400">Nothing yet</li>}
+        {[...relevant]
+          .reverse()
+          .map((event) => {
+            const { text, tone } = describeEvent(event, view);
+            return (
+              <li key={event.seq_no} className={_TONE_CLASSES[tone]}>
+                {text}
+              </li>
+            );
+          })}
+      </ul>
     </div>
   );
 }
@@ -236,7 +418,7 @@ function LobbyReminderBanner({
   onChanged,
 }: {
   gameId: string;
-  view: import("@/lib/useGameView").GameView;
+  view: GameView;
   isHost: boolean;
   onChanged: () => void;
 }) {
@@ -286,7 +468,7 @@ function LobbyRoom({
   onChanged,
 }: {
   gameId: string;
-  view: import("@/lib/useGameView").GameView;
+  view: GameView;
   joinCode: string | null;
   isHost: boolean;
   onChanged: () => void;

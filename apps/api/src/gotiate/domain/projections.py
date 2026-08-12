@@ -6,6 +6,8 @@ caller (api/routes.py) derives it from the verified JWT and game.phase."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Iterable
 
 from gotiate.domain import themes
 from gotiate.domain.entities import (
@@ -18,6 +20,7 @@ from gotiate.domain.entities import (
     PoolVisibility,
     Proposal,
 )
+from gotiate.domain.events import EventType, GameEvent
 from gotiate.domain.themes import ThemeEntityDefinition
 
 
@@ -104,6 +107,122 @@ def project(game: Game, audience: Audience) -> dict:
         ]
 
     return view
+
+
+class EventVisibility(StrEnum):
+    """Every EventType maps to exactly one of these -- see EVENT_VISIBILITY.
+    Deliberately not the same shape as pool/holding visibility (no
+    per-instance content redaction except POOL_INSIDERS) -- most events are
+    either wholly public or wholly hidden to a given audience."""
+
+    PUBLIC = "public"
+    ACTOR_ONLY = "actor_only"
+    # Never shown live, to anyone, including the actor -- only ReplayAudience
+    # (post-SCORED) ever sees these. Distinct from ACTOR_ONLY: there is no
+    # live audience this is visible to at all.
+    SERVER_ONLY = "server_only"
+    # Existence/initiator/status-style fields stay public regardless (same
+    # rule _project_pool already applies) -- only entity_c/entity_d, the
+    # actual swap contents, get stripped for non-insiders.
+    POOL_INSIDERS = "pool_insiders"
+
+
+# Explicit, exhaustive, default-deny: an EventType with no entry here is
+# omitted from project_events entirely (see the `is None: continue` below),
+# not shown by default. test_event_visibility.py asserts this dict's keys
+# equal set(EventType) exactly, so adding a new event type without an
+# explicit visibility decision fails the test suite, not just code review.
+EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
+    EventType.GAME_CREATED: EventVisibility.PUBLIC,
+    EventType.PLAYER_JOINED: EventVisibility.PUBLIC,
+    EventType.LOBBY_TIMER_EXTENDED: EventVisibility.PUBLIC,
+    EventType.GAME_STARTED: EventVisibility.PUBLIC,
+    EventType.MARKET_INITIALIZED: EventVisibility.PUBLIC,
+    # Empty payloads today, one event for the whole game rather than one per
+    # player -- there's no actor to key an ACTOR_ONLY/OWNER-style policy on,
+    # and what actually got dealt is already visible per-owner through
+    # project()'s own holdings redaction. SERVER_ONLY keeps that the only
+    # path to this information, so a future payload addition here doesn't
+    # silently start leaking through the event log instead.
+    EventType.PORTFOLIO_DEALT: EventVisibility.SERVER_ONLY,
+    EventType.RESERVES_DEALT: EventVisibility.SERVER_ONLY,
+    EventType.WATERLINE_SELECTED: EventVisibility.SERVER_ONLY,
+    EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
+    EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
+    # Payload carries entity_c/entity_d directly -- the actual swap.
+    EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
+    EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
+    EventType.POOL_MADE_PUBLIC: EventVisibility.PUBLIC,
+    # Checked against the real payload, not assumed: POOL_RESOLVED only ever
+    # carries pool_id/reason/influence, never entity_c/entity_d -- and
+    # influence is already unconditionally public via _project_player. PUBLIC
+    # is correct here, not POOL_INSIDERS (nothing to redact).
+    EventType.POOL_RESOLVED: EventVisibility.PUBLIC,
+    EventType.SWAP_EXECUTED: EventVisibility.PUBLIC,
+    # PICKUP_STARTED's payload reveals revealed_entity_id; COMPLETED/FAILED
+    # don't carry an entity_id but are kept ACTOR_ONLY too for a consistent
+    # policy across the whole pickup family rather than splitting hairs
+    # field-by-field.
+    EventType.PICKUP_STARTED: EventVisibility.ACTOR_ONLY,
+    EventType.PICKUP_COMPLETED: EventVisibility.ACTOR_ONLY,
+    EventType.PICKUP_FAILED: EventVisibility.ACTOR_ONLY,
+    EventType.RESERVE_BURNED_FOR_SWAP: EventVisibility.SERVER_ONLY,
+    EventType.READY_TO_CLOSE_CHANGED: EventVisibility.ACTOR_ONLY,
+    EventType.UNILATERAL_WINDOW_CLOSED: EventVisibility.PUBLIC,
+    EventType.CLOSE_THRESHOLD_REACHED: EventVisibility.PUBLIC,
+    EventType.MARKET_CLOSED: EventVisibility.PUBLIC,
+    EventType.WATERLINE_REVEALED: EventVisibility.PUBLIC,
+    EventType.PORTFOLIOS_REVEALED: EventVisibility.PUBLIC,
+    EventType.GAME_SCORED: EventVisibility.PUBLIC,
+    EventType.GAME_ENDED: EventVisibility.PUBLIC,
+    EventType.GAME_CANCELLED: EventVisibility.PUBLIC,
+}
+
+_POOL_CONTENT_KEYS = frozenset({"entity_c", "entity_d"})
+
+
+def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) -> list[dict]:
+    """The activity-log counterpart to project() -- same audience-driven
+    visibility discipline, applied per event instead of per current-state
+    field. ReplayAudience (only reachable once SCORED, per project()'s own
+    guard) bypasses every policy, same shape as _project_pool's is_replay
+    carve-out."""
+    is_replay = isinstance(audience, ReplayAudience)
+    views: list[dict] = []
+    for event in events:
+        policy = EVENT_VISIBILITY.get(event.type)
+        if policy is None:
+            continue  # unknown event type -- fail safe, omit rather than default to public
+        if is_replay:
+            views.append(_event_view(event))
+            continue
+        if policy is EventVisibility.SERVER_ONLY:
+            continue
+        if policy is EventVisibility.ACTOR_ONLY:
+            if isinstance(audience, PlayerAudience) and audience.game_player_id == event.actor_game_player_id:
+                views.append(_event_view(event))
+            continue
+        if policy is EventVisibility.POOL_INSIDERS:
+            pool = game.pools.get(event.payload.get("pool_id"))
+            can_see_contents = pool is not None and (
+                pool.visibility == PoolVisibility.PUBLIC
+                or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
+            )
+            views.append(_event_view(event, redact=() if can_see_contents else _POOL_CONTENT_KEYS))
+            continue
+        views.append(_event_view(event))  # PUBLIC
+    return views
+
+
+def _event_view(event: GameEvent, *, redact: Iterable[str] = ()) -> dict:
+    redact_set = set(redact)
+    return {
+        "seq_no": event.seq_no,
+        "type": event.type.value,
+        "actor_game_player_id": event.actor_game_player_id,
+        "payload": {k: v for k, v in event.payload.items() if k not in redact_set},
+        "created_at": event.created_at,
+    }
 
 
 def _theme_lookup(game: Game) -> dict[str, ThemeEntityDefinition]:

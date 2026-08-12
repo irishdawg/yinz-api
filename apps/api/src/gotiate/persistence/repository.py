@@ -22,6 +22,7 @@ class GameRepository(Protocol):
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None: ...
     async def record_receipt(self, receipt: CommandReceipt) -> None: ...
     async def find_active_game_hosted_by(self, auth_user_id: str) -> Game | None: ...
+    async def get_events(self, game_id: str, since_seq: int = 0) -> list[GameEvent]: ...
 
     def lock_for(self, game_id: str) -> AbstractAsyncContextManager[None]:
         # asyncio.Lock (InMemoryGameRepository) and a real `SELECT ... FOR
@@ -82,6 +83,10 @@ class InMemoryGameRepository:
             if host.auth_user_id == auth_user_id:
                 return game
         return None
+
+    async def get_events(self, game_id: str, since_seq: int = 0) -> list[GameEvent]:
+        events = [e for e in self._events if e.game_id == game_id and e.seq_no >= since_seq]
+        return sorted(events, key=lambda e: e.seq_no)
 
     def lock_for(self, game_id: str) -> asyncio.Lock:
         # Stands in for `SELECT ... FOR UPDATE` on the games row (§08,

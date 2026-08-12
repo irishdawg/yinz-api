@@ -311,6 +311,22 @@ now also reachable from polling alone, not just from another command
 happening to land after the deadline — a latent gap in already-shipped
 behavior, caught as a side effect of building this.
 
+**`market_entities`'s `unique (game_id, position)` constraint is now
+`deferrable initially deferred`**
+(`20260812194827_defer_market_entities_position_unique.sql`). A swap
+exchanges two entities' positions atomically in the domain model
+(`a.position, b.position = b.position, a.position`, no invalid
+intermediate state, ever, in memory) — but `save()` persists that as two
+separate `UPDATE`s against a plain unique constraint, and whichever
+entity gets updated first transiently collides with the position the
+other hasn't vacated yet. Never caught until Stage 3's `ACCEPT_PROPOSAL`
+path first executed a real swap against live Postgres — every prior
+verification pass exercised the domain engine or the in-memory
+repository, neither of which has a uniqueness constraint to violate.
+Deferring the check to transaction commit (`save()` already runs its
+whole batch inside one transaction via `lock_for()`) fixes it generically
+for any reordering, not just a hand-rolled two-entity special case.
+
 `engine.new_id()` now returns `str(uuid.uuid4())` (canonical dashed form)
 for clean Postgres `uuid` column compatibility. Full test suite (77
 tests) still green.

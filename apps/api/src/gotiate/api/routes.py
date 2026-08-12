@@ -17,7 +17,7 @@ from gotiate.domain import engine, themes
 from gotiate.domain.entities import CommandReceipt, CommandStatus, Game, GameConfig
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.errors import NotFoundError as DomainNotFoundError
-from gotiate.domain.projections import PlayerAudience, PublicAudience, project
+from gotiate.domain.projections import PlayerAudience, PublicAudience, project, project_events
 from gotiate.persistence.player_names import NoAvailableNameError, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
@@ -190,6 +190,22 @@ async def get_game(
     player = game.player_by_auth_id(auth_user_id)
     audience = PlayerAudience(player.game_player_id) if player else PublicAudience()
     return project(game, audience)
+
+
+@router.get("/{game_id}/events")
+async def get_game_events(
+    game_id: str,
+    since_seq: int = 0,
+    auth_user_id: str = Depends(get_auth_user_id),
+    repo: GameRepository = Depends(get_repository),
+) -> list[dict]:
+    game = await repo.get(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="no such game")
+    player = game.player_by_auth_id(auth_user_id)
+    audience = PlayerAudience(player.game_player_id) if player else PublicAudience()
+    events = await repo.get_events(game_id, since_seq)
+    return project_events(game, events, audience)
 
 
 @router.post("/{game_id}/commands")

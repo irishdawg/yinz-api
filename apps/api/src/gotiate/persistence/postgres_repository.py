@@ -59,7 +59,7 @@ from gotiate.domain.entities import (
     ResolutionStatus,
     SwapIntent,
 )
-from gotiate.domain.events import GameEvent
+from gotiate.domain.events import EventType, GameEvent
 
 _ambient_conn: contextvars.ContextVar[psycopg.AsyncConnection | None] = contextvars.ContextVar("_ambient_conn", default=None)
 
@@ -464,6 +464,26 @@ class PostgresGameRepository:
                 )
                 row = await cur.fetchone()
         return await self.get(str(row["id"])) if row else None
+
+    async def get_events(self, game_id: str, since_seq: int = 0) -> list[GameEvent]:
+        async with self._connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "select * from event_ledger where game_id = %s and seq_no >= %s order by seq_no",
+                    (game_id, since_seq),
+                )
+                rows = await cur.fetchall()
+        return [
+            GameEvent(
+                game_id=str(r["game_id"]),
+                seq_no=r["seq_no"],
+                type=EventType(r["type"]),
+                actor_game_player_id=str(r["actor_game_player_id"]) if r["actor_game_player_id"] else None,
+                payload=r["payload"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
 
 
 def _to_game(

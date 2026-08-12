@@ -27,6 +27,36 @@ export interface HoldingView {
   logo_url: string | null;
 }
 
+export interface ProposalView {
+  proposal_id: string;
+  entity_a: string;
+  entity_b: string;
+  proposer_id: string;
+  status: "open" | "resolved";
+  resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | null;
+}
+
+export interface PoolView {
+  pool_id: string;
+  base_proposal_id: string;
+  visibility: "private" | "public";
+  initiator_id: string;
+  status: "open" | "resolved";
+  resolution_reason:
+    | "executed"
+    | "withdrawn_by_initiator"
+    | "invalidated_by_initiator_action"
+    | "declined_by_target"
+    | "preempted_by_other_action"
+    | "base_proposal_withdrawn"
+    | "market_closed"
+    | null;
+  // Present only when this audience can see the pool's contents (public
+  // pool, or an insider) -- see projections._project_pool.
+  entity_c?: string;
+  entity_d?: string;
+}
+
 export interface GameView {
   game_id: string;
   version: number;
@@ -48,8 +78,8 @@ export interface GameView {
   cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
-  proposals: unknown[];
-  pools: unknown[];
+  proposals: ProposalView[];
+  pools: PoolView[];
   holdings?: HoldingView[];
   waterline_entity_id?: string | null;
 }
