@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useRef, useState } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
@@ -8,6 +8,7 @@ import { ensureAnonymousSession } from "@/lib/auth";
 import { useGameView, type GameView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
+import { computeSupportMarkers, formatSupportCount } from "@/lib/supportMarkers";
 
 export default function GamePage({ params }: { params: Promise<{ id: string }> }) {
   const { id: gameId } = use(params);
@@ -86,6 +87,10 @@ function playerLabel(playerId: string | null, view: GameView): string {
   return view.players.find((p) => p.game_player_id === playerId)?.display_name ?? "Someone";
 }
 
+function playerInitial(playerId: string, view: GameView): string {
+  return playerLabel(playerId, view).charAt(0).toUpperCase();
+}
+
 /** Host-only, any pre-SCORED phase -- the one escape hatch out of the
  * one-active-game-per-host rule short of playing a game all the way
  * through. Confirmed with a native dialog since it ends the game for
@@ -140,6 +145,34 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const [selected, setSelected] = useState<string[]>([]);
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
+  const { events } = useGameEvents(gameId);
+  const supportMarkers = useMemo(() => computeSupportMarkers(events), [events]);
+
+  // "Visualize" on an open proposal briefly emphasizes the two cards it
+  // names, so a player doesn't have to mentally parse proposer + entity
+  // names and hunt for the matching tiles. Purely a client-side highlight
+  // -- no command involved -- so a plain timeout-cleared ref is enough,
+  // clearing any earlier pending clear first so a second click doesn't get
+  // its highlight cut short by the first click's timer.
+  const marketScrollRef = useRef<HTMLDivElement>(null);
+  const [highlighted, setHighlighted] = useState<string[] | null>(null);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function visualizeProposal(entityA: string, entityB: string) {
+    setHighlighted([entityA, entityB]);
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    highlightTimeoutRef.current = setTimeout(() => setHighlighted(null), 3000);
+
+    const container = marketScrollRef.current;
+    if (!container) return;
+    const els = [entityA, entityB]
+      .map((id) => container.querySelector<HTMLElement>(`[data-entity-id="${id}"]`))
+      .filter((el): el is HTMLElement => el !== null);
+    if (els.length === 0) return;
+    const minLeft = Math.min(...els.map((el) => el.offsetLeft));
+    const maxRight = Math.max(...els.map((el) => el.offsetLeft + el.offsetWidth));
+    container.scrollTo({ left: (minLeft + maxRight) / 2 - container.clientWidth / 2, behavior: "smooth" });
+  }
 
   // Ownership is projected directly onto the scale (a bold border, plus a
   // xN badge for duplicates) rather than shown as a separate portfolio
@@ -216,23 +249,39 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         <h2 className="mb-2 text-sm font-medium text-zinc-700">
           Scale ({view.market.length}) <span className="font-normal text-zinc-400">— tap two to propose a swap</span>
         </h2>
-        <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-2">
+        <div ref={marketScrollRef} className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-2">
           {view.market.map((entity) => {
             const owned = ownedCounts.get(entity.entity_id) ?? 0;
             const isSelected = selected.includes(entity.entity_id);
+            const isHighlighted = highlighted?.includes(entity.entity_id) ?? false;
+            const markers = supportMarkers.get(entity.entity_id);
             return (
               <button
                 key={entity.entity_id}
                 type="button"
+                data-entity-id={entity.entity_id}
                 onClick={() => toggleSelect(entity.entity_id)}
-                className={`flex w-24 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${
+                className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
                   owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"}`}
+                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${
+                  isHighlighted ? "z-10 scale-110 shadow-lg ring-4 ring-amber-400" : ""
+                }`}
               >
                 <span className="text-xs text-zinc-400">{entity.position}</span>
                 <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
                 <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
                 {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
+                {markers && markers.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
+                    <span>↑</span>
+                    {markers.map((m) => (
+                      <span key={m.playerId} title={playerLabel(m.playerId, view)}>
+                        {playerInitial(m.playerId, view)}
+                        {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </button>
             );
           })}
@@ -261,7 +310,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       )}
       {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
 
-      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} />
+      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} />
 
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
@@ -278,7 +327,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </ul>
       </div>
 
-      <ActivityStream gameId={gameId} view={view} />
+      <ActivityStream events={events} view={view} />
     </div>
   );
 }
@@ -287,7 +336,17 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
  * -state projection), not the event log. Accept/Withdraw only, no Reject:
  * a bare proposal you don't like either gets accepted, left to expire, or
  * countered with a Pool (Stage 4). */
-function OpenProposals({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
+function OpenProposals({
+  gameId,
+  view,
+  onChanged,
+  onVisualize,
+}: {
+  gameId: string;
+  view: GameView;
+  onChanged: () => void;
+  onVisualize: (entityA: string, entityB: string) => void;
+}) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const open = view.proposals.filter((p) => p.status === "open");
@@ -321,16 +380,25 @@ function OpenProposals({ gameId, view, onChanged }: { gameId: string; view: Game
               <span>
                 {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
               </span>
-              <button
-                type="button"
-                onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
-                disabled={busyId === p.proposal_id}
-                className={`flex-shrink-0 rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
-                  isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
-                }`}
-              >
-                {busyId === p.proposal_id ? "…" : isMine ? "Withdraw" : "Accept"}
-              </button>
+              <span className="flex flex-shrink-0 gap-1">
+                <button
+                  type="button"
+                  onClick={() => onVisualize(p.entity_a, p.entity_b)}
+                  className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
+                >
+                  Visualize
+                </button>
+                <button
+                  type="button"
+                  onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
+                  disabled={busyId === p.proposal_id}
+                  className={`rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
+                    isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
+                  }`}
+                >
+                  {busyId === p.proposal_id ? "…" : isMine ? "Withdraw" : "Accept"}
+                </button>
+              </span>
             </li>
           );
         })}
@@ -366,17 +434,50 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
 
+type ActivityFilter = "none" | "executed" | "all";
+const _ACTIVITY_FILTERS: { key: ActivityFilter; label: string }[] = [
+  { key: "none", label: "None" },
+  { key: "executed", label: "Executed" },
+  { key: "all", label: "All" },
+];
+
+function matchesActivityFilter(event: EventView, filter: ActivityFilter): boolean {
+  if (filter === "none") return false;
+  if (!_ACTIVITY_EVENT_TYPES.has(event.type)) return false;
+  if (filter === "all") return true;
+  return event.type === "PROPOSAL_RESOLVED" && event.payload.reason === "executed";
+}
+
 /** Chronological narrative, distinct from OpenProposals' actionable
  * current-state list -- the event log is what makes "still actionable" vs
  * "history" legible over time, especially once Pools (Stage 4) add
- * preemption into the mix. */
-function ActivityStream({ gameId, view }: { gameId: string; view: GameView }) {
-  const { events } = useGameEvents(gameId);
-  const relevant = events.filter((e) => _ACTIVITY_EVENT_TYPES.has(e.type));
+ * preemption into the mix. Defaults to "executed" -- a raw feed of every
+ * proposal/withdraw/expiry gets noisy fast in an active game, per direct
+ * playtest feedback; the words-as-buttons let a player dial that back up
+ * when they actually want the full narrative. */
+function ActivityStream({ events, view }: { events: EventView[]; view: GameView }) {
+  const [filter, setFilter] = useState<ActivityFilter>("executed");
+  const relevant = events.filter((e) => matchesActivityFilter(e, filter));
 
   return (
-    <div>
-      <h2 className="mb-2 text-sm font-medium text-zinc-700">Activity</h2>
+    <div data-testid="activity-panel">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-medium text-zinc-700">Activity</h2>
+        <div className="flex gap-1">
+          {_ACTIVITY_FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => setFilter(f.key)}
+              className={`rounded px-2 py-0.5 text-xs font-medium ${
+                filter === f.key ? "bg-zinc-900 text-white" : "border border-zinc-300 text-zinc-600"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3 text-sm">
         {relevant.length === 0 && <li className="text-zinc-400">Nothing yet</li>}
         {[...relevant]
