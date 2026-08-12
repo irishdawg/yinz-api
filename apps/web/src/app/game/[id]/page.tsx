@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
@@ -103,8 +103,43 @@ function CancelGameButton({ gameId, version, onChanged }: { gameId: string; vers
   );
 }
 
+/** Tracks the previous value across polls and surfaces the delta for a
+ * couple seconds after it changes, then clears itself. No backend
+ * involvement -- purely a client-side diff of consecutive poll results. */
+function useValueDelta(value: number | undefined): number | null {
+  const [delta, setDelta] = useState<number | null>(null);
+  const prevRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (value === undefined) return;
+    if (prevRef.current !== undefined && prevRef.current !== value) {
+      setDelta(value - prevRef.current);
+      const timeout = setTimeout(() => setDelta(null), 2500);
+      prevRef.current = value;
+      return () => clearTimeout(timeout);
+    }
+    prevRef.current = value;
+  }, [value]);
+
+  return delta;
+}
+
 function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
+  const valueDelta = useValueDelta(self?.portfolio_value);
+
+  // Ownership is projected directly onto the scale (a bold border, plus a
+  // xN badge for duplicates) rather than shown as a separate portfolio
+  // list -- the scale *is* the board. Only "portfolio" zone counts as
+  // owned-and-visible; reserve/burned holdings are never entity-identified
+  // here at all (project() already redacts those before they reach the
+  // client), so there's nothing to accidentally leak by including them.
+  const ownedCounts = new Map<string, number>();
+  for (const h of view.holdings ?? []) {
+    if (h.zone === "portfolio" && h.entity_id) {
+      ownedCounts.set(h.entity_id, (ownedCounts.get(h.entity_id) ?? 0) + 1);
+    }
+  }
 
   return (
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
@@ -116,14 +151,23 @@ function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
       {self && (
         <div className="flex gap-4 rounded border border-zinc-200 bg-white p-3 text-sm">
           <div>
-            <div className="text-xs font-medium text-zinc-500">Influence</div>
+            <div className="text-xs font-medium text-zinc-500">Value</div>
             <div className="tabular-nums text-zinc-900">
-              {self.influence.available} avail &middot; {self.influence.committed} committed &middot; {self.influence.spent} spent
+              {self.portfolio_value ?? "—"}
+              {valueDelta !== null && valueDelta !== 0 && (
+                <span className={`ml-1 text-xs font-bold ${valueDelta > 0 ? "text-emerald-600" : "text-red-600"}`}>
+                  {valueDelta > 0 ? "↑" : "↓"}
+                  {Math.abs(valueDelta)}
+                </span>
+              )}
             </div>
           </div>
           <div>
-            <div className="text-xs font-medium text-zinc-500">Portfolio value</div>
-            <div className="tabular-nums text-zinc-900">{self.portfolio_value ?? "—"}</div>
+            <div className="text-xs font-medium text-zinc-500">Influence</div>
+            <div className="tabular-nums text-zinc-900">
+              {self.influence.available}
+              {self.influence.committed > 0 ? ` / ${self.influence.committed} committed` : ""}
+            </div>
           </div>
         </div>
       )}
@@ -131,16 +175,22 @@ function MarketView({ view }: { view: import("@/lib/useGameView").GameView }) {
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Scale ({view.market.length})</h2>
         <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-2">
-          {view.market.map((entity) => (
-            <div
-              key={entity.entity_id}
-              className="flex w-24 flex-shrink-0 flex-col items-center gap-1 rounded border border-zinc-200 bg-white p-2 text-center"
-            >
-              <span className="text-xs text-zinc-400">{entity.position}</span>
-              <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
-              <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
-            </div>
-          ))}
+          {view.market.map((entity) => {
+            const owned = ownedCounts.get(entity.entity_id) ?? 0;
+            return (
+              <div
+                key={entity.entity_id}
+                className={`flex w-24 flex-shrink-0 flex-col items-center gap-1 rounded bg-white p-2 text-center ${
+                  owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
+                }`}
+              >
+                <span className="text-xs text-zinc-400">{entity.position}</span>
+                <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
+                <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
+              </div>
+            );
+          })}
         </div>
       </div>
 

@@ -89,7 +89,19 @@ def project(game: Game, audience: Audience) -> dict:
         view["waterline_entity_id"] = game.waterline_entity_id
         view["holdings"] = [_holding_view(h, lookup) for h in game.holdings.values()]
     elif isinstance(audience, PlayerAudience):
-        view["holdings"] = [_holding_view(h, lookup) for h in game.holdings.values() if h.owner_player_id == audience.game_player_id]
+        # Live, to the owner themselves: a reserve's identity is redacted
+        # until it's actually been revealed to them (Pick Up, or a failed
+        # pickup that already showed it) -- "you don't know your reserve
+        # until you Pick Up" is a rule enforced here, not left to the
+        # frontend's discretion. A curious player's own devtools shouldn't
+        # be able to see what a burned-unseen or still-unrevealed reserve
+        # is before the mechanic reveals it. Portfolio holdings are always
+        # known, always shown.
+        view["holdings"] = [
+            _holding_view(h, lookup, reveal=h.zone not in _UNREVEALED_TO_OWNER_ZONES)
+            for h in game.holdings.values()
+            if h.owner_player_id == audience.game_player_id
+        ]
 
     return view
 
@@ -191,7 +203,23 @@ def _pool_insiders(game: Game, pool: Pool) -> set[str]:
     return insiders
 
 
-def _holding_view(h: Holding, lookup: dict[str, ThemeEntityDefinition]) -> dict:
+# Zones where even the owner hasn't actually seen the entity yet, live --
+# the `scored` branch above never consults this, everything's revealed at
+# game end regardless of zone.
+_UNREVEALED_TO_OWNER_ZONES = frozenset({HoldingZone.RESERVE_UNREVEALED, HoldingZone.BURNED_UNSEEN, HoldingZone.SURRENDERED_UNUSED})
+
+
+def _holding_view(h: Holding, lookup: dict[str, ThemeEntityDefinition], *, reveal: bool = True) -> dict:
+    if not reveal:
+        return {
+            "holding_id": h.holding_id,
+            "entity_id": None,
+            "owner_player_id": h.owner_player_id,
+            "zone": h.zone.value,
+            "display_name": None,
+            "ticker_symbol": None,
+            "logo_url": None,
+        }
     return {
         "holding_id": h.holding_id,
         "entity_id": h.entity_id,

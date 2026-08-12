@@ -13,6 +13,20 @@ export interface GamePlayerView {
   portfolio_value?: number;
 }
 
+export interface HoldingView {
+  holding_id: string;
+  // null when this holding's identity hasn't been revealed to its owner
+  // yet (an unrevealed or burned-unseen reserve) -- redacted at the
+  // projection layer, not something the client ever has to withhold
+  // itself. Portfolio holdings are always revealed.
+  entity_id: string | null;
+  owner_player_id: string;
+  zone: "reserve_unrevealed" | "pickup_pending" | "portfolio" | "discarded" | "pickup_surrendered" | "surrendered_unused" | "burned_unseen";
+  display_name: string | null;
+  ticker_symbol: string | null;
+  logo_url: string | null;
+}
+
 export interface GameView {
   game_id: string;
   version: number;
@@ -36,7 +50,7 @@ export interface GameView {
   players: GamePlayerView[];
   proposals: unknown[];
   pools: unknown[];
-  holdings?: unknown[];
+  holdings?: HoldingView[];
   waterline_entity_id?: string | null;
 }
 

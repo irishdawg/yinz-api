@@ -672,10 +672,15 @@ def _handle_pick_up_reserve(game: Game, *, payload: dict, actor_game_player_id: 
         decision_deadline_at=deadline,
         market_version_at_start=game.version,
     )
-    player.pending_pickup = pp
-    # Cached view rendered *after* pending_pickup is attached, so it already
-    # reflects the frozen moment this player is locked into.
+    # Cached view rendered *before* pending_pickup is attached -- project()
+    # short-circuits to player.pending_pickup.cached_view the moment that
+    # field is set, so computing it after attaching would just re-read its
+    # own still-empty default back into itself, permanently. The holding's
+    # zone is already flipped to PICKUP_PENDING above, so this snapshot
+    # already reflects the frozen moment this player is about to be locked
+    # into -- attaching pp is what actually locks it.
     pp.cached_view = project(game, PlayerAudience(actor_game_player_id))
+    player.pending_pickup = pp
 
     return [
         _emit(

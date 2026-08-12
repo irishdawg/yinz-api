@@ -13,6 +13,28 @@ def _reserve_of(game, player_id):
     return next(h for h in game.holdings.values() if h.owner_player_id == player_id and h.zone.value == "reserve_unrevealed")
 
 
+def test_pick_up_reserve_caches_a_real_view_not_an_empty_one():
+    # Regression: _handle_pick_up_reserve used to attach pending_pickup to
+    # the player *before* computing cached_view -- project() short-circuits
+    # to player.pending_pickup.cached_view the instant that field is set,
+    # so the computation was reading its own still-empty default back into
+    # itself, permanently freezing every pickup at `{}`. Caught by
+    # test_holding_secrecy.py actually asserting on the cached view's
+    # contents for the first time; pinned here explicitly too.
+    game = make_started_game(2)
+    tedy = game.players[0].game_player_id
+    reserve = _reserve_of(game, tedy)
+
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )
+
+    cached_view = game.player_by_id(tedy).pending_pickup.cached_view
+    assert cached_view != {}
+    assert cached_view["game_id"] == game.id
+    assert len(cached_view["holdings"]) > 0
+
+
 def test_pick_up_then_discard_in_time():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id
