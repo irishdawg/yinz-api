@@ -20,6 +20,7 @@ export default function Home() {
   const { name, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName();
   const [themeSets, setThemeSets] = useState<ThemeSetSummary[]>([]);
   const [themeSetId, setThemeSetId] = useState("");
+  const [joinCodeInput, setJoinCodeInput] = useState("");
 
   useEffect(() => {
     ensureAnonymousSession()
@@ -141,6 +142,28 @@ export default function Home() {
             {ready ? (submitting ? "Creating…" : "Create game") : "Starting session…"}
           </button>
         </form>
+
+        <div className="mt-6 flex flex-col gap-2 border-t border-zinc-200 pt-6">
+          <span className="text-sm font-medium text-zinc-700">Have a code?</span>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Join code"
+              value={joinCodeInput}
+              onChange={(event) => setJoinCodeInput(event.target.value)}
+              maxLength={7}
+              className="flex-1 rounded border border-zinc-300 px-3 py-2 uppercase text-zinc-900 placeholder:normal-case placeholder:text-zinc-400"
+            />
+            <button
+              type="button"
+              onClick={() => router.push(`/join/${joinCodeInput.trim().toUpperCase()}`)}
+              disabled={!joinCodeInput.trim()}
+              className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
+            >
+              Join game
+            </button>
+          </div>
+        </div>
       </main>
     </div>
   );
