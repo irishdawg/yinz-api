@@ -18,7 +18,7 @@ class EventType(StrEnum):
     MARKET_INITIALIZED = "MARKET_INITIALIZED"
     PORTFOLIO_DEALT = "PORTFOLIO_DEALT"
     RESERVES_DEALT = "RESERVES_DEALT"
-    WATERLINE_SELECTED = "WATERLINE_SELECTED"
+    HAIRCUT_PROFILE_SELECTED = "HAIRCUT_PROFILE_SELECTED"
 
     # Negotiation
     PROPOSAL_CREATED = "PROPOSAL_CREATED"
@@ -33,12 +33,16 @@ class EventType(StrEnum):
     PICKUP_FAILED = "PICKUP_FAILED"
     RESERVE_BURNED_FOR_SWAP = "RESERVE_BURNED_FOR_SWAP"
     READY_TO_CLOSE_CHANGED = "READY_TO_CLOSE_CHANGED"  # ledger only, actor-visible live
+    # Fired by apply_due_time_transitions once haircut_reveal_fraction of
+    # the clock has elapsed -- see the Haircut-risk design writeup. A game
+    # that closes via the ready-threshold before this fires never sees it
+    # live; project() reveals the profile anyway once phase is SCORED.
+    HAIRCUT_RISK_REVEALED = "HAIRCUT_RISK_REVEALED"
 
     # Close & scoring
     UNILATERAL_WINDOW_CLOSED = "UNILATERAL_WINDOW_CLOSED"
     CLOSE_THRESHOLD_REACHED = "CLOSE_THRESHOLD_REACHED"
     MARKET_CLOSED = "MARKET_CLOSED"
-    WATERLINE_REVEALED = "WATERLINE_REVEALED"
     PORTFOLIOS_REVEALED = "PORTFOLIOS_REVEALED"
     GAME_SCORED = "GAME_SCORED"
     GAME_ENDED = "GAME_ENDED"

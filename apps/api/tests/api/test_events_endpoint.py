@@ -31,7 +31,7 @@ def test_events_endpoint_returns_public_events_to_a_seated_player():
     assert "GAME_CREATED" in types
     # SERVER_ONLY, never live -- confirms the route wires real visibility,
     # not just "everything in the ledger."
-    assert "WATERLINE_SELECTED" not in types
+    assert "HAIRCUT_PROFILE_SELECTED" not in types
 
 
 def test_events_endpoint_redacts_private_pool_contents_for_non_insider():

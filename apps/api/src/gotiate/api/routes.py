@@ -177,6 +177,22 @@ async def _sync_due_time_transitions(repo: GameRepository, game: Game, now: date
         return locked_game
 
 
+@router.get("/active")
+async def get_active_game(
+    auth_user_id: str = Depends(get_auth_user_id),
+    repo: GameRepository = Depends(get_repository),
+) -> dict:
+    """Backs the mobile sleep/re-entry fix: a returning session with an
+    existing active seat (any phase, not just LOBBY) routes straight back
+    into that game. Registered before GET /{game_id} -- a literal path
+    segment must win over the catch-all parametrized route, same reasoning
+    as /games/join already needing to precede it."""
+    game = await repo.find_active_game_seated_in(auth_user_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="no active game")
+    return {"game_id": game.id, "join_code": game.join_code}
+
+
 @router.get("/{game_id}")
 async def get_game(
     game_id: str,

@@ -82,6 +82,20 @@ def project(game: Game, audience: Audience) -> dict:
         "started_at": game.started_at,
         "max_duration_s": game.max_duration_s,
         "unilateral_cutoff_at": game.unilateral_cutoff_at,
+        # Public once set (same tier as unilateral_cutoff_at) -- the
+        # deadline itself isn't a secret, only the profile's contents are
+        # until it passes. See the Haircut-risk design writeup.
+        "haircut_reveal_at": game.haircut_reveal_at,
+        # The profile's contents: hidden until haircut_profile_revealed_at,
+        # or unconditionally once scored (a game that closes via the
+        # ready-threshold before the halfway mark never lives to see the
+        # live reveal fire -- this is the fallback that still exposes it,
+        # since compute_final_scores' result depends on it being knowable).
+        "haircut_profile": (
+            {"depth_probabilities": game.haircut_profile.depth_probabilities}
+            if game.haircut_profile is not None and (game.haircut_profile_revealed_at is not None or scored)
+            else None
+        ),
         # Only meaningful once phase is CANCELLED -- null otherwise.
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         "market": _project_market(game, lookup),
@@ -91,7 +105,14 @@ def project(game: Game, audience: Audience) -> dict:
     }
 
     if scored:
-        view["waterline_entity_id"] = game.waterline_entity_id
+        from gotiate.domain.engine import compute_final_scores  # local import avoids a cycle at module load
+
+        # Reads the already-persisted realized_haircut_depth, never draws a
+        # fresh one -- compute_final_scores is pure/rng-free specifically so
+        # this call and the one that built the original GAME_SCORED payload
+        # always agree (see the Haircut-risk design writeup's invariant).
+        assert game.realized_haircut_depth is not None
+        view.update(compute_final_scores(game, game.realized_haircut_depth))
         view["holdings"] = [_holding_view(h, lookup) for h in game.holdings.values()]
     elif isinstance(audience, PlayerAudience):
         # Live, to the owner themselves: a reserve's identity is redacted
@@ -148,7 +169,9 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     # silently start leaking through the event log instead.
     EventType.PORTFOLIO_DEALT: EventVisibility.SERVER_ONLY,
     EventType.RESERVES_DEALT: EventVisibility.SERVER_ONLY,
-    EventType.WATERLINE_SELECTED: EventVisibility.SERVER_ONLY,
+    # Hidden until haircut_reveal_at, same treatment the old WATERLINE_SELECTED
+    # got -- the live reveal itself is HAIRCUT_RISK_REVEALED below, not this.
+    EventType.HAIRCUT_PROFILE_SELECTED: EventVisibility.SERVER_ONLY,
     EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
     # Payload carries entity_c/entity_d directly -- the actual swap.
@@ -170,10 +193,10 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.PICKUP_FAILED: EventVisibility.ACTOR_ONLY,
     EventType.RESERVE_BURNED_FOR_SWAP: EventVisibility.SERVER_ONLY,
     EventType.READY_TO_CLOSE_CHANGED: EventVisibility.ACTOR_ONLY,
+    EventType.HAIRCUT_RISK_REVEALED: EventVisibility.PUBLIC,
     EventType.UNILATERAL_WINDOW_CLOSED: EventVisibility.PUBLIC,
     EventType.CLOSE_THRESHOLD_REACHED: EventVisibility.PUBLIC,
     EventType.MARKET_CLOSED: EventVisibility.PUBLIC,
-    EventType.WATERLINE_REVEALED: EventVisibility.PUBLIC,
     EventType.PORTFOLIOS_REVEALED: EventVisibility.PUBLIC,
     EventType.GAME_SCORED: EventVisibility.PUBLIC,
     EventType.GAME_ENDED: EventVisibility.PUBLIC,
@@ -287,9 +310,27 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
         out["influence"] = {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}
 
     if is_self or is_replay:
-        out["portfolio_value"] = _portfolio_value(game, player.game_player_id)
+        out["projected_value"] = _portfolio_value(game, player.game_player_id)
+        # safe_value only means anything once the profile is visible -- see
+        # the Haircut-risk design writeup. Derived structurally from the
+        # profile's max_depth, not a certainty == 1.0 float comparison.
+        if _haircut_visible(game):
+            out["safe_value"] = _safe_value(game, player.game_player_id)
 
     return out
+
+
+def _haircut_visible(game: Game) -> bool:
+    return game.haircut_profile is not None and (game.haircut_profile_revealed_at is not None or game.phase == GamePhase.SCORED)
+
+
+def _safe_value(game: Game, game_player_id: str) -> int:
+    assert game.haircut_profile is not None
+    max_depth = game.haircut_profile.max_depth
+    n = len(game.market)
+    positions = {eid: m.position for eid, m in game.market.items()}
+    holdings = [h for h in game.holdings.values() if h.owner_player_id == game_player_id and h.zone == HoldingZone.PORTFOLIO]
+    return sum(n - positions[h.entity_id] + 1 for h in holdings if positions[h.entity_id] > max_depth)
 
 
 def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:

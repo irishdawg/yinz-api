@@ -9,6 +9,7 @@ import { useGameView, type GameView, type PoolView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 import { computeSupportMarkers, formatSupportCount } from "@/lib/supportMarkers";
+import { certaintyAt } from "@/lib/haircutRisk";
 
 export default function GamePage({ params }: { params: Promise<{ id: string }> }) {
   const { id: gameId } = use(params);
@@ -91,6 +92,21 @@ function playerInitial(playerId: string, view: GameView): string {
   return playerLabel(playerId, view).charAt(0).toUpperCase();
 }
 
+/** Visualize's ring treatment: green (rising) / red (falling), and for a
+ * Pool's 4-card Visualize, a solid ring for the base pair (pairIndex 0)
+ * vs. a dashed outline for the pool leg (pairIndex 1) -- two different CSS
+ * mechanisms (box-shadow ring vs. border outline) so "these are two
+ * distinct pairs" reads clearly even when the two cards of a pair are far
+ * apart or off-screen from each other in the horizontally-scrolling strip. */
+function highlightRingClass(highlight: { direction: "rising" | "falling"; pairIndex: number } | undefined): string {
+  if (!highlight) return "";
+  const color = highlight.direction === "rising" ? "emerald" : "red";
+  if (highlight.pairIndex === 1) {
+    return color === "emerald" ? "outline outline-2 outline-dashed outline-emerald-500" : "outline outline-2 outline-dashed outline-red-500";
+  }
+  return color === "emerald" ? "ring-4 ring-emerald-500" : "ring-4 ring-red-500";
+}
+
 /** Host-only, any pre-SCORED phase -- the one escape hatch out of the
  * one-active-game-per-host rule short of playing a game all the way
  * through. Confirmed with a native dialog since it ends the game for
@@ -141,7 +157,7 @@ function useValueDelta(value: number | undefined): number | null {
 
 function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
-  const valueDelta = useValueDelta(self?.portfolio_value);
+  const valueDelta = useValueDelta(self?.projected_value);
   const [selected, setSelected] = useState<string[]>([]);
   // Non-null while countering a specific open proposal with a Pool --
   // reuses `selected` for card-picking, but the confirm bar's action and
@@ -160,17 +176,42 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // clearing any earlier pending clear first so a second click doesn't get
   // its highlight cut short by the first click's timer.
   const marketScrollRef = useRef<HTMLDivElement>(null);
-  const [highlighted, setHighlighted] = useState<string[] | null>(null);
+  // entity_id -> "rising" | "falling", not just a flat highlighted list --
+  // direction is derived the same way support markers and Influence
+  // liability already derive it (compare current positions, higher
+  // position = worse = rising once swapped), and Pool Visualize highlights
+  // both pairs at once. `pairIndex` (0 or 1) lets the market card apply a
+  // distinct ring style per pair (dashed vs solid) so a 4-card Pool
+  // Visualize still reads as two grouped pairs, not one blob of four.
+  const [highlighted, setHighlighted] = useState<Map<string, { direction: "rising" | "falling"; pairIndex: number }> | null>(
+    null,
+  );
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function visualizeProposal(entityA: string, entityB: string) {
-    setHighlighted([entityA, entityB]);
+  function currentPosition(entityId: string): number {
+    return view.market.find((m) => m.entity_id === entityId)?.position ?? 0;
+  }
+
+  /** Accepts one pair (bare proposal) or two (a proposal + its pool) --
+   * direction per pair comes from comparing current market positions, same
+   * rule engine._rising_entity already uses: whichever entity currently
+   * holds the worse (higher) position is "rising" (it takes the other's
+   * better position once the swap executes). */
+  function visualizeProposal(pairs: [string, string][]) {
+    const next = new Map<string, { direction: "rising" | "falling"; pairIndex: number }>();
+    pairs.forEach(([a, b], pairIndex) => {
+      const rising = currentPosition(a) > currentPosition(b) ? a : b;
+      const falling = rising === a ? b : a;
+      next.set(rising, { direction: "rising", pairIndex });
+      next.set(falling, { direction: "falling", pairIndex });
+    });
+    setHighlighted(next);
     if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
     highlightTimeoutRef.current = setTimeout(() => setHighlighted(null), 3000);
 
     const container = marketScrollRef.current;
     if (!container) return;
-    const els = [entityA, entityB]
+    const els = [...next.keys()]
       .map((id) => container.querySelector<HTMLElement>(`[data-entity-id="${id}"]`))
       .filter((el): el is HTMLElement => el !== null);
     if (els.length === 0) return;
@@ -192,7 +233,16 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     }
   }
 
+  // Pool selection guardrail: while pooling against a base proposal, its
+  // own two entities can never legally be part of the pool leg (the
+  // backend already rejects this -- see engine._handle_create_pool's
+  // overlap check) -- disabled here purely so the illegal choice is never
+  // offered, not a new rule.
+  const basePoolingProposal = poolingProposalId ? view.proposals.find((p) => p.proposal_id === poolingProposalId) : undefined;
+  const poolGuardrailEntities = new Set(basePoolingProposal ? [basePoolingProposal.entity_a, basePoolingProposal.entity_b] : []);
+
   function toggleSelect(entityId: string) {
+    if (poolGuardrailEntities.has(entityId)) return;
     setProposeError(null);
     setSelected((prev) => {
       if (prev.includes(entityId)) return prev.filter((id) => id !== entityId);
@@ -278,15 +328,21 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       {self && (
         <div className="flex gap-4 rounded border border-zinc-200 bg-white p-3 text-sm">
           <div>
-            <div className="text-xs font-medium text-zinc-500">Value</div>
+            <div className="text-xs font-medium text-zinc-500">Projected</div>
             <div className="tabular-nums text-zinc-900">
-              {self.portfolio_value ?? "—"}
+              {self.projected_value ?? "—"}
               {valueDelta !== null && valueDelta !== 0 && (
                 <span className={`ml-1 text-xs font-bold ${valueDelta > 0 ? "text-emerald-600" : "text-red-600"}`}>
                   {valueDelta > 0 ? "↑" : "↓"}
                   {Math.abs(valueDelta)}
                 </span>
               )}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-medium text-zinc-500">{view.haircut_profile ? "Safe" : "Risk reveals in"}</div>
+            <div className="tabular-nums text-zinc-900">
+              {view.haircut_profile ? (self.safe_value ?? "—") : formatCountdownTo(new Date(view.haircut_reveal_at ?? 0).getTime())}
             </div>
           </div>
           <div>
@@ -307,24 +363,32 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           {view.market.map((entity) => {
             const owned = ownedCounts.get(entity.entity_id) ?? 0;
             const isSelected = selected.includes(entity.entity_id);
-            const isHighlighted = highlighted?.includes(entity.entity_id) ?? false;
+            const isDisabled = poolGuardrailEntities.has(entity.entity_id);
+            const highlight = highlighted?.get(entity.entity_id);
             const markers = supportMarkers.get(entity.entity_id);
+            const certainty = view.haircut_profile ? certaintyAt(entity.position, view.haircut_profile.depth_probabilities) : null;
             return (
               <button
                 key={entity.entity_id}
                 type="button"
                 data-entity-id={entity.entity_id}
                 onClick={() => toggleSelect(entity.entity_id)}
+                disabled={isDisabled}
                 className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
                   owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${
-                  isHighlighted ? "z-10 scale-110 shadow-lg ring-4 ring-amber-400" : ""
-                }`}
+                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
+                  highlight ? "z-10 scale-110 shadow-lg" : ""
+                } ${highlightRingClass(highlight)}`}
               >
                 <span className="text-xs text-zinc-400">{entity.position}</span>
                 <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
                 <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
                 {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
+                {certainty !== null && (
+                  <span className={`text-[10px] font-bold ${certainty >= 0.99 ? "text-emerald-700" : certainty >= 0.5 ? "text-amber-700" : "text-red-700"}`}>
+                    {Math.round(certainty * 100)}% safe
+                  </span>
+                )}
                 {markers && markers.length > 0 && (
                   <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
                     <span>↑</span>
@@ -461,7 +525,7 @@ function OpenProposals({
   gameId: string;
   view: GameView;
   onChanged: () => void;
-  onVisualize: (entityA: string, entityB: string) => void;
+  onVisualize: (pairs: [string, string][]) => void;
   onStartPool: (proposalId: string) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -496,7 +560,7 @@ function OpenProposals({
                 <span className="flex flex-shrink-0 gap-1">
                   <button
                     type="button"
-                    onClick={() => onVisualize(p.entity_a, p.entity_b)}
+                    onClick={() => onVisualize([[p.entity_a, p.entity_b]])}
                     className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
                   >
                     Visualize
@@ -542,6 +606,15 @@ function OpenProposals({
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
                         <span className="flex flex-shrink-0 gap-1">
+                          {visible && (
+                            <button
+                              type="button"
+                              onClick={() => onVisualize([[p.entity_a, p.entity_b], [pool.entity_c!, pool.entity_d!]])}
+                              className="rounded border border-zinc-300 px-2 py-0.5"
+                            >
+                              Visualize
+                            </button>
+                          )}
                           {isPoolMine && (
                             <>
                               {pool.visibility === "private" && (

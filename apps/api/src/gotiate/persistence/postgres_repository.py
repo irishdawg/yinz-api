@@ -47,6 +47,7 @@ from gotiate.domain.entities import (
     GameConfig,
     GamePhase,
     GamePlayer,
+    HaircutProfile,
     Holding,
     HoldingZone,
     MarketEntity,
@@ -140,7 +141,8 @@ class PostgresGameRepository:
                         config = %s, lobby_reminder_deadline_at = %s, started_at = %s,
                         max_duration_s = %s, unilateral_cutoff_at = %s, unilateral_window_closed_at = %s,
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
-                        waterline_revealed = %s, cancellation_reason = %s
+                        haircut_profile = %s, haircut_reveal_at = %s, haircut_profile_revealed_at = %s,
+                        realized_haircut_depth = %s, cancellation_reason = %s
                     where id = %s
                     """,
                     (
@@ -158,7 +160,10 @@ class PostgresGameRepository:
                         game.closed_at,
                         game.close_reason.value if game.close_reason else None,
                         game.scored_at,
-                        game.waterline_revealed,
+                        Json(game.haircut_profile.model_dump(mode="json")) if game.haircut_profile else None,
+                        game.haircut_reveal_at,
+                        game.haircut_profile_revealed_at,
+                        game.realized_haircut_depth,
                         game.cancellation_reason.value if game.cancellation_reason else None,
                         game.id,
                     ),
@@ -256,15 +261,6 @@ class PostgresGameRepository:
                             holding.revealed_at_seq_no,
                         ),
                     )
-                if game.waterline_entity_id is not None:
-                    await cur.execute(
-                        """
-                        insert into waterline (game_id, entity_id) values (%s, %s)
-                        on conflict (game_id) do update set entity_id = excluded.entity_id
-                        """,
-                        (game.id, game.waterline_entity_id),
-                    )
-
     async def _upsert_player(self, cur: psycopg.AsyncCursor, game_id: str, player: GamePlayer, holdings: dict[str, Holding]) -> None:
         # reserve_count_remaining has no corresponding GamePlayer field —
         # it's derived today only in projections.py, and the schema comment
@@ -426,10 +422,7 @@ class PostgresGameRepository:
             await cur.execute("select * from holdings where game_id = %s", (game_id,))
             holding_rows = await cur.fetchall()
 
-            await cur.execute("select * from waterline where game_id = %s", (game_id,))
-            waterline_row = await cur.fetchone()
-
-        return _to_game(game_row, player_rows, private_rows, market_rows, proposal_rows, pool_rows, pool_content_rows, holding_rows, waterline_row)
+        return _to_game(game_row, player_rows, private_rows, market_rows, proposal_rows, pool_rows, pool_content_rows, holding_rows)
 
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None:
         async with self._connection() as conn:
@@ -469,6 +462,26 @@ class PostgresGameRepository:
                 row = await cur.fetchone()
         return await self.get(str(row["id"])) if row else None
 
+    async def find_active_game_seated_in(self, auth_user_id: str) -> Game | None:
+        # Same shape as find_active_game_hosted_by, just joining
+        # game_player_private directly without the host_player_id
+        # restriction -- any seated player, not just the host, gets routed
+        # back into an active game (mobile sleep/re-entry fix).
+        async with self._connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    select g.id from games g
+                    join game_players gp on gp.game_id = g.id
+                    join game_player_private gpp on gpp.game_player_id = gp.id
+                    where gpp.auth_user_id = %s and g.phase not in ('SCORED', 'CANCELLED')
+                    limit 1
+                    """,
+                    (auth_user_id,),
+                )
+                row = await cur.fetchone()
+        return await self.get(str(row["id"])) if row else None
+
     async def get_events(self, game_id: str, since_seq: int = 0) -> list[GameEvent]:
         async with self._connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
@@ -499,7 +512,6 @@ def _to_game(
     pool_rows: list[DictRow],
     pool_content_rows: dict[str, DictRow],
     holding_rows: list[DictRow],
-    waterline_row: DictRow | None,
 ) -> Game:
     players: list[GamePlayer] = []
     for pr in player_rows:
@@ -599,8 +611,10 @@ def _to_game(
         holdings=holdings,
         proposals=proposals,
         pools=pools,
-        waterline_entity_id=waterline_row["entity_id"] if waterline_row else None,
-        waterline_revealed=game_row["waterline_revealed"],
+        haircut_profile=HaircutProfile.model_validate(game_row["haircut_profile"]) if game_row["haircut_profile"] else None,
+        haircut_reveal_at=game_row["haircut_reveal_at"],
+        haircut_profile_revealed_at=game_row["haircut_profile_revealed_at"],
+        realized_haircut_depth=game_row["realized_haircut_depth"],
     )
 
 

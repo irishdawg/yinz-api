@@ -25,7 +25,22 @@ export default function Home() {
 
   useEffect(() => {
     ensureAnonymousSession()
-      .then(() => {
+      .then(async () => {
+        // A returning session with an existing active seat (any phase, not
+        // just LOBBY -- e.g. a phone that slept mid-negotiation) routes
+        // straight back into that game, before the create/join form ever
+        // renders. Checked before setReady/requestInitial so there's no
+        // flash of the create form on a session that's about to redirect.
+        try {
+          const activeResponse = await fetch("/api/games/active");
+          if (activeResponse.ok) {
+            const active: { game_id: string; join_code: string } = await activeResponse.json();
+            router.push(`/game/${active.game_id}?code=${active.join_code}`);
+            return;
+          }
+        } catch {
+          // Non-fatal -- fall through to the normal create/join flow.
+        }
         setReady(true);
         requestInitial();
         fetch("/api/theme-sets")

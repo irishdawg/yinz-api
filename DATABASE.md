@@ -112,7 +112,7 @@ live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
   Gotiate account.
   Everything else — holdings, reserve identities, private-pool contents,
   `ready_to_close`, the frozen pending-pickup view, portfolio values, the
-  Waterline pre-close, postgame replay — stays exclusively behind
+  Haircut profile pre-reveal, postgame replay — stays exclusively behind
   FastAPI's `project()`. That logic (§03/§06 of the domain model) is
   already built and tested; re-expressing it as RLS policies would mean
   maintaining the same visibility rules in two languages that can drift
@@ -264,7 +264,7 @@ game all the way to `SCORED` — a host who abandons a lobby or a
 negotiation-in-progress was permanently blocked from creating another.
 `CANCEL_GAME` (host-only, legal in any phase before `SCORED`) is the
 fix. Deliberately a distinct phase from `SCORED`, not a reuse of it —
-a cancelled game has no waterline, no winner, nothing meaningful to
+a cancelled game has no realized Haircut depth, no winner, nothing meaningful to
 replay, and reusing `SCORED` would mean either running the real scoring
 algorithm against a possibly-still-in-lobby game or special-casing
 `project()`'s scored branch to detect "fake" scores. A new enum value

@@ -172,7 +172,16 @@ def _geometry_metrics(portfolios: dict[str, list[str]], position_of: dict[str, i
 
 
 def _geometry_hard_reject(metrics: GeometryMetrics, config: SetupQualityConfig) -> bool:
-    return any(p["elite_count"] >= config.elite_concentration_limit for p in metrics.per_player.values())
+    # Elite concentration used to be hard-rejected here (waterline_baseline_v1
+    # made a top-heavy portfolio a guaranteed dominant position, "positions
+    # 1-4, everyone please go away"). Under Haircut, the top of the scale
+    # carries real risk, so top-heavy is no longer *structurally* guaranteed
+    # bad -- it moves to a soft penalty (_geometry_score's existing
+    # elite_penalty_weight term, already applied below) instead. No hard
+    # rejects remain in geometry; kept as a function (returning False) rather
+    # than removed so generate_starting_state's call site doesn't need a
+    # conditional, and so a future geometry hard-reject has an obvious home.
+    return False
 
 
 def _geometry_score(metrics: GeometryMetrics, config: SetupQualityConfig) -> float:
@@ -266,9 +275,12 @@ def generate_starting_state(
         # triggers the explicit failure below.
 
     if not pooled:
+        # Geometry no longer hard-rejects anything (see _geometry_hard_reject) --
+        # this branch is effectively unreachable now that shortlist non-empty
+        # implies pooled non-empty, but kept as a defensive guard rather than
+        # assumed away, in case a future geometry hard-reject is reintroduced.
         raise UnableToGenerateStartingStateError(
-            f"no legal complete starting state found across {len(shortlist)} shortlisted topologies "
-            f"(elite_concentration_limit={config.elite_concentration_limit})"
+            f"no legal complete starting state found across {len(shortlist)} shortlisted topologies"
         )
 
     pooled.sort(key=lambda t: t[6], reverse=True)

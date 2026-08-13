@@ -72,7 +72,15 @@ def test_holdings_hidden_before_scored_visible_after():
     assert len(scored_public_view["holdings"]) == len(game.holdings)
 
 
-def test_waterline_hidden_before_scored():
+def test_haircut_profile_hidden_before_reveal():
     game = make_started_game(2)
     view = project(game, PublicAudience())
-    assert "waterline_entity_id" not in view
+    assert view["haircut_profile"] is None
+    assert view["haircut_reveal_at"] is not None  # the deadline itself isn't secret, only the contents
+
+
+def test_haircut_profile_visible_once_revealed():
+    game = make_started_game(2)
+    game.haircut_profile_revealed_at = now()  # simulates apply_due_time_transitions firing HAIRCUT_RISK_REVEALED
+    view = project(game, PublicAudience())
+    assert view["haircut_profile"] == {"depth_probabilities": game.haircut_profile.depth_probabilities}

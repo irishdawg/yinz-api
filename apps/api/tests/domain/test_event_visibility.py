@@ -15,7 +15,7 @@ def _start_game_and_collect_events(player_count: int = 2):
     """engine.handle_command/create_game/join_game each just return the
     events *they* emitted -- nothing centrally accumulates them outside a
     real repository's append_events(). Tests that need START_GAME's own
-    events (GAME_STARTED, WATERLINE_SELECTED, ...) can't use
+    events (GAME_STARTED, HAIRCUT_PROFILE_SELECTED, ...) can't use
     tests.conftest.make_started_game, which discards them; this collects
     the same sequence a real get_events() call would return."""
     game, events = engine.create_game(actor_auth_user_id="auth-0", display_name="Host", now=now())
@@ -62,21 +62,21 @@ def test_actor_only_event_hidden_from_others_and_public():
 
 def test_server_only_event_hidden_live_from_everyone_including_actor():
     game, events = _start_game_and_collect_events(2)
-    waterline = [e for e in events if e.type == EventType.WATERLINE_SELECTED]
-    assert waterline
+    profile_selected = [e for e in events if e.type == EventType.HAIRCUT_PROFILE_SELECTED]
+    assert profile_selected
 
     for audience in (PublicAudience(), PlayerAudience(game.players[0].game_player_id), PlayerAudience(game.players[1].game_player_id)):
-        assert project_events(game, waterline, audience) == []
+        assert project_events(game, profile_selected, audience) == []
 
 
 def test_server_only_event_visible_via_replay_once_scored():
     game, events = _start_game_and_collect_events(2)
-    waterline = [e for e in events if e.type == EventType.WATERLINE_SELECTED]
+    profile_selected = [e for e in events if e.type == EventType.HAIRCUT_PROFILE_SELECTED]
     p0, p1 = [p.game_player_id for p in game.players]
     engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p0, expected_version=None, now=now())
     engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p1, expected_version=None, now=now())
 
-    assert project_events(game, waterline, ReplayAudience())
+    assert project_events(game, profile_selected, ReplayAudience())
 
 
 def test_pool_insiders_content_redacted_for_outsider_visible_to_insiders():

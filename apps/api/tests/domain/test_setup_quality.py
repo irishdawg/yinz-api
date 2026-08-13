@@ -17,6 +17,7 @@ from gotiate.domain.setup import (
     SETUP_QUALITY_VERSION,
     _geometry_hard_reject,
     _geometry_metrics,
+    _geometry_score,
     _topology_hard_reject,
     _topology_metrics,
     generate_starting_state,
@@ -97,7 +98,11 @@ def test_a_healthy_triangle_is_not_hard_rejected():
 # --------------------------------------------------------------------------
 
 
-def test_elite_concentration_is_hard_rejected():
+def test_elite_concentration_is_soft_penalized_not_hard_rejected():
+    # Under Haircut, a top-heavy portfolio is no longer structurally
+    # guaranteed dominant (the top of the scale carries real wipe risk) --
+    # this moved from a hard reject to a soft penalty via the existing
+    # elite_penalty_weight term. See the Haircut-risk design writeup.
     portfolios = {"p1": ["A", "A", "B", "C", "D"]}
     # A (anchor, counted once as a distinct entity), B, C in positions 1-3
     # (the elite zone for an 11-entity market at the default 1/3 fraction);
@@ -105,8 +110,16 @@ def test_elite_concentration_is_hard_rejected():
     position_of = {"A": 1, "B": 2, "C": 3, "D": 9, **{chr(ord("E") + i): 4 + i for i in range(6)}}
     metrics = _geometry_metrics(portfolios, position_of, market_size=11, config=_config())
     assert metrics.per_player["p1"]["elite_count"] == 3
-    assert _geometry_hard_reject(metrics, _config(elite_concentration_limit=3))
+    assert not _geometry_hard_reject(metrics, _config(elite_concentration_limit=3))
     assert not _geometry_hard_reject(metrics, _config(elite_concentration_limit=4))
+
+    # But it does still cost real score, via elite_penalty_weight -- a
+    # spread-out portfolio with zero elite concentration scores strictly
+    # higher (less negative) than this top-heavy one, all else equal.
+    spread_portfolios = {"p1": ["A", "A", "B", "C", "D"]}
+    spread_position_of = {"A": 1, "B": 4, "C": 7, "D": 10, **{chr(ord("E") + i): 2 + i for i in range(6)}}
+    spread_metrics = _geometry_metrics(spread_portfolios, spread_position_of, market_size=11, config=_config())
+    assert _geometry_score(metrics, _config()) < _geometry_score(spread_metrics, _config())
 
 
 def test_spread_out_holdings_are_not_hard_rejected():

@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # --------------------------------------------------------------------------
@@ -24,8 +24,8 @@ class GamePhase(StrEnum):
     CLOSING = "CLOSING"
     SCORED = "SCORED"
     # Host-initiated, any phase before SCORED (CANCEL_GAME) -- terminal,
-    # like SCORED, but deliberately distinct from it: no waterline, no
-    # winner, nothing to replay. Exists specifically so
+    # like SCORED, but deliberately distinct from it: no realized Haircut
+    # depth, no winner, nothing to replay. Exists specifically so
     # find_active_game_hosted_by's one-active-game-per-host rule has an
     # escape hatch other than waiting out real gameplay to completion.
     CANCELLED = "CANCELLED"
@@ -137,6 +137,34 @@ class SetupQualityConfig(BaseModel):
     max_generation_attempts: int = 20000
 
 
+class HaircutProfile(BaseModel):
+    """A public-once-revealed probability distribution over `haircut_depth`
+    (how many of the top market positions get wiped at scoring) -- see the
+    Haircut-risk design writeup. `depth_probabilities[d]` is P(realized
+    depth == d) for d = 0..K; index 0 means "nothing wiped." Certainty for
+    market position p (1-indexed) is sum(depth_probabilities[0:p]) -- a
+    position survives iff the realized depth is strictly less than it."""
+
+    depth_probabilities: list[float]
+
+    @field_validator("depth_probabilities")
+    @classmethod
+    def _validate_distribution(cls, v: list[float]) -> list[float]:
+        if not v:
+            raise ValueError("depth_probabilities must not be empty")
+        if any(p < 0 for p in v):
+            raise ValueError("depth_probabilities must be non-negative")
+        if abs(sum(v) - 1.0) > 1e-6:
+            raise ValueError(f"depth_probabilities must sum to 1.0, got {sum(v)}")
+        return v
+
+    @property
+    def max_depth(self) -> int:
+        """Highest depth with nonzero probability -- the boundary beyond
+        which a market position is structurally safe (see safe_value)."""
+        return max(i for i, p in enumerate(self.depth_probabilities) if p > 0)
+
+
 class GameConfig(BaseModel):
     """Frozen onto Game at START_GAME. Later tuning changes never retroactively
     affect a live game — see domain model §09."""
@@ -164,6 +192,45 @@ class GameConfig(BaseModel):
     max_clock_seconds_by_players: dict[int, int] = Field(
         default_factory=lambda: {2: 480, 3: 720, 4: 960, 5: 1200, 6: 1440}
     )
+    # Retires waterline_baseline_v1 entirely -- see the Haircut-risk design
+    # writeup. Several monotonic profiles per player count (not one
+    # universal curve) so players can't learn "position N is the real
+    # optimum"; every profile's max_depth must equal
+    # round(market_size_by_players[n] * risk_depth_fraction) for that same
+    # n, enforced by the model_validator below so config and profile data
+    # can never silently drift apart.
+    haircut_profiles_by_players: dict[int, list[HaircutProfile]] = Field(
+        default_factory=lambda: {
+            2: [
+                HaircutProfile(depth_probabilities=[0.70, 0.18, 0.09, 0.03]),
+                HaircutProfile(depth_probabilities=[0.45, 0.25, 0.20, 0.10]),
+            ],
+            3: [
+                HaircutProfile(depth_probabilities=[0.65, 0.17, 0.10, 0.05, 0.03]),
+                HaircutProfile(depth_probabilities=[0.42, 0.23, 0.17, 0.11, 0.07]),
+            ],
+            4: [
+                HaircutProfile(depth_probabilities=[0.68, 0.14, 0.08, 0.06, 0.03, 0.01]),
+                HaircutProfile(depth_probabilities=[0.48, 0.19, 0.14, 0.11, 0.06, 0.02]),
+            ],
+            5: [
+                HaircutProfile(depth_probabilities=[0.68, 0.14, 0.08, 0.06, 0.03, 0.01]),
+                HaircutProfile(depth_probabilities=[0.48, 0.19, 0.14, 0.11, 0.06, 0.02]),
+            ],
+            6: [
+                HaircutProfile(depth_probabilities=[0.62, 0.14, 0.09, 0.06, 0.04, 0.03, 0.02]),
+                HaircutProfile(depth_probabilities=[0.40, 0.18, 0.14, 0.11, 0.09, 0.06, 0.02]),
+            ],
+        }
+    )
+    # The profile is chosen and locked at START_GAME but stays hidden until
+    # this fraction of the negotiation clock has elapsed -- see
+    # engine._handle_start_game / apply_due_time_transitions.
+    haircut_reveal_fraction: float = 0.5
+    # Target risky depth = round(market_size * risk_depth_fraction) -- see
+    # the worked table in the design writeup (9->3, 11->4, 13->5, 15->5,
+    # 17->6).
+    risk_depth_fraction: float = 0.35
     starting_influence: int = 10
     unilateral_cutoff_fraction: float = 0.10
     portfolio_shape: list[int] = Field(default_factory=lambda: [2, 1, 1, 1])
@@ -209,15 +276,33 @@ class GameConfig(BaseModel):
     theme_set_version: int = 1
     valuation_policy_id: str = "linear_rank_v1"
     valuation_policy_version: int = 1
-    final_scoring_policy_id: str = "waterline_baseline_v1"
+    final_scoring_policy_id: str = "haircut_risk_v1"
     final_scoring_policy_version: int = 1
-    waterline_selection_policy_id: str = "uniform_random_v1"
-    waterline_selection_policy_version: int = 1
 
     def close_threshold(self, player_count: int) -> int:
         if player_count <= 3:
             return player_count
         return math.ceil(0.75 * player_count)
+
+    @model_validator(mode="after")
+    def _validate_haircut_profiles_match_risk_band(self) -> "GameConfig":
+        # Enforced invariant, not just convention -- see the Haircut-risk
+        # design writeup's config/profile-drift guard. Fails loudly at
+        # construction time (import time, for the module-level default
+        # GameConfig) rather than at game-start.
+        for n, profiles in self.haircut_profiles_by_players.items():
+            market_size = self.market_size_by_players.get(n)
+            if market_size is None:
+                continue
+            expected_depth = round(market_size * self.risk_depth_fraction)
+            for profile in profiles:
+                if profile.max_depth != expected_depth:
+                    raise ValueError(
+                        f"haircut_profiles_by_players[{n}] has a profile with max_depth="
+                        f"{profile.max_depth}, expected {expected_depth} "
+                        f"(round({market_size} * {self.risk_depth_fraction}))"
+                    )
+        return self
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +428,17 @@ class Game(BaseModel):
     unilateral_window_closed_at: datetime | None = None
     close_threshold: int | None = None
 
+    # Chosen and locked at START_GAME, hidden until haircut_reveal_at (or
+    # until the game is SCORED, whichever comes first -- see project()) --
+    # see the Haircut-risk design writeup. realized_haircut_depth is drawn
+    # exactly once, at close_market, and persisted immediately; nothing
+    # downstream (GAME_SCORED, project() at SCORED, replay) ever redraws
+    # it, only reads it.
+    haircut_profile: HaircutProfile | None = None
+    haircut_reveal_at: datetime | None = None
+    haircut_profile_revealed_at: datetime | None = None
+    realized_haircut_depth: int | None = None
+
     closed_at: datetime | None = None
     close_reason: CloseReason | None = None
     scored_at: datetime | None = None
@@ -353,9 +449,6 @@ class Game(BaseModel):
     holdings: dict[str, Holding] = Field(default_factory=dict)  # holding_id -> Holding
     proposals: dict[str, Proposal] = Field(default_factory=dict)
     pools: dict[str, Pool] = Field(default_factory=dict)
-
-    waterline_entity_id: str | None = None
-    waterline_revealed: bool = False
 
     def player_by_id(self, game_player_id: str | None) -> GamePlayer:
         for p in self.players:

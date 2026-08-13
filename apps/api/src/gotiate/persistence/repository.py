@@ -22,6 +22,7 @@ class GameRepository(Protocol):
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None: ...
     async def record_receipt(self, receipt: CommandReceipt) -> None: ...
     async def find_active_game_hosted_by(self, auth_user_id: str) -> Game | None: ...
+    async def find_active_game_seated_in(self, auth_user_id: str) -> Game | None: ...
     async def get_events(self, game_id: str, since_seq: int = 0) -> list[GameEvent]: ...
 
     def lock_for(self, game_id: str) -> AbstractAsyncContextManager[None]:
@@ -81,6 +82,19 @@ class InMemoryGameRepository:
                 continue
             host = game.player_by_id(game.host_player_id)
             if host.auth_user_id == auth_user_id:
+                return game
+        return None
+
+    async def find_active_game_seated_in(self, auth_user_id: str) -> Game | None:
+        # Same shape as find_active_game_hosted_by, just without the
+        # host-only restriction -- backs the mobile sleep/re-entry fix (any
+        # seated player, not just the host, should be routed straight back
+        # into an active game). Full table scan, same acceptable-at-V1-scale
+        # reasoning as above.
+        for game in self._games.values():
+            if game.phase in (GamePhase.SCORED, GamePhase.CANCELLED):
+                continue
+            if game.player_by_auth_id(auth_user_id) is not None:
                 return game
         return None
 

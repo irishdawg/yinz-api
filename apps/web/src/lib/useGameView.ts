@@ -13,7 +13,13 @@ export interface GamePlayerView {
   influence?: { available: number; committed: number; spent: number };
   reserve_count_remaining: number;
   ready_to_close?: boolean;
-  portfolio_value?: number;
+  // Self-only, same reasoning as influence -- see the Haircut-risk design
+  // writeup. projected_value is the unconditional linear-rank sum (what
+  // you'd score if nothing were wiped); safe_value only appears once the
+  // profile is revealed (or the game is scored), and only covers positions
+  // that cannot possibly be wiped.
+  projected_value?: number;
+  safe_value?: number;
 }
 
 export interface HoldingView {
@@ -86,6 +92,10 @@ export interface GameView {
   started_at: string | null;
   max_duration_s: number | null;
   unilateral_cutoff_at: string | null;
+  // Public once set -- the deadline itself isn't secret, only the
+  // profile's contents are until it passes (or the game is scored).
+  haircut_reveal_at: string | null;
+  haircut_profile: { depth_probabilities: number[] } | null;
   // Only meaningful once phase is CANCELLED.
   cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
@@ -93,7 +103,12 @@ export interface GameView {
   proposals: ProposalView[];
   pools: PoolView[];
   holdings?: HoldingView[];
-  waterline_entity_id?: string | null;
+  // Present once phase is SCORED -- compute_final_scores' result, merged
+  // in by project(). See the Haircut-risk design writeup.
+  realized_haircut_depth?: number;
+  wiped_entity_ids?: string[];
+  results?: Array<{ game_player_id: string; final_value: number }>;
+  winners?: string[];
 }
 
 /** Polls GET /api/games/[id] on a fixed interval -- the authoritative

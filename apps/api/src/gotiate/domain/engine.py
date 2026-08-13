@@ -22,6 +22,7 @@ from gotiate.domain.entities import (
     GameConfig,
     GamePhase,
     GamePlayer,
+    HaircutProfile,
     Holding,
     HoldingZone,
     MarketEntity,
@@ -201,6 +202,10 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
         game.unilateral_window_closed_at = now
         events.append(_emit(game, now, EventType.UNILATERAL_WINDOW_CLOSED, actor=None, payload={}))
 
+    if game.haircut_profile_revealed_at is None and game.haircut_reveal_at is not None and now >= game.haircut_reveal_at:
+        game.haircut_profile_revealed_at = now
+        events.append(_emit(game, now, EventType.HAIRCUT_RISK_REVEALED, actor=None, payload={}))
+
     if game.phase == GamePhase.NEGOTIATION and game.started_at is not None and game.max_duration_s is not None:
         if now >= game.started_at + timedelta(seconds=game.max_duration_s):
             events += close_market(game, CloseReason.TIME_EXPIRED, now)
@@ -229,6 +234,8 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
         if pp is not None and now > pp.decision_deadline_at + timedelta(milliseconds=game.config.pickup_transport_grace_ms):
             return True
     if game.unilateral_window_closed_at is None and game.unilateral_cutoff_at is not None and now >= game.unilateral_cutoff_at:
+        return True
+    if game.haircut_profile_revealed_at is None and game.haircut_reveal_at is not None and now >= game.haircut_reveal_at:
         return True
     return game.started_at is not None and game.max_duration_s is not None and now >= game.started_at + timedelta(seconds=game.max_duration_s)
 
@@ -294,13 +301,19 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
         if holding.zone == HoldingZone.RESERVE_UNREVEALED:
             holding.zone = HoldingZone.SURRENDERED_UNUSED
 
-    game.waterline_revealed = True
-    events.append(
-        _emit(game, now, EventType.WATERLINE_REVEALED, actor=None, payload={"entity_id": game.waterline_entity_id})
-    )
     events.append(_emit(game, now, EventType.PORTFOLIOS_REVEALED, actor=None, payload={}))
 
-    result = score_game(game)
+    # The one and only random draw for this game's scoring -- see the
+    # Haircut-risk design writeup's invariant. Persisted immediately;
+    # everything downstream (this event's own payload, and every later
+    # project()/replay call at SCORED) reads it back through the pure
+    # compute_final_scores, never rerolls it. A fresh unseeded rng here,
+    # same convention as _handle_start_game -- draw_haircut_depth itself
+    # takes an explicit rng specifically so it stays unit-testable with a
+    # seeded one.
+    assert game.haircut_profile is not None
+    game.realized_haircut_depth = draw_haircut_depth(game.haircut_profile, random.Random())
+    result = compute_final_scores(game, game.realized_haircut_depth)
     events.append(_emit(game, now, EventType.GAME_SCORED, actor=None, payload=result))
 
     game.scored_at = now
@@ -310,33 +323,41 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
     return events
 
 
-def score_game(game: Game) -> dict:
-    """waterline_baseline_v1 — count at or above the line, full lexicographic
-    tiebreak, exact ties declared a shared win (see decision log §10)."""
-    assert game.waterline_entity_id is not None
-    waterline_position = game.market[game.waterline_entity_id].position
+def draw_haircut_depth(profile: HaircutProfile, rng: random.Random) -> int:
+    """The sole random draw behind Haircut scoring -- one correlated pick
+    of a wipe depth, never independent per-position rolls. Must only ever
+    be called once per game, from close_market; see compute_final_scores
+    for the pure, deterministic half of scoring."""
+    depths = range(len(profile.depth_probabilities))
+    return rng.choices(depths, weights=profile.depth_probabilities, k=1)[0]
+
+
+def compute_final_scores(game: Game, realized_haircut_depth: int) -> dict:
+    """haircut_risk_v1 — positions 1..realized_haircut_depth score zero,
+    everything else scores its linear-rank value; highest total wins, exact
+    ties share the win. Pure and rng-free by design: called once to build
+    GAME_SCORED's payload and again, idempotently, from every later
+    project()/replay call at SCORED -- see the "randomness happens exactly
+    once" invariant in the Haircut-risk design writeup. Never draws a depth
+    itself, only ever consumes an already-persisted one."""
+    n = len(game.market)
     positions = {eid: m.position for eid, m in game.market.items()}
+    wiped_entity_ids = sorted(eid for eid, pos in positions.items() if pos <= realized_haircut_depth)
 
     results = []
     for player in game.players:
         holdings = [
             h for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.PORTFOLIO
         ]
-        qualifying = sum(1 for h in holdings if positions[h.entity_id] <= waterline_position)
-        ranks_sorted = sorted(positions[h.entity_id] for h in holdings)  # ascending position = strongest first
-        results.append(
-            {"game_player_id": player.game_player_id, "qualifying_count": qualifying, "tiebreak_ranks": ranks_sorted}
-        )
+        final_value = sum(n - positions[h.entity_id] + 1 for h in holdings if positions[h.entity_id] > realized_haircut_depth)
+        results.append({"game_player_id": player.game_player_id, "final_value": final_value})
 
-    max_qualifying = max(r["qualifying_count"] for r in results)
-    contenders = [r for r in results if r["qualifying_count"] == max_qualifying]
-    contenders.sort(key=lambda r: r["tiebreak_ranks"])
-    best_ranks = contenders[0]["tiebreak_ranks"]
-    winners = [r["game_player_id"] for r in contenders if r["tiebreak_ranks"] == best_ranks]
+    max_value = max(r["final_value"] for r in results)
+    winners = [r["game_player_id"] for r in results if r["final_value"] == max_value]
 
     return {
-        "waterline_entity_id": game.waterline_entity_id,
-        "waterline_position": waterline_position,
+        "realized_haircut_depth": realized_haircut_depth,
+        "wiped_entity_ids": wiped_entity_ids,
         "results": results,
         "winners": winners,
     }
@@ -486,15 +507,20 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     events.append(_emit(game, now, EventType.PORTFOLIO_DEALT, actor=None, payload=starting_state.diagnostics))
     events.append(_emit(game, now, EventType.RESERVES_DEALT, actor=None, payload={}))
 
-    game.waterline_entity_id = rng.choice(entity_ids)
-    events.append(_emit(game, now, EventType.WATERLINE_SELECTED, actor=None, payload={}))
-
     game.max_duration_s = game.config.max_clock_seconds_by_players[n]
     game.started_at = now
     game.unilateral_cutoff_at = now + timedelta(
         seconds=game.max_duration_s * (1 - game.config.unilateral_cutoff_fraction)
     )
     game.close_threshold = game.config.close_threshold(n)
+
+    # Chosen and locked now, hidden until haircut_reveal_at -- see the
+    # Haircut-risk design writeup. game.max_duration_s is already assigned
+    # above, so this can reference it directly rather than recomputing from
+    # config (both would agree, but this avoids the ordering dependency).
+    game.haircut_profile = rng.choice(game.config.haircut_profiles_by_players[n])
+    game.haircut_reveal_at = now + timedelta(seconds=game.max_duration_s * game.config.haircut_reveal_fraction)
+    events.append(_emit(game, now, EventType.HAIRCUT_PROFILE_SELECTED, actor=None, payload={}))
     game.phase = GamePhase.NEGOTIATION
     events.append(_emit(game, now, EventType.GAME_STARTED, actor=actor_game_player_id, payload={"player_count": n}))
     return events

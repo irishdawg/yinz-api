@@ -98,4 +98,6 @@ def test_start_game_sizes_market_and_deals_by_player_count():
         reserves = [h for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone.value == "reserve_unrevealed"]
         assert len(portfolio) == sum(game.config.portfolio_shape)
         assert len(reserves) == game.config.reserve_count
-    assert game.waterline_entity_id in game.market
+    assert game.haircut_profile is not None
+    assert game.haircut_profile in game.config.haircut_profiles_by_players[4]
+    assert game.haircut_reveal_at == game.started_at + timedelta(seconds=game.max_duration_s * game.config.haircut_reveal_fraction)
