@@ -72,6 +72,27 @@ def test_holdings_hidden_before_scored_visible_after():
     assert len(scored_public_view["holdings"]) == len(game.holdings)
 
 
+def test_scored_game_with_no_realized_haircut_depth_does_not_crash():
+    # Real production incident: a game that reached SCORED under the
+    # retired waterline_baseline_v1 model (before realized_haircut_depth
+    # existed) has that field as None forever -- the old winner data is
+    # gone, not recoverable, so project() must skip the results/winners
+    # merge gracefully rather than asserting/crashing. See the Haircut-risk
+    # design writeup's SCORED-branch note.
+    game = make_started_game(2)
+    p0 = game.players[0].game_player_id
+    p1 = game.players[1].game_player_id
+    engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p0, expected_version=None, now=now())
+    engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p1, expected_version=None, now=now())
+    assert game.realized_haircut_depth is not None  # sanity check on the normal path
+
+    game.realized_haircut_depth = None  # simulates a legacy pre-migration SCORED game
+    view = project(game, PublicAudience())  # must not raise
+    assert "results" not in view
+    assert "winners" not in view
+    assert len(view["holdings"]) == len(game.holdings)  # holdings still revealed regardless
+
+
 def test_haircut_profile_hidden_before_reveal():
     game = make_started_game(2)
     view = project(game, PublicAudience())

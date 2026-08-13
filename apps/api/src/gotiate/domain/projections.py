@@ -111,8 +111,15 @@ def project(game: Game, audience: Audience) -> dict:
         # fresh one -- compute_final_scores is pure/rng-free specifically so
         # this call and the one that built the original GAME_SCORED payload
         # always agree (see the Haircut-risk design writeup's invariant).
-        assert game.realized_haircut_depth is not None
-        view.update(compute_final_scores(game, game.realized_haircut_depth))
+        # realized_haircut_depth is None for any game that reached SCORED
+        # under the retired waterline_baseline_v1 model (before this field
+        # existed) -- that data is gone, not recoverable, so this merge is
+        # skipped entirely rather than asserted/crashed on, same as before
+        # results/winners existed in the projection at all. Real production
+        # incident, not a hypothetical: a live pre-migration SCORED game hit
+        # exactly this path and 500'd on every poll until this guard landed.
+        if game.realized_haircut_depth is not None:
+            view.update(compute_final_scores(game, game.realized_haircut_depth))
         view["holdings"] = [_holding_view(h, lookup) for h in game.holdings.values()]
     elif isinstance(audience, PlayerAudience):
         # Live, to the owner themselves: a reserve's identity is redacted
