@@ -17,6 +17,7 @@ from gotiate.domain.entities import (
     Holding,
     HoldingZone,
     Pool,
+    PoolResolutionReason,
     PoolVisibility,
     Proposal,
     ResolutionStatus,
@@ -207,6 +208,7 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
             pool = game.pools.get(event.payload.get("pool_id"))
             can_see_contents = pool is not None and (
                 pool.visibility == PoolVisibility.PUBLIC
+                or _pool_executed(pool)
                 or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
             )
             views.append(_event_view(event, redact=() if can_see_contents else _POOL_CONTENT_KEYS))
@@ -339,6 +341,7 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
     can_see_contents = (
         pool.visibility == PoolVisibility.PUBLIC
         or is_replay
+        or _pool_executed(pool)
         or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
     )
     out: dict = {
@@ -374,6 +377,17 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
             pool_leg_liability = liability_for(game, audience.game_player_id, pool.swap.entity_a, pool.swap.entity_b)
             out["my_accept_liability"] = 1 if (base_leg_liability == 1 or pool_leg_liability == 1) else 0
     return out
+
+
+def _pool_executed(pool: Pool) -> bool:
+    """A private Pool stays private forever if it's declined, withdrawn,
+    preempted, or otherwise never executes -- but the instant it executes,
+    its contents become public as part of that executed transaction and
+    thereafter contribute to activity history and support markers, same
+    as a bare proposal. Checked against current pool state, not the event
+    that's being rendered, so both PRIVATE_POOL_CREATED and POOL_RESOLVED
+    correctly flip to visible together once this becomes true."""
+    return pool.status == ResolutionStatus.RESOLVED and pool.resolution_reason == PoolResolutionReason.EXECUTED
 
 
 def _pool_insiders(game: Game, pool: Pool) -> set[str]:

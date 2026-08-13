@@ -1,4 +1,5 @@
 import type { EventView } from "./useGameEvents";
+import type { PoolView } from "./useGameView";
 
 export interface SupportEntry {
   playerId: string;
@@ -12,21 +13,42 @@ function pairKey(a: string, b: string): string {
 }
 
 /** Derives, from the public event log alone, which players have publicly
- * and successfully pushed each market entity up. When a bare proposal
- * executes, its proposer and accepter both get +1 on the entity that
- * rose; either of them also has any existing marker on the entity that
- * fell cleared entirely (not decremented) -- an "up" only goes away once
- * that same player helps the same entity back down. Withdrawn/expired
- * proposals never touch a marker. Movement magnitude is irrelevant, and
- * the count is never capped here -- only the display layer caps at 3+.
- * Direction is derived by comparing the two entities' *final* positions
- * against each other post-swap (lower position = stronger rank = rose) --
- * no need to know their positions before the swap. Deliberately not a
- * generic reducer: Pool- and unilateral-swap-triggered markers are
- * Stage 4+ scope, added as more event shapes into this same shape later. */
-export function computeSupportMarkers(events: EventView[]): SupportMarkers {
+ * and successfully pushed each market entity up. When a bare proposal or
+ * a Pool leg executes, its author and accepter both get +1 on the entity
+ * that rose; either of them also has any existing marker on the entity
+ * that fell cleared entirely (not decremented) -- an "up" only goes away
+ * once that same player helps the same entity back down. Withdrawn/
+ * expired/declined/preempted resolutions never touch a marker. Movement
+ * magnitude is irrelevant, and the count is never capped here -- only the
+ * display layer caps at 3+. Direction is derived by comparing the two
+ * entities' *final* positions against each other post-swap (lower
+ * position = stronger rank = rose) -- no need for pre-swap positions.
+ *
+ * A Pool's ACCEPT_POOL execution fires two independent resolution events
+ * -- PROPOSAL_RESOLVED for the base leg, POOL_RESOLVED for the pool's own
+ * leg -- each crediting its own author + the (same) accepter. That's why
+ * there's no special-cased "combine" logic here: the two legs are simply
+ * two independent credits, exactly like two separate bare proposals would
+ * be. The one real wrinkle is a private pool's base proposer self-
+ * accepting: the base leg's author and accepter are then the same player,
+ * so credits are deduped through a Set rather than blindly bumping twice.
+ *
+ * `pools` (the live view.pools, not the event log) is the source of a
+ * pool's own entities/initiator -- not the PRIVATE_POOL_CREATED event's
+ * payload, which a non-insider's client may have already cached in
+ * redacted form (no entity_c/entity_d) before the pool executed and
+ * became publicly visible. view.pools is refetched every poll, so it
+ * always reflects current visibility, regardless of when this specific
+ * client first saw the creation event. */
+export function computeSupportMarkers(events: EventView[], pools: PoolView[]): SupportMarkers {
   const support = new Map<string, Map<string, number>>();
   const proposalsById = new Map<string, { proposerId: string; entityA: string; entityB: string }>();
+  const poolsById = new Map<string, { initiatorId: string; entityC: string; entityD: string }>();
+  for (const pool of pools) {
+    if (pool.entity_c && pool.entity_d) {
+      poolsById.set(pool.pool_id, { initiatorId: pool.initiator_id, entityC: pool.entity_c, entityD: pool.entity_d });
+    }
+  }
   const lastSwapByPair = new Map<string, { entityA: string; entityB: string; positionA: number; positionB: number }>();
 
   function bump(entityId: string, playerId: string) {
@@ -36,6 +58,19 @@ export function computeSupportMarkers(events: EventView[]): SupportMarkers {
   }
   function clear(entityId: string, playerId: string) {
     support.get(entityId)?.delete(playerId);
+  }
+  function creditLeg(risingEntity: string, fallingEntity: string, participants: (string | null | undefined)[]) {
+    const uniquePlayerIds = new Set(participants.filter((p): p is string => Boolean(p)));
+    for (const playerId of uniquePlayerIds) {
+      bump(risingEntity, playerId);
+      clear(fallingEntity, playerId);
+    }
+  }
+  function directionOf(entityA: string, entityB: string): { rising: string; falling: string } | null {
+    const swap = lastSwapByPair.get(pairKey(entityA, entityB));
+    if (!swap) return null;
+    const rising = swap.positionA < swap.positionB ? swap.entityA : swap.entityB;
+    return { rising, falling: rising === swap.entityA ? swap.entityB : swap.entityA };
   }
 
   for (const event of events) {
@@ -62,14 +97,16 @@ export function computeSupportMarkers(events: EventView[]): SupportMarkers {
       const proposal = proposalsById.get(event.payload.proposal_id as string);
       const accepterId = event.actor_game_player_id;
       if (!proposal || !accepterId) continue;
-      const swap = lastSwapByPair.get(pairKey(proposal.entityA, proposal.entityB));
-      if (!swap) continue;
-      const risingEntity = swap.positionA < swap.positionB ? swap.entityA : swap.entityB;
-      const fallingEntity = risingEntity === swap.entityA ? swap.entityB : swap.entityA;
-      for (const playerId of [proposal.proposerId, accepterId]) {
-        bump(risingEntity, playerId);
-        clear(fallingEntity, playerId);
-      }
+      const direction = directionOf(proposal.entityA, proposal.entityB);
+      if (!direction) continue;
+      creditLeg(direction.rising, direction.falling, [proposal.proposerId, accepterId]);
+    } else if (event.type === "POOL_RESOLVED" && event.payload.reason === "executed") {
+      const pool = poolsById.get(event.payload.pool_id as string);
+      const accepterId = event.actor_game_player_id;
+      if (!pool || !accepterId) continue;
+      const direction = directionOf(pool.entityC, pool.entityD);
+      if (!direction) continue;
+      creditLeg(direction.rising, direction.falling, [pool.initiatorId, accepterId]);
     }
   }
 

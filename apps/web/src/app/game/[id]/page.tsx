@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { useGameView, type GameView } from "@/lib/useGameView";
+import { useGameView, type GameView, type PoolView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 import { computeSupportMarkers, formatSupportCount } from "@/lib/supportMarkers";
@@ -143,10 +143,15 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const self = view.players.find((p) => p.game_player_id === view.you);
   const valueDelta = useValueDelta(self?.portfolio_value);
   const [selected, setSelected] = useState<string[]>([]);
+  // Non-null while countering a specific open proposal with a Pool --
+  // reuses `selected` for card-picking, but the confirm bar's action and
+  // labels branch on this instead of always submitting PROPOSE_SWAP.
+  const [poolingProposalId, setPoolingProposalId] = useState<string | null>(null);
+  const [poolVisibility, setPoolVisibility] = useState<"private" | "public">("private");
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
-  const supportMarkers = useMemo(() => computeSupportMarkers(events), [events]);
+  const supportMarkers = useMemo(() => computeSupportMarkers(events, view.pools), [events, view.pools]);
 
   // "Visualize" on an open proposal briefly emphasizes the two cards it
   // names, so a player doesn't have to mentally parse proposer + entity
@@ -196,6 +201,19 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     });
   }
 
+  function startPooling(proposalId: string) {
+    setProposeError(null);
+    setSelected([]);
+    setPoolingProposalId(proposalId);
+    setPoolVisibility("private");
+  }
+
+  function cancelSelection() {
+    setProposeError(null);
+    setSelected([]);
+    setPoolingProposalId(null);
+  }
+
   // Server-authoritative preview of what PROPOSE_SWAP would cost -- never
   // reimplemented client-side (the private Influence economy is deliberate
   // about this), so this is a real fetch, not a local computation. Keyed
@@ -224,22 +242,30 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const displayedProposeCost = selectedPair ? proposeCost : null;
   const proposeUnaffordable = displayedProposeCost === 1 && (self?.influence?.available ?? 0) < 1;
 
-  async function handlePropose() {
+  async function handleConfirm() {
     if (selected.length !== 2) return;
     setProposeError(null);
     setProposing(true);
-    const result = await submitCommand(
-      gameId,
-      "PROPOSE_SWAP",
-      { entity_a: selected[0], entity_b: selected[1] },
-      { expectedVersion: view.version, onSettled: onChanged },
-    );
+    const result = poolingProposalId
+      ? await submitCommand(
+          gameId,
+          "CREATE_POOL",
+          { proposal_id: poolingProposalId, entity_c: selected[0], entity_d: selected[1], visibility: poolVisibility },
+          { expectedVersion: view.version, onSettled: onChanged },
+        )
+      : await submitCommand(
+          gameId,
+          "PROPOSE_SWAP",
+          { entity_a: selected[0], entity_b: selected[1] },
+          { expectedVersion: view.version, onSettled: onChanged },
+        );
     setProposing(false);
     if (!result.ok) {
-      setProposeError(commandErrorMessage(result.data, "Couldn't propose that swap."));
+      setProposeError(commandErrorMessage(result.data, poolingProposalId ? "Couldn't create that pool." : "Couldn't propose that swap."));
       return;
     }
     setSelected([]);
+    setPoolingProposalId(null);
   }
 
   return (
@@ -316,29 +342,56 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </div>
       </div>
 
-      {selected.length === 2 && (
-        <div className="flex items-center justify-between gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
-          <span className="text-blue-900">
-            Propose {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
+      {poolingProposalId && selected.length < 2 && (
+        <div className="flex items-center justify-between gap-2 rounded border border-purple-300 bg-purple-50 p-2 text-xs text-purple-900">
+          <span>
+            Pooling against {playerLabel(view.proposals.find((p) => p.proposal_id === poolingProposalId)?.proposer_id ?? null, view)}
+            &apos;s proposal — tap two other cards.
           </span>
-          <div className="flex flex-shrink-0 gap-2">
-            <button type="button" onClick={() => setSelected([])} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handlePropose}
-              disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
-              className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
-            >
-              {proposing ? "…" : `Propose${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
-            </button>
+          <button type="button" onClick={cancelSelection} className="flex-shrink-0 underline">
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {selected.length === 2 && (
+        <div className="flex flex-col gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-blue-900">
+              {poolingProposalId ? "Pool" : "Propose"} {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
+            </span>
+            <div className="flex flex-shrink-0 gap-2">
+              <button type="button" onClick={cancelSelection} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
+                className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
+              >
+                {proposing ? "…" : `${poolingProposalId ? "Pool" : "Propose"}${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+              </button>
+            </div>
           </div>
+          {poolingProposalId && (
+            <div className="flex items-center gap-3 text-xs text-blue-900">
+              <span className="font-medium">Visibility:</span>
+              <label className="flex items-center gap-1">
+                <input type="radio" checked={poolVisibility === "private"} onChange={() => setPoolVisibility("private")} />
+                Private
+              </label>
+              <label className="flex items-center gap-1">
+                <input type="radio" checked={poolVisibility === "public"} onChange={() => setPoolVisibility("public")} />
+                Public
+              </label>
+            </div>
+          )}
         </div>
       )}
       {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
 
-      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} />
+      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} onStartPool={startPooling} />
 
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
@@ -360,20 +413,56 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   );
 }
 
+/** Cost-aware Accept button, shared between a bare proposal's Accept and a
+ * Pool's Accept -- same shape, same affordability rule (disabled only
+ * when the server says this specific accept would cost 1 and self can't
+ * cover it). */
+function AcceptButton({
+  liability,
+  available,
+  busy,
+  onAccept,
+}: {
+  liability: 0 | 1 | undefined;
+  available: number;
+  busy: boolean;
+  onAccept: () => void;
+}) {
+  const unaffordable = liability === 1 && available < 1;
+  const label = `Accept${liability === undefined ? "" : ` (${liability})`}`;
+  return (
+    <button
+      type="button"
+      onClick={onAccept}
+      disabled={busy || unaffordable}
+      className="rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
+    >
+      {busy ? "…" : label}
+    </button>
+  );
+}
+
 /** Open, actionable proposals -- sourced from view.proposals (the current
- * -state projection), not the event log. Accept/Withdraw only, no Reject:
- * a bare proposal you don't like either gets accepted, left to expire, or
- * countered with a Pool (Stage 4). */
+ * -state projection), not the event log. A bare proposal gets Accept/
+ * Withdraw (no Reject -- either accept it, let it expire, or counter with
+ * a Pool), and each proposal's open Pools render nested beneath it with
+ * their own legal actions: only the pool's own initiator can withdraw it
+ * or make a private one public; only the base proposer can accept or
+ * decline a *private* pool; a *public* pool can be accepted by anyone
+ * except its own initiator, base proposer included. Straight from
+ * engine._handle_decline_pool/_handle_accept_pool, not re-derived. */
 function OpenProposals({
   gameId,
   view,
   onChanged,
   onVisualize,
+  onStartPool,
 }: {
   gameId: string;
   view: GameView;
   onChanged: () => void;
   onVisualize: (entityA: string, entityB: string) => void;
+  onStartPool: (proposalId: string) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -381,20 +470,12 @@ function OpenProposals({
   const self = view.players.find((p) => p.game_player_id === view.you);
   const available = self?.influence?.available ?? 0;
 
-  async function handleAccept(proposalId: string) {
+  async function runCommand(id: string, type: string, payload: Record<string, unknown>, fallback: string) {
     setError(null);
-    setBusyId(proposalId);
-    const result = await submitCommand(gameId, "ACCEPT_PROPOSAL", { proposal_id: proposalId }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusyId(id);
+    const result = await submitCommand(gameId, type, payload, { expectedVersion: view.version, onSettled: onChanged });
     setBusyId(null);
-    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't accept."));
-  }
-
-  async function handleWithdraw(proposalId: string) {
-    setError(null);
-    setBusyId(proposalId);
-    const result = await submitCommand(gameId, "WITHDRAW_PROPOSAL", { proposal_id: proposalId }, { expectedVersion: view.version, onSettled: onChanged });
-    setBusyId(null);
-    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't withdraw."));
+    if (!result.ok) setError(commandErrorMessage(result.data, fallback));
   }
 
   if (open.length === 0) return null;
@@ -402,39 +483,111 @@ function OpenProposals({
   return (
     <div>
       <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({open.length})</h2>
-      <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3 text-sm">
+      <ul className="flex flex-col gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
         {open.map((p) => {
           const isMine = p.proposer_id === view.you;
+          const pools = view.pools.filter((pool) => pool.base_proposal_id === p.proposal_id && pool.status === "open");
           return (
-            <li key={p.proposal_id} className="flex items-center justify-between gap-2 text-zinc-900">
-              <span>
-                {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
-              </span>
-              <span className="flex flex-shrink-0 gap-1">
-                <button
-                  type="button"
-                  onClick={() => onVisualize(p.entity_a, p.entity_b)}
-                  className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
-                >
-                  Visualize
-                </button>
-                {(() => {
-                  const acceptUnaffordable = !isMine && p.my_accept_liability === 1 && available < 1;
-                  const label = isMine ? "Withdraw" : `Accept${p.my_accept_liability === undefined ? "" : ` (${p.my_accept_liability})`}`;
-                  return (
+            <li key={p.proposal_id} className="flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
+              <div className="flex items-center justify-between gap-2">
+                <span>
+                  {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
+                </span>
+                <span className="flex flex-shrink-0 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onVisualize(p.entity_a, p.entity_b)}
+                    className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
+                  >
+                    Visualize
+                  </button>
+                  {!isMine && (
                     <button
                       type="button"
-                      onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
-                      disabled={busyId === p.proposal_id || acceptUnaffordable}
-                      className={`rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
-                        isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
-                      }`}
+                      onClick={() => onStartPool(p.proposal_id)}
+                      className="rounded border border-purple-300 px-2 py-1 text-xs font-medium text-purple-700"
                     >
-                      {busyId === p.proposal_id ? "…" : label}
+                      Pool
                     </button>
-                  );
-                })()}
-              </span>
+                  )}
+                  {isMine ? (
+                    <button
+                      type="button"
+                      onClick={() => runCommand(p.proposal_id, "WITHDRAW_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't withdraw.")}
+                      disabled={busyId === p.proposal_id}
+                      className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+                    >
+                      {busyId === p.proposal_id ? "…" : "Withdraw"}
+                    </button>
+                  ) : (
+                    <AcceptButton
+                      liability={p.my_accept_liability}
+                      available={available}
+                      busy={busyId === p.proposal_id}
+                      onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
+                    />
+                  )}
+                </span>
+              </div>
+
+              {pools.length > 0 && (
+                <ul className="ml-3 flex flex-col gap-1 border-l border-zinc-200 pl-3">
+                  {pools.map((pool) => {
+                    const isPoolMine = pool.initiator_id === view.you;
+                    const visible = Boolean(pool.entity_c && pool.entity_d);
+                    return (
+                      <li key={pool.pool_id} className="flex items-center justify-between gap-2 text-xs text-zinc-700">
+                        <span>
+                          {playerLabel(pool.initiator_id, view)} pooled {pool.visibility}
+                          {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
+                        </span>
+                        <span className="flex flex-shrink-0 gap-1">
+                          {isPoolMine && (
+                            <>
+                              {pool.visibility === "private" && (
+                                <button
+                                  type="button"
+                                  onClick={() => runCommand(pool.pool_id, "MAKE_POOL_PUBLIC", { pool_id: pool.pool_id }, "Couldn't make that public.")}
+                                  disabled={busyId === pool.pool_id}
+                                  className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
+                                >
+                                  Make public
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => runCommand(pool.pool_id, "WITHDRAW_POOL", { pool_id: pool.pool_id }, "Couldn't withdraw that pool.")}
+                                disabled={busyId === pool.pool_id}
+                                className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
+                              >
+                                {busyId === pool.pool_id ? "…" : "Withdraw"}
+                              </button>
+                            </>
+                          )}
+                          {!isPoolMine && pool.visibility === "private" && isMine && (
+                            <button
+                              type="button"
+                              onClick={() => runCommand(pool.pool_id, "DECLINE_POOL", { pool_id: pool.pool_id }, "Couldn't decline that pool.")}
+                              disabled={busyId === pool.pool_id}
+                              className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
+                            >
+                              Decline
+                            </button>
+                          )}
+                          {!isPoolMine && (pool.visibility === "public" || isMine) && (
+                            <AcceptButton
+                              liability={pool.my_accept_liability}
+                              available={available}
+                              busy={busyId === pool.pool_id}
+                              onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
+                            />
+                          )}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </li>
           );
         })}
@@ -444,13 +597,33 @@ function OpenProposals({
   );
 }
 
-const _ACTIVITY_EVENT_TYPES = new Set(["PROPOSAL_CREATED", "PROPOSAL_RESOLVED"]);
+const _ACTIVITY_EVENT_TYPES = new Set([
+  "PROPOSAL_CREATED",
+  "PROPOSAL_RESOLVED",
+  "PRIVATE_POOL_CREATED",
+  "PUBLIC_POOL_CREATED",
+  "POOL_RESOLVED",
+]);
 const _TONE_CLASSES: Record<string, string> = {
   open: "text-blue-700",
   success: "text-emerald-700",
   muted: "text-zinc-500",
   warning: "text-amber-700",
 };
+
+/** Was this pool's base proposal ultimately won by a *different* pool, or
+ * did the base proposal execute directly (a plain accept bypassing every
+ * pool)? Both cases resolve a preempted sibling with the same
+ * "preempted_by_other_action" reason -- the two distinct messages you
+ * specified come from checking current state, not the event itself: if
+ * some *other* pool on the same base proposal shows executed, another
+ * pooled deal won; otherwise the base proposal was accepted directly. */
+function describePreemption(pool: PoolView, view: GameView): string {
+  const winningPool = view.pools.find(
+    (p) => p.base_proposal_id === pool.base_proposal_id && p.pool_id !== pool.pool_id && p.resolution_reason === "executed",
+  );
+  return winningPool ? "preempted — another pooled deal executed" : "preempted — the base proposal executed directly";
+}
 
 function describeEvent(event: EventView, view: GameView): { text: string; tone: keyof typeof _TONE_CLASSES } {
   if (event.type === "PROPOSAL_CREATED") {
@@ -467,6 +640,27 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
     return { text: `${swap} — resolved`, tone: "muted" };
   }
+  if (event.type === "PRIVATE_POOL_CREATED" || event.type === "PUBLIC_POOL_CREATED") {
+    const who = playerLabel(event.actor_game_player_id, view);
+    const entityC = event.payload.entity_c as string | undefined;
+    const entityD = event.payload.entity_d as string | undefined;
+    const swap = entityC && entityD ? `${entityLabel(entityC, view)} ↔ ${entityLabel(entityD, view)}` : "a hidden pair";
+    const visibility = event.type === "PUBLIC_POOL_CREATED" ? "publicly" : "privately";
+    return { text: `${who} pooled ${visibility}: ${swap}`, tone: "open" };
+  }
+  if (event.type === "POOL_RESOLVED") {
+    const pool = view.pools.find((p) => p.pool_id === event.payload.pool_id);
+    const swap = pool?.entity_c && pool?.entity_d ? `${entityLabel(pool.entity_c, view)} ↔ ${entityLabel(pool.entity_d, view)}` : "A pool";
+    const reason = event.payload.reason as string;
+    if (reason === "executed") return { text: `${swap} — pool executed`, tone: "success" };
+    if (reason === "withdrawn_by_initiator") return { text: `${swap} — pool withdrawn`, tone: "muted" };
+    if (reason === "declined_by_target") return { text: `${swap} — pool declined`, tone: "muted" };
+    if (reason === "base_proposal_withdrawn") return { text: `${swap} — base proposal was withdrawn`, tone: "muted" };
+    if (reason === "invalidated_by_initiator_action") return { text: `${swap} — pool abandoned by its own initiator`, tone: "muted" };
+    if (reason === "preempted_by_other_action" && pool) return { text: `${swap} — ${describePreemption(pool, view)}`, tone: "warning" };
+    if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
+    return { text: `${swap} — pool resolved`, tone: "muted" };
+  }
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
 
@@ -481,7 +675,7 @@ function matchesActivityFilter(event: EventView, filter: ActivityFilter): boolea
   if (filter === "none") return false;
   if (!_ACTIVITY_EVENT_TYPES.has(event.type)) return false;
   if (filter === "all") return true;
-  return event.type === "PROPOSAL_RESOLVED" && event.payload.reason === "executed";
+  return (event.type === "PROPOSAL_RESOLVED" || event.type === "POOL_RESOLVED") && event.payload.reason === "executed";
 }
 
 /** Chronological narrative, distinct from OpenProposals' actionable
