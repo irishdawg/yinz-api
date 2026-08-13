@@ -96,6 +96,12 @@ export interface GameView {
   // profile's contents are until it passes (or the game is scored).
   haircut_reveal_at: string | null;
   haircut_profile: { depth_probabilities: number[] } | null;
+  // Public from game start, unlike haircut_profile itself -- every
+  // configured profile for this player count shares the same max_depth,
+  // so "positions 1..N carry some risk" is structural, not profile
+  // -specific. Positions beyond this depth are 100% safe immediately, not
+  // just after reveal.
+  haircut_risk_band_depth: number | null;
   // Only meaningful once phase is CANCELLED.
   cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;

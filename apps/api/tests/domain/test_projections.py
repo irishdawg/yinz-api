@@ -93,6 +93,21 @@ def test_scored_game_with_no_realized_haircut_depth_does_not_crash():
     assert len(view["holdings"]) == len(game.holdings)  # holdings still revealed regardless
 
 
+def test_haircut_risk_band_depth_public_before_and_after_reveal():
+    # Unlike haircut_profile itself, the risk band boundary is public from
+    # game start -- every profile configured for this player count shares
+    # the same max_depth (see GameConfig's model_validator), so this alone
+    # never reveals which profile was chosen or its shape.
+    game = make_started_game(2)
+    view_before = project(game, PublicAudience())
+    assert view_before["haircut_profile"] is None
+    assert view_before["haircut_risk_band_depth"] == game.haircut_profile.max_depth
+
+    game.haircut_profile_revealed_at = now()
+    view_after = project(game, PublicAudience())
+    assert view_after["haircut_risk_band_depth"] == view_before["haircut_risk_band_depth"]
+
+
 def test_haircut_profile_hidden_before_reveal():
     game = make_started_game(2)
     view = project(game, PublicAudience())

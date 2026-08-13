@@ -96,6 +96,18 @@ def project(game: Game, audience: Audience) -> dict:
             if game.haircut_profile is not None and (game.haircut_profile_revealed_at is not None or scored)
             else None
         ),
+        # Unconditionally public from game start, unlike haircut_profile
+        # itself -- every profile configured for this player count is
+        # validated at config load to share the exact same max_depth (see
+        # GameConfig's model_validator), so "the top K positions carry some
+        # risk" is structural, not profile-specific information. Revealing
+        # the boundary doesn't reveal the profile's shape (how risky each
+        # of those K positions actually is), matching the design's "some
+        # risk, not its shape" pre-reveal framing. Lets the client render a
+        # payout-chance row keyed by *position*, not by whichever entity
+        # currently occupies it -- positions beyond this depth are 100%
+        # safe from the very first render, not just after reveal.
+        "haircut_risk_band_depth": game.haircut_profile.max_depth if game.haircut_profile is not None else None,
         # Only meaningful once phase is CANCELLED -- null otherwise.
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         "market": _project_market(game, lookup),

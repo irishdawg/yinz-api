@@ -107,6 +107,28 @@ function highlightRingClass(highlight: { direction: "rising" | "falling"; pairIn
   return color === "emerald" ? "ring-4 ring-emerald-500" : "ring-4 ring-red-500";
 }
 
+/** Payout chance is a property of the market *position*, not whichever
+ * entity currently occupies it -- see projections.py's
+ * haircut_risk_band_depth. Positions beyond the risk band are provably
+ * 100% safe from game start, before the profile itself is ever revealed
+ * (every profile configured for this player count shares the same
+ * boundary); positions inside it show "?" until reveal, then the real
+ * certaintyAt() percentage. */
+function payoutChanceCell(
+  position: number,
+  riskBandDepth: number | null,
+  haircutProfile: { depth_probabilities: number[] } | null,
+): { text: string; className: string } {
+  if (riskBandDepth === null || position > riskBandDepth) {
+    return { text: "100%", className: "text-emerald-700" };
+  }
+  if (!haircutProfile) {
+    return { text: "?", className: "text-zinc-400" };
+  }
+  const pct = Math.round(certaintyAt(position, haircutProfile.depth_probabilities) * 100);
+  return { text: `${pct}%`, className: pct >= 99 ? "text-emerald-700" : pct >= 50 ? "text-amber-700" : "text-red-700" };
+}
+
 /** Host-only, any pre-SCORED phase -- the one escape hatch out of the
  * one-active-game-per-host rule short of playing a game all the way
  * through. Confirmed with a native dialog since it ends the game for
@@ -359,50 +381,72 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         <h2 className="mb-2 text-sm font-medium text-zinc-700">
           Scale ({view.market.length}) <span className="font-normal text-zinc-400">— tap two to propose a swap</span>
         </h2>
-        <div ref={marketScrollRef} className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-2">
-          {view.market.map((entity) => {
-            const owned = ownedCounts.get(entity.entity_id) ?? 0;
-            const isSelected = selected.includes(entity.entity_id);
-            const isDisabled = poolGuardrailEntities.has(entity.entity_id);
-            const highlight = highlighted?.get(entity.entity_id);
-            const markers = supportMarkers.get(entity.entity_id);
-            const certainty = view.haircut_profile ? certaintyAt(entity.position, view.haircut_profile.depth_probabilities) : null;
-            return (
-              <button
-                key={entity.entity_id}
-                type="button"
-                data-entity-id={entity.entity_id}
-                onClick={() => toggleSelect(entity.entity_id)}
-                disabled={isDisabled}
-                className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
-                  owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
-                  highlight ? "z-10 scale-110 shadow-lg" : ""
-                } ${highlightRingClass(highlight)}`}
-              >
-                <span className="text-xs text-zinc-400">{entity.position}</span>
-                <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
-                <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
-                {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
-                {certainty !== null && (
-                  <span className={`text-[10px] font-bold ${certainty >= 0.99 ? "text-emerald-700" : certainty >= 0.5 ? "text-amber-700" : "text-red-700"}`}>
-                    {Math.round(certainty * 100)}% safe
-                  </span>
-                )}
-                {markers && markers.length > 0 && (
-                  <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
-                    <span>↑</span>
-                    {markers.map((m) => (
-                      <span key={m.playerId} title={playerLabel(m.playerId, view)}>
-                        {playerInitial(m.playerId, view)}
-                        {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
-                      </span>
-                    ))}
+        {/* Payout chance and the card grid share one scroll container (two
+            stacked flex rows, not two independently-scrolling elements) so
+            they always stay column-aligned without any scroll-sync code --
+            both iterate view.market in the same position-sorted order with
+            the same per-item width. Payout chance is keyed by *position*,
+            not by whichever entity happens to occupy it -- see
+            projections.py's haircut_risk_band_depth. */}
+        <div ref={marketScrollRef} className="-mx-4 overflow-x-auto px-4 pb-2">
+          <div className="mb-1 flex gap-2 text-center">
+            {view.market.map((entity) => (
+              <div key={entity.entity_id} className="w-28 flex-shrink-0 text-xs text-zinc-400">
+                {entity.position}
+              </div>
+            ))}
+          </div>
+          <div className="mb-2 flex items-center gap-2">
+            <span className="w-10 flex-shrink-0 text-xs font-medium leading-tight text-zinc-500">Payout chance</span>
+            <div className="flex flex-1 gap-2 text-center">
+              {view.market.map((entity) => {
+                const cell = payoutChanceCell(entity.position, view.haircut_risk_band_depth, view.haircut_profile);
+                return (
+                  <div key={entity.entity_id} className={`w-28 flex-shrink-0 text-xs font-bold ${cell.className}`}>
+                    {cell.text}
                   </div>
-                )}
-              </button>
-            );
-          })}
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {view.market.map((entity) => {
+              const owned = ownedCounts.get(entity.entity_id) ?? 0;
+              const isSelected = selected.includes(entity.entity_id);
+              const isDisabled = poolGuardrailEntities.has(entity.entity_id);
+              const highlight = highlighted?.get(entity.entity_id);
+              const markers = supportMarkers.get(entity.entity_id);
+              return (
+                <button
+                  key={entity.entity_id}
+                  type="button"
+                  data-entity-id={entity.entity_id}
+                  onClick={() => toggleSelect(entity.entity_id)}
+                  disabled={isDisabled}
+                  className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
+                    owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
+                  } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
+                    highlight ? "z-10 scale-110 shadow-lg" : ""
+                  } ${highlightRingClass(highlight)}`}
+                >
+                  <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
+                  <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                  {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
+                  {markers && markers.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
+                      <span>↑</span>
+                      {markers.map((m) => (
+                        <span key={m.playerId} title={playerLabel(m.playerId, view)}>
+                          {playerInitial(m.playerId, view)}
+                          {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
