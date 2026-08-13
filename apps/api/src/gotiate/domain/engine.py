@@ -37,7 +37,7 @@ from gotiate.domain.entities import (
 )
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.events import EventType, GameEvent
-from gotiate.domain import themes
+from gotiate.domain import setup, themes
 
 # --------------------------------------------------------------------------
 # IDs
@@ -457,32 +457,21 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
 
     market_size = game.config.market_size_by_players[n]
     theme_set = themes.get_theme_set(game.config.theme_set_id)
-    if len(theme_set.entities) < market_size:
-        raise IllegalCommandError(
-            f"theme set {theme_set.theme_set_id!r} has only {len(theme_set.entities)} entities, needs {market_size} for {n} players"
-        )
+    player_ids = [p.game_player_id for p in game.players]
+    starting_state = setup.generate_starting_state(
+        theme_set, market_size, player_ids, game.config.portfolio_shape, game.config.setup_quality_by_players[n], rng
+    )
 
-    locked = [e for e in theme_set.entities if e.is_locked]
-    swappable = [e for e in theme_set.entities if not e.is_locked]
-    if len(locked) > market_size:
-        raise IllegalCommandError(
-            f"theme set {theme_set.theme_set_id!r} has {len(locked)} locked entities but the {market_size}-entity market for {n} players can't fit them all"
-        )
-    # Locked entities are always dealt in; the swappable pool fills whatever's
-    # left. Both are still shuffled together below — "locked" means always
-    # present, not fixed to a particular market position.
-    order = locked + rng.sample(swappable, market_size - len(locked))
-    rng.shuffle(order)
-    for i, entity in enumerate(order, start=1):
+    for i, entity_id in enumerate(starting_state.market_order, start=1):
         # entity_id and theme_key coincide by construction — each theme_key
         # is sampled at most once per market — but stay distinct fields; see
         # themes.py's module docstring for why.
-        game.market[entity.theme_key] = MarketEntity(entity_id=entity.theme_key, theme_key=entity.theme_key, position=i)
+        game.market[entity_id] = MarketEntity(entity_id=entity_id, theme_key=entity_id, position=i)
     events.append(_emit(game, now, EventType.MARKET_INITIALIZED, actor=None, payload={"size": market_size, "theme_set_id": theme_set.theme_set_id}))
 
     entity_ids = list(game.market.keys())
     for player in game.players:
-        for entity_id in _deal_portfolio(entity_ids, game.config.portfolio_shape, rng):
+        for entity_id in starting_state.portfolios[player.game_player_id]:
             h = Holding(holding_id=new_id(), entity_id=entity_id, owner_player_id=player.game_player_id, zone=HoldingZone.PORTFOLIO)
             game.holdings[h.holding_id] = h
         for _ in range(game.config.reserve_count):
@@ -491,7 +480,10 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
                 holding_id=new_id(), entity_id=entity_id, owner_player_id=player.game_player_id, zone=HoldingZone.RESERVE_UNREVEALED
             )
             game.holdings[h.holding_id] = h
-    events.append(_emit(game, now, EventType.PORTFOLIO_DEALT, actor=None, payload={}))
+    # Diagnostics never shown live (PORTFOLIO_DEALT is SERVER_ONLY), visible
+    # via replay once scored and queryable forever from event_ledger -- see
+    # the initial-distribution-quality design writeup.
+    events.append(_emit(game, now, EventType.PORTFOLIO_DEALT, actor=None, payload=starting_state.diagnostics))
     events.append(_emit(game, now, EventType.RESERVES_DEALT, actor=None, payload={}))
 
     game.waterline_entity_id = rng.choice(entity_ids)
@@ -506,14 +498,6 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     game.phase = GamePhase.NEGOTIATION
     events.append(_emit(game, now, EventType.GAME_STARTED, actor=actor_game_player_id, payload={"player_count": n}))
     return events
-
-
-def _deal_portfolio(entity_ids: list[str], shape: list[int], rng: random.Random) -> list[str]:
-    chosen = rng.sample(entity_ids, len(shape))
-    holdings: list[str] = []
-    for entity_id, count in zip(chosen, shape):
-        holdings.extend([entity_id] * count)
-    return holdings
 
 
 def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:

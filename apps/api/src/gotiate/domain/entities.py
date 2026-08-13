@@ -100,12 +100,66 @@ class CommandStatus(StrEnum):
 # --------------------------------------------------------------------------
 
 
+class SetupQualityConfig(BaseModel):
+    """Tunable thresholds/weights for one player count's starting-state
+    generation (domain.setup) -- every number here is data, not buried
+    engine logic, specifically so retuning after a playtest is a config
+    change, not an engine rewrite. See the initial-distribution-quality
+    design writeup for the empirical survival-rate measurements behind
+    these defaults."""
+
+    # Hard rejects.
+    max_pair_overlap: int
+    reject_isolated_player: bool = True
+    elite_concentration_limit: int = 3
+
+    # Zone definitions for geometry scoring, as a fraction of market_size.
+    elite_zone_fraction: float = 1 / 3
+    basement_zone_fraction: float = 1 / 3
+
+    # Soft-score weights. elite > basement is the deliberate asymmetry --
+    # a top-heavy opening suppresses negotiation, a bottom-heavy one
+    # creates urgency, they are not scored as equivalent.
+    elite_penalty_weight: float = 2.0
+    basement_penalty_weight: float = 1.0
+    spread_penalty_weight: float = 0.5
+    heaviest_pair_share_weight: float = 1.0
+    connectivity_weight: float = 1.0
+
+    # Candidate-generation volume/selection.
+    topology_candidates: int = 500
+    topology_shortlist_size: int = 75
+    geometry_candidates_per_topology: int = 20
+    selection_band_fraction: float = 0.15
+    # A hard constraint that can't be satisfied within this many raw
+    # draws fails the command explicitly -- see
+    # errors.UnableToGenerateStartingStateError. Never silently relaxed.
+    max_generation_attempts: int = 20000
+
+
 class GameConfig(BaseModel):
     """Frozen onto Game at START_GAME. Later tuning changes never retroactively
     affect a live game — see domain model §09."""
 
     market_size_by_players: dict[int, int] = Field(
         default_factory=lambda: {2: 9, 3: 11, 4: 13, 5: 15, 6: 17}
+    )
+    # n=3 is deliberately stricter (max_pair_overlap=1, isolation is a
+    # hard reject) than the rest -- a pair sharing 2 of 4 interests forms
+    # a structurally dominant bloc against a lone third player in a way
+    # it doesn't once there are 3+ other players to route around. n=2
+    # has no isolation hard-reject (a disjoint pair still has a real
+    # negotiation lever -- proposals aren't restricted to entities you
+    # own) and a looser overlap cap (no bloc/third-wheel risk with only
+    # one pair). See the initial-distribution-quality design writeup.
+    setup_quality_by_players: dict[int, SetupQualityConfig] = Field(
+        default_factory=lambda: {
+            2: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=False),
+            3: SetupQualityConfig(max_pair_overlap=1, reject_isolated_player=True),
+            4: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=True),
+            5: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=True),
+            6: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=True),
+        }
     )
     max_clock_seconds_by_players: dict[int, int] = Field(
         default_factory=lambda: {2: 480, 3: 720, 4: 960, 5: 1200, 6: 1440}

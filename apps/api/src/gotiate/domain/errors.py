@@ -31,3 +31,14 @@ class StaleVersionError(DomainError):
 
 class NotFoundError(DomainError):
     error_code = "not_found"
+
+
+class UnableToGenerateStartingStateError(IllegalCommandError):
+    """Raised when generate_starting_state exhausts its attempt budget
+    without a legal complete starting state -- deliberately never caught
+    and silently degraded into a looser one. A hard constraint that can't
+    be satisfied is a signal the theme/player-count/config combination is
+    incompatible and needs a human, not a quietly worse game. See the
+    initial-distribution-quality design writeup."""
+
+    error_code = "unable_to_generate_valid_starting_state"
