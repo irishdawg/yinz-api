@@ -908,6 +908,72 @@ function LobbyReminderBanner({
   );
 }
 
+/** navigator.share opens the OS share sheet directly (WhatsApp/Messages
+ * show up as real targets there on a phone) -- far better than "copy,
+ * then go paste it yourself" for the actual use case (host on their
+ * phone, remote player elsewhere). Falls back to clipboard copy when the
+ * Web Share API isn't available (most desktop browsers) or a share
+ * genuinely fails; a user-cancelled share sheet (AbortError) is normal
+ * interaction, not an error, and gets no feedback at all. `canShare` is
+ * only set post-mount to avoid an SSR/client render mismatch on a
+ * browser-only API. */
+function ShareLinkButton({ url, joinCode }: { url: string; joinCode: string }) {
+  const [canShare, setCanShare] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Querying an external system (the browser's Web Share API) on mount,
+    // not deriving state from props -- the legitimate case the lint
+    // rule's own docs carve out, same precedent as useGameView's polling
+    // effect. Deliberately not a lazy useState initializer either: that
+    // would run during SSR too, where `navigator` doesn't exist, and
+    // produce a hydration mismatch against the real client-side value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
+  }, []);
+
+  async function copyToClipboard() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Couldn't copy — long-press the code above instead.");
+    }
+  }
+
+  async function handleClick() {
+    setError(null);
+    if (canShare) {
+      try {
+        await navigator.share({ title: "Join my Gotiate game", text: `Join code: ${joinCode}`, url });
+        return;
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return; // user cancelled -- not an error
+      }
+    }
+    await copyToClipboard();
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <button
+        type="button"
+        onClick={handleClick}
+        className="flex items-center gap-1.5 rounded border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07l-1.5 1.5" />
+          <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07l1.49-1.49" />
+        </svg>
+        {copied ? "Copied!" : canShare ? "Share link" : "Copy link"}
+      </button>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
 function LobbyRoom({
   gameId,
   view,
@@ -948,6 +1014,7 @@ function LobbyRoom({
                 <QRCodeSVG value={joinUrl} size={160} />
               </div>
             )}
+            {joinUrl && <ShareLinkButton url={joinUrl} joinCode={joinCode} />}
           </>
         )}
       </div>
