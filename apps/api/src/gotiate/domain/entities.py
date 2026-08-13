@@ -119,6 +119,10 @@ class GameConfig(BaseModel):
     allow_public_pools: bool = True
     allow_private_pools: bool = True
     ready_to_close_revealed_in_replay: bool = False
+    # Undecided on purpose (see private Influence economy discussion) --
+    # defaults to still-private in replay, trivially flippable later
+    # without a schema change.
+    influence_revealed_in_replay: bool = False
 
     join_code_length: int = 7
     # Bounds the brute-force window on a live join code independent of how
@@ -193,6 +197,13 @@ class SwapIntent(BaseModel):
 class Proposal(BaseModel):
     proposal_id: str
     swap: SwapIntent
+    # Locked once, at PROPOSE_SWAP time, from the proposer's holdings at
+    # that moment -- 1 iff they own the swap's rising entity. Never
+    # recomputed later, even if their holdings or the market change before
+    # this resolves -- see domain model discussion on private Influence
+    # economy. Settled (committed->spent or committed->available) by
+    # _resolve_proposal, not mutated directly by any handler.
+    initiator_influence_liability: int = 0
     status: ResolutionStatus = ResolutionStatus.OPEN
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
@@ -203,6 +214,10 @@ class Pool(BaseModel):
     pool_id: str
     base_proposal_id: str
     swap: SwapIntent
+    # Same locking rule as Proposal.initiator_influence_liability, but
+    # against the pool's own swap (entity_c/entity_d) and the pooler's
+    # holdings at CREATE_POOL time.
+    initiator_influence_liability: int = 0
     visibility: PoolVisibility
     status: ResolutionStatus = ResolutionStatus.OPEN
     resolved_at_seq_no: int | None = None

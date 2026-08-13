@@ -7,7 +7,10 @@ export interface GamePlayerView {
   seat: number;
   display_name: string;
   is_golden_name: boolean;
-  influence: { available: number; committed: number; spent: number };
+  // Self-only -- Influence is a private tax on beneficial actions, not
+  // public information (see the private Influence economy design). Never
+  // present for any other player's roster entry.
+  influence?: { available: number; committed: number; spent: number };
   reserve_count_remaining: number;
   ready_to_close?: boolean;
   portfolio_value?: number;
@@ -34,6 +37,11 @@ export interface ProposalView {
   proposer_id: string;
   status: "open" | "resolved";
   resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | null;
+  // Self-only, mutually exclusive: present on your own authored proposal
+  // (the liability locked at PROPOSE_SWAP time -- never changes) or, while
+  // open, a live preview of what accepting would cost you right now.
+  my_influence_liability?: 0 | 1;
+  my_accept_liability?: 0 | 1;
 }
 
 export interface PoolView {
@@ -55,6 +63,10 @@ export interface PoolView {
   // pool, or an insider) -- see projections._project_pool.
   entity_c?: string;
   entity_d?: string;
+  // Same self-only, mutually exclusive pair as ProposalView, but for
+  // accepting this pool (see engine._handle_accept_pool's combine rule).
+  my_influence_liability?: 0 | 1;
+  my_accept_liability?: 0 | 1;
 }
 
 export interface GameView {

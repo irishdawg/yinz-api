@@ -277,8 +277,10 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
 
     for proposal in game.proposals.values():
         if proposal.status == ResolutionStatus.OPEN:
+            # _resolve_proposal refunds committed -> available for any
+            # non-EXECUTED reason, MARKET_CLOSED included -- no beneficial
+            # negotiated action happened, so there's nothing to charge for.
             events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.MARKET_CLOSED, None, now))
-            # Influence was already spent at creation — nothing to refund.
 
     for pool in list(game.pools.values()):
         if pool.status == ResolutionStatus.OPEN:
@@ -338,6 +340,47 @@ def score_game(game: Game) -> dict:
         "results": results,
         "winners": winners,
     }
+
+
+# --------------------------------------------------------------------------
+# Private Influence economy — one rule, reused everywhere a negotiated
+# action needs a cost: a player's liability for a swap is 1 iff they own
+# the entity that rises out of it, else 0. Never more than 1 per resolved
+# package (see the ACCEPT_POOL combine logic below), never based on
+# quantity owned or movement magnitude. See the plan's design writeup.
+# --------------------------------------------------------------------------
+
+
+def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:
+    """Whichever of the two currently holds the worse (higher) position --
+    it takes the other's better position once swapped. Not assumed to be
+    entity_a; PROPOSE_SWAP's payload just reflects click order, not market
+    direction, so direction is always derived from live positions."""
+    a = _market_entity(game, entity_a)
+    b = _market_entity(game, entity_b)
+    return entity_a if a.position > b.position else entity_b
+
+
+def _owns(game: Game, player_id: str, entity_id: str) -> bool:
+    return any(
+        h.owner_player_id == player_id and h.entity_id == entity_id and h.zone == HoldingZone.PORTFOLIO
+        for h in game.holdings.values()
+    )
+
+
+def _liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> int:
+    """1 iff player_id owns the rising entity of this swap, else 0."""
+    return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
+
+
+def _has_open_authored_negotiation(game: Game, player_id: str) -> bool:
+    """True if player_id currently authors any open Proposal or Pool --
+    used to block reserve/hole-card actions, which would otherwise let a
+    player change the portfolio basis of a liability they've already
+    locked in (see PICK_UP_RESERVE/BURN_RESERVE_FOR_SWAP)."""
+    return any(p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == player_id for p in game.proposals.values()) or any(
+        p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == player_id for p in game.pools.values()
+    )
 
 
 # --------------------------------------------------------------------------
@@ -480,16 +523,28 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
     if entity_a == entity_b:
         raise IllegalCommandError("a proposal must name two different entities")
     _require_entities_exist(game, entity_a, entity_b)
+    if any(
+        p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == actor_game_player_id for p in game.proposals.values()
+    ):
+        raise IllegalCommandError("you already have an open proposal")
 
     player = game.player_by_id(actor_game_player_id)
-    if player.influence_available < 1:
-        raise IllegalCommandError("no Influence available")
-    player.influence_available -= 1
-    player.influence_spent += 1
+    # A 0-liability proposal (advocating movement that doesn't benefit your
+    # actual holdings) is always legal regardless of balance -- Influence
+    # is a private tax on beneficial actions, not a toll on speaking. Only
+    # a liability of 1 needs affordability and reserves Influence, locked
+    # for the lifetime of this proposal.
+    liability = _liability_for(game, actor_game_player_id, entity_a, entity_b)
+    if liability == 1:
+        if player.influence_available < 1:
+            raise IllegalCommandError("no Influence available")
+        player.influence_available -= 1
+        player.influence_committed += 1
 
     proposal = Proposal(
         proposal_id=new_id(),
         swap=SwapIntent(entity_a=entity_a, entity_b=entity_b, initiator_player_id=actor_game_player_id),
+        initiator_influence_liability=liability,
     )
     game.proposals[proposal.proposal_id] = proposal
     return [
@@ -498,7 +553,7 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
             now,
             EventType.PROPOSAL_CREATED,
             actor=actor_game_player_id,
-            payload={"proposal_id": proposal.proposal_id, "entity_a": entity_a, "entity_b": entity_b, "influence": _influence_after(player)},
+            payload={"proposal_id": proposal.proposal_id, "entity_a": entity_a, "entity_b": entity_b},
         )
     ]
 
@@ -526,6 +581,17 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
     proposal = _require_open_proposal(game, payload["proposal_id"])
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("cannot accept your own proposal")
+
+    # The accepter's liability is fresh, evaluated right now against their
+    # current holdings, and charged straight away -- no commit interval,
+    # since accepting executes synchronously. Entirely independent of the
+    # proposer's own already-locked liability, settled separately below.
+    accepter = game.player_by_id(actor_game_player_id)
+    if _liability_for(game, actor_game_player_id, proposal.swap.entity_a, proposal.swap.entity_b) == 1:
+        if accepter.influence_available < 1:
+            raise IllegalCommandError("no Influence available")
+        accepter.influence_available -= 1
+        accepter.influence_spent += 1
 
     events = [_execute_swap(game, proposal.swap, now)]
     events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
@@ -563,15 +629,21 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
             raise IllegalCommandError("you already have an open pool on this proposal")
 
     player = game.player_by_id(actor_game_player_id)
-    if player.influence_available < 1:
-        raise IllegalCommandError("no Influence available")
-    player.influence_available -= 1
-    player.influence_committed += 1
+    # Same rule as PROPOSE_SWAP: locked once, against the pool's own swap,
+    # from the pooler's holdings right now. 0-liability pools are always
+    # legal regardless of balance.
+    liability = _liability_for(game, actor_game_player_id, entity_c, entity_d)
+    if liability == 1:
+        if player.influence_available < 1:
+            raise IllegalCommandError("no Influence available")
+        player.influence_available -= 1
+        player.influence_committed += 1
 
     pool = Pool(
         pool_id=new_id(),
         base_proposal_id=proposal.proposal_id,
         swap=SwapIntent(entity_a=entity_c, entity_b=entity_d, initiator_player_id=actor_game_player_id),
+        initiator_influence_liability=liability,
         visibility=visibility,
     )
     game.pools[pool.pool_id] = pool
@@ -587,7 +659,6 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
                 "base_proposal_id": proposal.proposal_id,
                 "entity_c": entity_c,
                 "entity_d": entity_d,
-                "influence": _influence_after(player),
             },
         )
     ]
@@ -637,6 +708,29 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     if pool.visibility is PoolVisibility.PRIVATE and actor_game_player_id != base.swap.initiator_player_id:
         raise IllegalCommandError("only the base proposer may accept a private pool")
 
+    # Accepting a pool affirms BOTH legs at once -- the accepter's total
+    # liability is the OR of a base-leg bit and a pool-leg bit, capped at 1
+    # (see the private Influence economy design). The base-leg bit is the
+    # base proposal's own author-locked value *only* when the accepter is
+    # that author (true for every private-pool accept, since only the base
+    # proposer may accept one); otherwise it's evaluated fresh, same as for
+    # a third party accepting a public pool. The pool-leg bit is always
+    # fresh -- the pool's own initiator can never be its own accepter.
+    is_base_author = actor_game_player_id == base.swap.initiator_player_id
+    base_leg_liability = (
+        base.initiator_influence_liability
+        if is_base_author
+        else _liability_for(game, actor_game_player_id, base.swap.entity_a, base.swap.entity_b)
+    )
+    pool_leg_liability = _liability_for(game, actor_game_player_id, pool.swap.entity_a, pool.swap.entity_b)
+    already_committed = is_base_author and base.initiator_influence_liability == 1
+    if not already_committed and (base_leg_liability == 1 or pool_leg_liability == 1):
+        accepter = game.player_by_id(actor_game_player_id)
+        if accepter.influence_available < 1:
+            raise IllegalCommandError("no Influence available")
+        accepter.influence_available -= 1
+        accepter.influence_spent += 1
+
     events = [_execute_swap(game, base.swap, now), _execute_swap(game, pool.swap, now)]
     events.append(_resolve_proposal(game, base, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
     events.append(_resolve_pool(game, pool, PoolResolutionReason.EXECUTED, actor_game_player_id, now, spend=True))
@@ -649,6 +743,8 @@ def _handle_pick_up_reserve(game: Game, *, payload: dict, actor_game_player_id: 
 
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
+    if _has_open_authored_negotiation(game, actor_game_player_id):
+        raise IllegalCommandError("finish your open proposal or Pool before picking up a reserve")
     player = game.player_by_id(actor_game_player_id)
     holding = game.holdings.get(payload["reserve_holding_id"])
     if holding is None or holding.owner_player_id != actor_game_player_id or holding.zone != HoldingZone.RESERVE_UNREVEALED:
@@ -730,6 +826,8 @@ def _handle_discard_holding(game: Game, *, payload: dict, actor_game_player_id: 
 def _handle_burn_reserve_for_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
+    if _has_open_authored_negotiation(game, actor_game_player_id):
+        raise IllegalCommandError("finish your open proposal or Pool before burning a reserve")
     if not can_burn_reserve_for_swap(game, now):
         raise IllegalCommandError("unilateral window has closed")
 
@@ -799,6 +897,17 @@ def _emit(game: Game, now: datetime, type_: EventType, *, actor: str | None, pay
 
 
 def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolutionReason, resolved_by: str | None, now: datetime) -> GameEvent:
+    # Settles the PROPOSER's own locked liability (never the accepter's --
+    # that's charged separately, fresh, in _handle_accept_proposal). A
+    # liability of 0 never committed anything, so there's nothing to
+    # settle here at all.
+    if proposal.initiator_influence_liability == 1:
+        initiator = game.player_by_id(proposal.swap.initiator_player_id)
+        initiator.influence_committed -= 1
+        if reason is ProposalResolutionReason.EXECUTED:
+            initiator.influence_spent += 1
+        else:
+            initiator.influence_available += 1
     proposal.status = ResolutionStatus.RESOLVED
     proposal.resolved_at_seq_no = game.next_seq_no
     proposal.resolved_by_player_id = resolved_by
@@ -807,12 +916,16 @@ def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolution
 
 
 def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved_by: str | None, now: datetime, *, spend: bool) -> GameEvent:
-    initiator = game.player_by_id(pool.swap.initiator_player_id)
-    initiator.influence_committed -= 1
-    if spend:
-        initiator.influence_spent += 1
-    else:
-        initiator.influence_available += 1
+    # Settles the pool INITIATOR's own locked liability -- entirely
+    # separate from whoever accepts it, who's charged fresh in
+    # _handle_accept_pool. A liability of 0 never committed anything.
+    if pool.initiator_influence_liability == 1:
+        initiator = game.player_by_id(pool.swap.initiator_player_id)
+        initiator.influence_committed -= 1
+        if spend:
+            initiator.influence_spent += 1
+        else:
+            initiator.influence_available += 1
     pool.status = ResolutionStatus.RESOLVED
     pool.resolved_at_seq_no = game.next_seq_no
     pool.resolved_by_player_id = resolved_by
@@ -822,7 +935,7 @@ def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved
         now,
         EventType.POOL_RESOLVED,
         actor=resolved_by,
-        payload={"pool_id": pool.pool_id, "reason": reason.value, "influence": _influence_after(initiator)},
+        payload={"pool_id": pool.pool_id, "reason": reason.value},
     )
 
 
@@ -875,7 +988,3 @@ def _require_open_pool(game: Game, pool_id: str) -> Pool:
     if pool is None or pool.status != ResolutionStatus.OPEN:
         raise IllegalCommandError("pool is not open")
     return pool
-
-
-def _influence_after(player: GamePlayer) -> dict:
-    return {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}

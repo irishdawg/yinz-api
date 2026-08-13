@@ -4,21 +4,23 @@ from datetime import timedelta
 
 from gotiate.domain import engine
 from gotiate.domain.entities import GamePhase
-from tests.conftest import make_started_game, now
+from tests.conftest import find_swap_pair, make_started_game, now
 
 
-def test_max_clock_closes_and_leaves_proposal_influence_spent():
+def test_max_clock_closes_and_refunds_the_committed_open_proposal():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id
-    entities = list(game.market.keys())
+    entity_a, entity_b = find_swap_pair(game, tedy, owned_should_rise=True)
+    before = game.player_by_id(tedy).influence_available
     engine.handle_command(
         game,
         command_type="PROPOSE_SWAP",
-        payload={"entity_a": entities[0], "entity_b": entities[1]},
+        payload={"entity_a": entity_a, "entity_b": entity_b},
         actor_game_player_id=tedy,
         expected_version=None,
         now=now(),
     )
+    assert game.player_by_id(tedy).influence_committed == 1
 
     # apply_due_time_transitions is what actually detects expiry and calls
     # close_market — this is the same check every command runs ahead of
@@ -29,7 +31,14 @@ def test_max_clock_closes_and_leaves_proposal_influence_spent():
 
     assert game.phase == GamePhase.SCORED
     assert game.close_reason.value == "TIME_EXPIRED"
-    assert game.player_by_id(tedy).influence_spent == 1  # never refunded, per §01
+    # No beneficial negotiated action happened -- the locked liability
+    # refunds, it never converts to spent, per the private Influence
+    # economy design (a market-closed proposal is a non-execution, same
+    # as a withdrawal).
+    tedy_player = game.player_by_id(tedy)
+    assert tedy_player.influence_spent == 0
+    assert tedy_player.influence_committed == 0
+    assert tedy_player.influence_available == before
 
 
 def test_ready_threshold_closes_immediately_in_same_transaction():

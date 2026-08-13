@@ -196,6 +196,34 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     });
   }
 
+  // Server-authoritative preview of what PROPOSE_SWAP would cost -- never
+  // reimplemented client-side (the private Influence economy is deliberate
+  // about this), so this is a real fetch, not a local computation. Keyed
+  // on the pair itself (not raw `selected`) so dropping back below two
+  // selections doesn't re-fire a fetch; the display below only trusts
+  // `proposeCost` while a pair is actually selected, so a stale value left
+  // over from a previous pair is never shown.
+  const selectedPair = selected.length === 2 ? selected : null;
+  const [proposeCost, setProposeCost] = useState<0 | 1 | null>(null);
+  useEffect(() => {
+    if (!selectedPair) return;
+    let cancelled = false;
+    const query = new URLSearchParams({ entity_a: selectedPair[0], entity_b: selectedPair[1] });
+    fetch(`/api/games/${gameId}/propose-cost?${query.toString()}`)
+      .then((r) => r.json())
+      .then((data: { liability?: 0 | 1 }) => {
+        if (!cancelled) setProposeCost(data.liability ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setProposeCost(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gameId, selectedPair]);
+  const displayedProposeCost = selectedPair ? proposeCost : null;
+  const proposeUnaffordable = displayedProposeCost === 1 && (self?.influence?.available ?? 0) < 1;
+
   async function handlePropose() {
     if (selected.length !== 2) return;
     setProposeError(null);
@@ -238,8 +266,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           <div>
             <div className="text-xs font-medium text-zinc-500">Influence</div>
             <div className="tabular-nums text-zinc-900">
-              {self.influence.available}
-              {self.influence.committed > 0 ? ` / ${self.influence.committed} committed` : ""}
+              {self.influence?.available ?? "—"}
+              {self.influence && self.influence.committed > 0 ? ` / ${self.influence.committed} committed` : ""}
             </div>
           </div>
         </div>
@@ -300,10 +328,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             <button
               type="button"
               onClick={handlePropose}
-              disabled={proposing}
+              disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
               className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
             >
-              {proposing ? "…" : "Propose"}
+              {proposing ? "…" : `Propose${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
             </button>
           </div>
         </div>
@@ -350,6 +378,8 @@ function OpenProposals({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const open = view.proposals.filter((p) => p.status === "open");
+  const self = view.players.find((p) => p.game_player_id === view.you);
+  const available = self?.influence?.available ?? 0;
 
   async function handleAccept(proposalId: string) {
     setError(null);
@@ -388,16 +418,22 @@ function OpenProposals({
                 >
                   Visualize
                 </button>
-                <button
-                  type="button"
-                  onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
-                  disabled={busyId === p.proposal_id}
-                  className={`rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
-                    isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
-                  }`}
-                >
-                  {busyId === p.proposal_id ? "…" : isMine ? "Withdraw" : "Accept"}
-                </button>
+                {(() => {
+                  const acceptUnaffordable = !isMine && p.my_accept_liability === 1 && available < 1;
+                  const label = isMine ? "Withdraw" : `Accept${p.my_accept_liability === undefined ? "" : ` (${p.my_accept_liability})`}`;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => (isMine ? handleWithdraw(p.proposal_id) : handleAccept(p.proposal_id))}
+                      disabled={busyId === p.proposal_id || acceptUnaffordable}
+                      className={`rounded px-2 py-1 text-xs font-medium disabled:opacity-50 ${
+                        isMine ? "border border-zinc-300 text-zinc-700" : "bg-zinc-900 text-white"
+                      }`}
+                    >
+                      {busyId === p.proposal_id ? "…" : label}
+                    </button>
+                  );
+                })()}
               </span>
             </li>
           );

@@ -19,6 +19,7 @@ from gotiate.domain.entities import (
     Pool,
     PoolVisibility,
     Proposal,
+    ResolutionStatus,
 )
 from gotiate.domain.events import EventType, GameEvent
 from gotiate.domain.themes import ThemeEntityDefinition
@@ -84,7 +85,7 @@ def project(game: Game, audience: Audience) -> dict:
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
-        "proposals": [_project_proposal(p) for p in game.proposals.values()],
+        "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values()],
         "pools": [_project_pool(game, pool, audience) for pool in game.pools.values()],
     }
 
@@ -261,7 +262,6 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
         # as any other roster fact. The entire point of it being rare is
         # that other players can see it, not just the player themselves.
         "is_golden_name": player.is_golden_name,
-        "influence": {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent},
         "reserve_count_remaining": sum(
             1 for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.RESERVE_UNREVEALED
         ),
@@ -273,14 +273,47 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
     elif is_replay and game.config.ready_to_close_revealed_in_replay:
         out["ready_to_close"] = player.ready_to_close
 
+    # Influence balance is self-only, full stop -- once cost depends on
+    # real ownership (private Influence economy), a visible balance or a
+    # visible balance-delta becomes a hand-reconstruction oracle ("proposal
+    # executed, Hanky's balance dropped -> Hanky must own A"). Whether
+    # replay ever reveals it is deliberately undecided; defaults to still
+    # private there too, flippable via config without a schema change.
+    if is_self:
+        out["influence"] = {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}
+    elif is_replay and game.config.influence_revealed_in_replay:
+        out["influence"] = {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}
+
     if is_self or is_replay:
         out["portfolio_value"] = _portfolio_value(game, player.game_player_id)
 
     return out
 
 
-def _project_proposal(proposal: Proposal) -> dict:
-    return {
+def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:
+    """Mirrors engine._rising_entity -- duplicated rather than imported to
+    avoid a projections -> engine dependency; see the private Influence
+    economy design writeup."""
+    a, b = game.market[entity_a], game.market[entity_b]
+    return entity_a if a.position > b.position else entity_b
+
+
+def _owns(game: Game, player_id: str, entity_id: str) -> bool:
+    return any(
+        h.owner_player_id == player_id and h.entity_id == entity_id and h.zone == HoldingZone.PORTFOLIO
+        for h in game.holdings.values()
+    )
+
+
+def liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> int:
+    """1 iff player_id owns the rising entity of this swap, else 0 -- the
+    read-only twin of engine._liability_for, exposed here (not underscored)
+    since routes.py's propose-cost preview endpoint needs it too."""
+    return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
+
+
+def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dict:
+    out: dict = {
         "proposal_id": proposal.proposal_id,
         "entity_a": proposal.swap.entity_a,
         "entity_b": proposal.swap.entity_b,
@@ -288,6 +321,17 @@ def _project_proposal(proposal: Proposal) -> dict:
         "status": proposal.status.value,
         "resolution_reason": proposal.resolution_reason.value if proposal.resolution_reason else None,
     }
+    if isinstance(audience, PlayerAudience):
+        if audience.game_player_id == proposal.swap.initiator_player_id:
+            # The proposer's own locked liability -- must survive a page
+            # reload, since the "the number never changes after you press
+            # it" promise is only meaningful if it's still visible later.
+            out["my_influence_liability"] = proposal.initiator_influence_liability
+        elif proposal.status == ResolutionStatus.OPEN:
+            # A live, fresh preview of what accepting would cost *this*
+            # viewer right now -- never stored, recomputed on every read.
+            out["my_accept_liability"] = liability_for(game, audience.game_player_id, proposal.swap.entity_a, proposal.swap.entity_b)
+    return out
 
 
 def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
@@ -311,6 +355,24 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
     if can_see_contents:
         out["entity_c"] = pool.swap.entity_a
         out["entity_d"] = pool.swap.entity_b
+    if isinstance(audience, PlayerAudience) and can_see_contents:
+        if audience.game_player_id == pool.swap.initiator_player_id:
+            out["my_influence_liability"] = pool.initiator_influence_liability
+        elif pool.status == ResolutionStatus.OPEN:
+            # Mirrors engine._handle_accept_pool's combine rule: base-leg
+            # bit (locked, if this viewer authored the base proposal;
+            # fresh otherwise) OR pool-leg bit (always fresh), capped at 1.
+            base = game.proposals.get(pool.base_proposal_id)
+            base_leg_liability = 0
+            if base is not None:
+                is_base_author = audience.game_player_id == base.swap.initiator_player_id
+                base_leg_liability = (
+                    base.initiator_influence_liability
+                    if is_base_author
+                    else liability_for(game, audience.game_player_id, base.swap.entity_a, base.swap.entity_b)
+                )
+            pool_leg_liability = liability_for(game, audience.game_player_id, pool.swap.entity_a, pool.swap.entity_b)
+            out["my_accept_liability"] = 1 if (base_leg_liability == 1 or pool_leg_liability == 1) else 0
     return out
 
 
