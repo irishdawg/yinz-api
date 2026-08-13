@@ -111,17 +111,41 @@ export interface GameView {
   winners?: string[];
 }
 
-/** Polls GET /api/games/[id] on a fixed interval -- the authoritative
- * view already carries every audience-scoped field (own holdings,
- * ready_to_close, etc.), so there's nothing client-side to merge or
- * reconcile, just replace. `refetch` is exposed directly so callers
- * (submitCommand's `onSettled`) can force an immediate refresh instead of
- * waiting for the next tick. */
+// SCORED/CANCELLED are terminal -- there's no more live state to chase
+// once a game reaches either. Polling forever past that point is exactly
+// what let an abandoned tab on a finished game hammer the backend at 1Hz
+// indefinitely (a real incident, not a hypothetical -- see the Haircut-risk
+// design writeup's production postmortem note).
+const _TERMINAL_PHASES = new Set(["SCORED", "CANCELLED"]);
+// Backgrounded tabs still get the terminal-phase stop and error backoff,
+// just at a slower cadence -- there's no reason to poll a hidden tab as
+// aggressively as a visible one, but stopping entirely would mean missing
+// the transition that should stop it for good.
+const _HIDDEN_INTERVAL_MULTIPLIER = 5;
+const _MAX_BACKOFF_MS = 15000;
+
+/** Polls GET /api/games/[id] -- the authoritative view already carries
+ * every audience-scoped field (own holdings, ready_to_close, etc.), so
+ * there's nothing client-side to merge or reconcile, just replace.
+ * `refetch` is exposed directly so callers (submitCommand's `onSettled`)
+ * can force an immediate refresh instead of waiting for the next tick.
+ *
+ * The polling cadence itself follows a small priority order, cheapest
+ * case first: a terminal game (SCORED/CANCELLED) stops polling entirely
+ * after the one fetch that revealed the terminal phase -- deterministic,
+ * not a backoff heuristic, since the client already knows there's nothing
+ * left to change. Otherwise: a backgrounded tab polls at
+ * intervalMs * _HIDDEN_INTERVAL_MULTIPLIER; consecutive fetch failures
+ * back off exponentially (capped); a visible, live, healthy game polls at
+ * the plain intervalMs. */
 export function useGameView(gameId: string, options: { intervalMs?: number; enabled?: boolean } = {}) {
   const { intervalMs = 1000, enabled = true } = options;
   const [view, setView] = useState<GameView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const consecutiveFailuresRef = useRef(0);
+  const terminalRef = useRef(false);
 
   const refetch = useCallback(async () => {
     if (inFlight.current) return;
@@ -134,8 +158,11 @@ export function useGameView(gameId: string, options: { intervalMs?: number; enab
       }
       setView(data);
       setError(null);
+      consecutiveFailuresRef.current = 0;
+      if (_TERMINAL_PHASES.has(data.phase)) terminalRef.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
+      consecutiveFailuresRef.current += 1;
     } finally {
       inFlight.current = false;
     }
@@ -143,13 +170,38 @@ export function useGameView(gameId: string, options: { intervalMs?: number; enab
 
   useEffect(() => {
     if (!enabled) return;
-    // Fetching from an external system (our own API) on mount + interval,
-    // not deriving state from props -- the legitimate case the lint rule's
-    // own docs carve out.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    refetch();
-    const id = setInterval(refetch, intervalMs);
-    return () => clearInterval(id);
+    terminalRef.current = false;
+    consecutiveFailuresRef.current = 0;
+    let cancelled = false;
+
+    async function tick() {
+      await refetch();
+      if (cancelled || terminalRef.current) return; // one final fetch already landed above -- stop the loop for good
+      const backoffMs =
+        consecutiveFailuresRef.current > 0
+          ? Math.min(intervalMs * 2 ** consecutiveFailuresRef.current, _MAX_BACKOFF_MS)
+          : intervalMs;
+      const delay = document.visibilityState === "hidden" ? backoffMs * _HIDDEN_INTERVAL_MULTIPLIER : backoffMs;
+      timeoutRef.current = setTimeout(tick, delay);
+    }
+    tick();
+
+    function handleVisibilityChange() {
+      // Wake up immediately on returning to the tab rather than waiting
+      // out whatever throttled delay was scheduled while backgrounded --
+      // inFlight/terminalRef both make a redundant concurrent call harmless.
+      if (document.visibilityState === "visible" && !terminalRef.current) {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        tick();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [enabled, intervalMs, refetch]);
 
   return { view, error, refetch };
