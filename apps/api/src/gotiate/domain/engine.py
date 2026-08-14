@@ -553,7 +553,12 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
 
     proposal = Proposal(
         proposal_id=new_id(),
-        swap=SwapIntent(entity_a=entity_a, entity_b=entity_b, initiator_player_id=actor_game_player_id),
+        swap=SwapIntent(
+            entity_a=entity_a,
+            entity_b=entity_b,
+            initiator_player_id=actor_game_player_id,
+            rising_entity_id=_rising_entity(game, entity_a, entity_b),
+        ),
         initiator_influence_liability=liability,
     )
     game.proposals[proposal.proposal_id] = proposal
@@ -644,7 +649,7 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
         accepter.influence_available -= 1
         accepter.influence_spent += 1
 
-    events = [_execute_swap(game, proposal.swap, now)]
+    events = _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id)
     events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
     events += resolve_sibling_pools(game, proposal, actor_game_player_id, now)
     return events
@@ -695,7 +700,12 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     pool = Pool(
         pool_id=new_id(),
         base_proposal_id=proposal.proposal_id,
-        swap=SwapIntent(entity_a=entity_c, entity_b=entity_d, initiator_player_id=actor_game_player_id),
+        swap=SwapIntent(
+            entity_a=entity_c,
+            entity_b=entity_d,
+            initiator_player_id=actor_game_player_id,
+            rising_entity_id=_rising_entity(game, entity_c, entity_d),
+        ),
         initiator_influence_liability=liability,
         visibility=visibility,
     )
@@ -786,7 +796,8 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         accepter.influence_available -= 1
         accepter.influence_spent += 1
 
-    events = [_execute_swap(game, base.swap, now), _execute_swap(game, pool.swap, now)]
+    events = _execute_swap(game, base.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
+    events += _execute_swap(game, pool.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
     events.append(_resolve_proposal(game, base, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
     events.append(_resolve_pool(game, pool, PoolResolutionReason.EXECUTED, actor_game_player_id, now, spend=True))
     events += resolve_sibling_pools(game, base, actor_game_player_id, now)
@@ -829,8 +840,18 @@ def _handle_pick_up_reserve(game: Game, *, payload: dict, actor_game_player_id: 
     # own still-empty default back into itself, permanently. The holding's
     # zone is already flipped to PICKUP_PENDING above, so this snapshot
     # already reflects the frozen moment this player is about to be locked
-    # into -- attaching pp is what actually locks it.
+    # into -- attaching pp is what actually locks it. The pending_pickup
+    # block itself (deadline, revealed entity) is injected directly here,
+    # not read back through _project_player -- by the time pp is attached,
+    # project() never calls _project_player again for this game until the
+    # pickup resolves, so there'd be nothing left to compute it from.
     pp.cached_view = project(game, PlayerAudience(actor_game_player_id))
+    pp.cached_view["pending_pickup"] = {
+        "pending_pickup_id": pp.pending_pickup_id,
+        "reserve_holding_id": pp.reserve_holding_id,
+        "revealed_entity_id": pp.revealed_entity_id,
+        "decision_deadline_at": pp.decision_deadline_at,
+    }
     player.pending_pickup = pp
 
     return [
@@ -896,8 +917,13 @@ def _handle_burn_reserve_for_swap(game: Game, *, payload: dict, actor_game_playe
     _require_entities_exist(game, entity_a, entity_b)
 
     holding.zone = HoldingZone.BURNED_UNSEEN
-    swap = SwapIntent(entity_a=entity_a, entity_b=entity_b, initiator_player_id=actor_game_player_id)
-    events = [_execute_swap(game, swap, now)]
+    swap = SwapIntent(
+        entity_a=entity_a,
+        entity_b=entity_b,
+        initiator_player_id=actor_game_player_id,
+        rising_entity_id=_rising_entity(game, entity_a, entity_b),
+    )
+    events = _execute_swap(game, swap, now)
     events.append(_emit(game, now, EventType.RESERVE_BURNED_FOR_SWAP, actor=actor_game_player_id, payload={"reserve_holding_id": holding.holding_id}))
     return events
 
@@ -995,17 +1021,74 @@ def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved
     )
 
 
-def _execute_swap(game: Game, swap: SwapIntent, now: datetime) -> GameEvent:
+def _execute_swap(
+    game: Game,
+    swap: SwapIntent,
+    now: datetime,
+    *,
+    exclude_proposal_id: str | None = None,
+    exclude_pool_id: str | None = None,
+) -> list[GameEvent]:
+    """The sole choke point where two entities' positions ever change --
+    every negotiated or unilateral swap funnels through here (see the
+    market-direction-reversal design writeup). After moving the market,
+    scans every OTHER open negotiation referencing either moved entity for
+    a crossed direction and voids it. exclude_proposal_id/exclude_pool_id
+    skip the negotiation this very swap belongs to (if any) -- right after
+    its own swap, a fresh direction check would always look "crossed" (the
+    entity that was rising just took the better position), which is the
+    negotiation succeeding as promised, not a violation."""
     a = _market_entity(game, swap.entity_a)
     b = _market_entity(game, swap.entity_b)
     a.position, b.position = b.position, a.position
-    return _emit(
-        game,
-        now,
-        EventType.SWAP_EXECUTED,
-        actor=swap.initiator_player_id,
-        payload={"entity_a": swap.entity_a, "entity_b": swap.entity_b, "position_a": a.position, "position_b": b.position},
-    )
+    events: list[GameEvent] = [
+        _emit(
+            game,
+            now,
+            EventType.SWAP_EXECUTED,
+            actor=swap.initiator_player_id,
+            payload={"entity_a": swap.entity_a, "entity_b": swap.entity_b, "position_a": a.position, "position_b": b.position},
+        )
+    ]
+    events += _invalidate_crossed_negotiations(game, swap.entity_a, swap.entity_b, now, exclude_proposal_id, exclude_pool_id)
+    return events
+
+
+def _invalidate_crossed_negotiations(
+    game: Game,
+    moved_a: str,
+    moved_b: str,
+    now: datetime,
+    exclude_proposal_id: str | None,
+    exclude_pool_id: str | None,
+) -> list[GameEvent]:
+    """A swap only ever changes the positions of its own two entities, so
+    only a negotiation whose own two entities intersect {moved_a, moved_b}
+    could possibly have crossed -- everything else is untouched by
+    construction and skipped without even a direction check."""
+    moved = {moved_a, moved_b}
+    events: list[GameEvent] = []
+
+    for proposal in list(game.proposals.values()):
+        if proposal.status != ResolutionStatus.OPEN or proposal.proposal_id == exclude_proposal_id:
+            continue
+        if {proposal.swap.entity_a, proposal.swap.entity_b} & moved and _direction_crossed(game, proposal.swap):
+            events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.VOIDED_MARKET_SWUNG, None, now))
+            for pool in list(game.pools.values()):
+                if pool.base_proposal_id == proposal.proposal_id and pool.status == ResolutionStatus.OPEN:
+                    events.append(_resolve_pool(game, pool, PoolResolutionReason.BASE_PROPOSAL_VOIDED, None, now, spend=False))
+
+    for pool in list(game.pools.values()):
+        if pool.status != ResolutionStatus.OPEN or pool.pool_id == exclude_pool_id:
+            continue
+        if {pool.swap.entity_a, pool.swap.entity_b} & moved and _direction_crossed(game, pool.swap):
+            events.append(_resolve_pool(game, pool, PoolResolutionReason.VOIDED_MARKET_SWUNG, None, now, spend=False))
+
+    return events
+
+
+def _direction_crossed(game: Game, swap: SwapIntent) -> bool:
+    return _rising_entity(game, swap.entity_a, swap.entity_b) != swap.rising_entity_id
 
 
 def _market_entity(game: Game, entity_id: str) -> MarketEntity:

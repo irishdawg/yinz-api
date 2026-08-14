@@ -35,6 +35,36 @@ def test_pick_up_reserve_caches_a_real_view_not_an_empty_one():
     assert len(cached_view["holdings"]) > 0
 
 
+def test_cached_view_carries_the_decision_deadline_and_revealed_entity():
+    # Stage 5's frozen countdown needs a deadline the client can render --
+    # this can't be computed through the normal _project_player path
+    # (project() never calls it again for this player until the pickup
+    # resolves), so it's injected directly into the cached snapshot at
+    # PICK_UP_RESERVE time. See the Stage 5 design writeup.
+    game = make_started_game(2)
+    tedy = game.players[0].game_player_id
+    reserve = _reserve_of(game, tedy)
+
+    t0 = now()
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=t0
+    )
+    pp = game.player_by_id(tedy).pending_pickup
+    cached_view = pp.cached_view
+    assert cached_view["pending_pickup"] == {
+        "pending_pickup_id": pp.pending_pickup_id,
+        "reserve_holding_id": reserve.holding_id,
+        "revealed_entity_id": reserve.entity_id,
+        "decision_deadline_at": pp.decision_deadline_at,
+    }
+    # Reads verbatim on a simulated reload, same as everything else in the
+    # frozen snapshot -- project() keeps returning this exact dict.
+    from gotiate.domain.projections import PlayerAudience, project
+
+    reread = project(game, PlayerAudience(tedy))
+    assert reread["pending_pickup"] == cached_view["pending_pickup"]
+
+
 def test_pick_up_then_discard_in_time():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id

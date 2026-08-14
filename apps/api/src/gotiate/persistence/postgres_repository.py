@@ -185,10 +185,10 @@ class PostgresGameRepository:
                 for proposal in game.proposals.values():
                     await cur.execute(
                         """
-                        insert into proposals (id, game_id, entity_a, entity_b, initiator_player_id,
+                        insert into proposals (id, game_id, entity_a, entity_b, rising_entity_id, initiator_player_id,
                                                 initiator_influence_liability,
                                                 status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
@@ -199,6 +199,7 @@ class PostgresGameRepository:
                             game.id,
                             proposal.swap.entity_a,
                             proposal.swap.entity_b,
+                            proposal.swap.rising_entity_id,
                             proposal.swap.initiator_player_id,
                             proposal.initiator_influence_liability,
                             proposal.status.value,
@@ -246,11 +247,13 @@ class PostgresGameRepository:
                     )
                     await cur.execute(
                         """
-                        insert into pool_contents (pool_id, game_id, entity_c, entity_d)
-                        values (%s, %s, %s, %s)
-                        on conflict (pool_id) do update set entity_c = excluded.entity_c, entity_d = excluded.entity_d
+                        insert into pool_contents (pool_id, game_id, entity_c, entity_d, rising_entity_id)
+                        values (%s, %s, %s, %s, %s)
+                        on conflict (pool_id) do update set
+                            entity_c = excluded.entity_c, entity_d = excluded.entity_d,
+                            rising_entity_id = excluded.rising_entity_id
                         """,
-                        (pool.pool_id, game.id, pool.swap.entity_a, pool.swap.entity_b),
+                        (pool.pool_id, game.id, pool.swap.entity_a, pool.swap.entity_b, pool.swap.rising_entity_id),
                     )
                 for holding in game.holdings.values():
                     await cur.execute(
@@ -569,7 +572,12 @@ def _to_game(
         pid = str(pr["id"])
         proposals[pid] = Proposal(
             proposal_id=pid,
-            swap=SwapIntent(entity_a=pr["entity_a"], entity_b=pr["entity_b"], initiator_player_id=str(pr["initiator_player_id"])),
+            swap=SwapIntent(
+                entity_a=pr["entity_a"],
+                entity_b=pr["entity_b"],
+                initiator_player_id=str(pr["initiator_player_id"]),
+                rising_entity_id=pr["rising_entity_id"],
+            ),
             initiator_influence_liability=pr["initiator_influence_liability"],
             status=ResolutionStatus(pr["status"]),
             resolved_at_seq_no=pr["resolved_at_seq_no"],
@@ -586,7 +594,10 @@ def _to_game(
             pool_id=poid,
             base_proposal_id=str(por["base_proposal_id"]),
             swap=SwapIntent(
-                entity_a=contents.get("entity_c", ""), entity_b=contents.get("entity_d", ""), initiator_player_id=str(por["initiator_player_id"])
+                entity_a=contents.get("entity_c", ""),
+                entity_b=contents.get("entity_d", ""),
+                initiator_player_id=str(por["initiator_player_id"]),
+                rising_entity_id=contents.get("rising_entity_id", ""),
             ),
             initiator_influence_liability=por["initiator_influence_liability"],
             visibility=PoolVisibility(por["visibility"]),

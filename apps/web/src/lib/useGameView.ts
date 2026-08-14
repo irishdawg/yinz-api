@@ -40,9 +40,14 @@ export interface ProposalView {
   proposal_id: string;
   entity_a: string;
   entity_b: string;
+  // Locked at PROPOSE_SWAP time, unconditionally public -- which of the
+  // two entities is intended to rise. Never recompute this from current
+  // positions; Visualize must stay pinned to it. See the
+  // market-direction-reversal design writeup.
+  rising_entity_id: string;
   proposer_id: string;
   status: "open" | "resolved";
-  resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | null;
+  resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | "voided_market_swung" | null;
   // Self-only, mutually exclusive: present on your own authored proposal
   // (the liability locked at PROPOSE_SWAP time -- never changes) or, while
   // open, a live preview of what accepting would cost you right now.
@@ -68,11 +73,15 @@ export interface PoolView {
     | "preempted_by_other_action"
     | "base_proposal_withdrawn"
     | "market_closed"
+    | "voided_market_swung"
+    | "base_proposal_voided"
     | null;
   // Present only when this audience can see the pool's contents (public
-  // pool, or an insider) -- see projections._project_pool.
+  // pool, or an insider) -- see projections._project_pool. Direction is
+  // content, gated the same as entity_c/entity_d.
   entity_c?: string;
   entity_d?: string;
+  rising_entity_id?: string;
   // Same self-only, mutually exclusive pair as ProposalView, but for
   // accepting this pool (see engine._handle_accept_pool's combine rule).
   my_influence_liability?: 0 | 1;
@@ -108,11 +117,28 @@ export interface GameView {
   haircut_risk_band_depth: number | null;
   // Only meaningful once phase is CANCELLED.
   cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
+  // The *fact* of why/when the market closed, revealed only at the
+  // instant it happens -- not a leading indicator. ready_to_close itself
+  // (below, per-player) stays strictly self-only with no aggregate
+  // anywhere -- a secret trigger, not a public countdown.
+  close_reason: "TIME_EXPIRED" | "READY_THRESHOLD" | null;
+  closed_at: string | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
   proposals: ProposalView[];
   pools: PoolView[];
   holdings?: HoldingView[];
+  // Self-only -- present exactly while this player has an active
+  // pending pickup, injected directly into the frozen cached_view at
+  // PICK_UP_RESERVE time (not computed by the normal projection path,
+  // which never runs again until the pickup resolves). See the Stage 5
+  // design writeup.
+  pending_pickup?: {
+    pending_pickup_id: string;
+    reserve_holding_id: string;
+    revealed_entity_id: string;
+    decision_deadline_at: string;
+  };
   // Present once phase is SCORED -- compute_final_scores' result, merged
   // in by project(). See the Haircut-risk design writeup.
   realized_haircut_depth?: number;

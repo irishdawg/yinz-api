@@ -111,6 +111,15 @@ def project(game: Game, audience: Audience) -> dict:
         "haircut_risk_band_depth": game.haircut_profile.max_depth if game.haircut_profile is not None else None,
         # Only meaningful once phase is CANCELLED -- null otherwise.
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
+        # The *fact* of why/when the market closed, revealed only at the
+        # instant it actually happens -- not a leading indicator. Distinct
+        # from ready_to_close itself, which stays strictly self-only with
+        # no aggregate anywhere (see _project_player) -- deliberately kept
+        # a secret trigger, not a public countdown. MARKET_CLOSED's event
+        # payload already carries this reason publicly; this just exposes
+        # the same already-public fact as a current-state field too.
+        "close_reason": game.close_reason.value if game.close_reason else None,
+        "closed_at": game.closed_at,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         # A proposal (and every Pool attached to it) is omitted entirely
@@ -424,6 +433,12 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         "proposal_id": proposal.proposal_id,
         "entity_a": proposal.swap.entity_a,
         "entity_b": proposal.swap.entity_b,
+        # Locked at authoring time, unconditionally public -- bare
+        # proposal entities are always public, so their locked direction
+        # is too. See the market-direction-reversal design writeup: the
+        # frontend must pin Visualize's arrows to this, never recompute
+        # from current positions.
+        "rising_entity_id": proposal.swap.rising_entity_id,
         "proposer_id": proposal.swap.initiator_player_id,
         "status": proposal.status.value,
         "resolution_reason": _public_resolution_reason(proposal.resolution_reason, audience),
@@ -468,6 +483,9 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
     if can_see_contents:
         out["entity_c"] = pool.swap.entity_a
         out["entity_d"] = pool.swap.entity_b
+        # Same visibility tier as entity_c/entity_d -- direction is
+        # content, not metadata, for a still-private pool.
+        out["rising_entity_id"] = pool.swap.rising_entity_id
     if isinstance(audience, PlayerAudience) and can_see_contents:
         if audience.game_player_id == pool.swap.initiator_player_id:
             out["my_influence_liability"] = pool.initiator_influence_liability

@@ -56,6 +56,11 @@ class ProposalResolutionReason(StrEnum):
     # every live audience, so Pass never becomes a public signal. See the
     # Pass design writeup.
     EXPIRED_ALL_PASSED = "expired_all_passed"
+    # The market moved under this proposal's locked direction (see
+    # SwapIntent.rising_entity_id) -- the opposite of EXPIRED_ALL_PASSED:
+    # this is deliberately LOUD, never masked, for every live audience.
+    # See the market-direction-reversal design writeup.
+    VOIDED_MARKET_SWUNG = "voided_market_swung"
 
 
 class PoolResolutionReason(StrEnum):
@@ -66,6 +71,13 @@ class PoolResolutionReason(StrEnum):
     PREEMPTED_BY_OTHER_ACTION = "preempted_by_other_action"
     BASE_PROPOSAL_WITHDRAWN = "base_proposal_withdrawn"
     MARKET_CLOSED = "market_closed"
+    # This pool's own leg crossed -- mirrors ProposalResolutionReason's
+    # value above, never masked. Distinct from BASE_PROPOSAL_VOIDED below:
+    # this pool's own direction, not its base proposal's, is what broke.
+    VOIDED_MARKET_SWUNG = "voided_market_swung"
+    # Cascaded because this pool's base proposal voided -- mirrors
+    # BASE_PROPOSAL_WITHDRAWN's existing cascade shape exactly, new reason.
+    BASE_PROPOSAL_VOIDED = "base_proposal_voided"
 
 
 class PoolVisibility(StrEnum):
@@ -337,6 +349,12 @@ class SwapIntent(BaseModel):
     entity_a: str
     entity_b: str
     initiator_player_id: str
+    # Locked once, at authoring time, via engine._rising_entity -- never
+    # recomputed. A live re-derivation that disagrees with this means the
+    # market crossed the original premise; see
+    # engine._invalidate_crossed_negotiations and the market-direction
+    # -reversal design writeup.
+    rising_entity_id: str
 
 
 class Proposal(BaseModel):

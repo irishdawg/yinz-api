@@ -4,6 +4,7 @@ surface: hiding information from other players is the entire game."""
 from __future__ import annotations
 
 from gotiate.domain import engine
+from gotiate.domain.entities import GamePhase
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
 from tests.conftest import make_started_game, now
 
@@ -55,6 +56,29 @@ def test_ready_to_close_never_visible_to_others():
     view_p0 = project(game, PlayerAudience(p0))
     self_view = next(p for p in view_p0["players"] if p["game_player_id"] == p0)
     assert self_view["ready_to_close"] is True
+
+
+def test_close_reason_and_closed_at_null_before_close_public_once_closed():
+    # The *fact* of why/when the market closed, not a leading indicator --
+    # contrast with ready_to_close itself, which stays strictly self-only
+    # (test_ready_to_close_never_visible_to_others above) with no public
+    # aggregate anywhere. Ready-to-close is a secret trigger; close_reason
+    # is the public "boom" the moment it fires. See the Stage 6 design
+    # writeup.
+    game = make_started_game(2)
+    p0, p1 = [p.game_player_id for p in game.players]
+
+    view = project(game, PublicAudience())
+    assert view["close_reason"] is None
+    assert view["closed_at"] is None
+
+    engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p0, expected_version=None, now=now())
+    engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p1, expected_version=None, now=now())
+
+    assert game.phase == GamePhase.SCORED
+    public_view = project(game, PublicAudience())
+    assert public_view["close_reason"] == "READY_THRESHOLD"
+    assert public_view["closed_at"] is not None
 
 
 def test_holdings_hidden_before_scored_visible_after():

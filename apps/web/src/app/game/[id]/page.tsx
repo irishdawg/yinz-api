@@ -45,12 +45,20 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
   if (view.phase === "NEGOTIATION") {
     return <MarketView gameId={gameId} view={view} onChanged={refetch} />;
   }
+  if (view.phase === "CLOSING") {
+    // close_market freezes/reveals/scores in one synchronous server-side
+    // pass, so a poll can trivially observe NEGOTIATION on one tick and
+    // SCORED on the next -- this may render for well under a second, or
+    // never at all. Not worth a built-out screen of its own.
+    return <CenteredMessage>Closing the market…</CenteredMessage>;
+  }
+  if (view.phase === "SCORED") {
+    return <ResultsView gameId={gameId} view={view} />;
+  }
   if (view.phase !== "LOBBY") {
-    // Stages 6-8 (close/scoring/replay) aren't built yet -- this keeps the
-    // flow from dead-ending once the market closes, without pretending
-    // there's a results screen here.
+    // Defensive fallback -- every real phase is handled above.
     return (
-      <CenteredMessage showHomeLink>Game is live (phase: {view.phase}). The close/scoring screen is coming in a later build.</CenteredMessage>
+      <CenteredMessage showHomeLink>Game is live (phase: {view.phase}).</CenteredMessage>
     );
   }
 
@@ -187,6 +195,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // labels branch on this instead of always submitting PROPOSE_SWAP.
   const [poolingProposalId, setPoolingProposalId] = useState<string | null>(null);
   const [poolVisibility, setPoolVisibility] = useState<"private" | "public">("private");
+  // Non-null while Stage 5's unilateral reserve-for-swap is picking its
+  // two market entities -- same `selected` card-picking reuse as pooling,
+  // a third confirm-bar branch below. Mutually exclusive with
+  // poolingProposalId (starting one clears the other, see cancelSelection).
+  const [burningReserveId, setBurningReserveId] = useState<string | null>(null);
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
@@ -211,21 +224,18 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   );
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function currentPosition(entityId: string): number {
-    return view.market.find((m) => m.entity_id === entityId)?.position ?? 0;
-  }
-
   /** Accepts one pair (bare proposal) or two (a proposal + its pool) --
-   * direction per pair comes from comparing current market positions, same
-   * rule engine._rising_entity already uses: whichever entity currently
-   * holds the worse (higher) position is "rising" (it takes the other's
-   * better position once the swap executes). */
-  function visualizeProposal(pairs: [string, string][]) {
+   * direction per pair is the entity's LOCKED rising_entity_id (see the
+   * market-direction-reversal design writeup), never recomputed from
+   * current market positions. A negotiation's arrows stay pinned to what
+   * was authored right up until it executes or voids -- if the market
+   * crosses that relationship, the negotiation voids rather than the
+   * arrows silently flipping. */
+  function visualizeProposal(pairs: [string, string, string][]) {
     const next = new Map<string, { direction: "rising" | "falling"; pairIndex: number }>();
-    pairs.forEach(([a, b], pairIndex) => {
-      const rising = currentPosition(a) > currentPosition(b) ? a : b;
-      const falling = rising === a ? b : a;
-      next.set(rising, { direction: "rising", pairIndex });
+    pairs.forEach(([a, b, risingId], pairIndex) => {
+      const falling = risingId === a ? b : a;
+      next.set(risingId, { direction: "rising", pairIndex });
       next.set(falling, { direction: "falling", pairIndex });
     });
     setHighlighted(next);
@@ -279,12 +289,21 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setSelected([]);
     setPoolingProposalId(proposalId);
     setPoolVisibility("private");
+    setBurningReserveId(null);
   }
 
   function cancelSelection() {
     setProposeError(null);
     setSelected([]);
     setPoolingProposalId(null);
+    setBurningReserveId(null);
+  }
+
+  function startBurning(holdingId: string) {
+    setProposeError(null);
+    setSelected([]);
+    setPoolingProposalId(null);
+    setBurningReserveId(holdingId);
   }
 
   // Server-authoritative preview of what PROPOSE_SWAP would cost -- never
@@ -294,7 +313,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // selections doesn't re-fire a fetch; the display below only trusts
   // `proposeCost` while a pair is actually selected, so a stale value left
   // over from a previous pair is never shown.
-  const selectedPair = selected.length === 2 ? selected : null;
+  // Burn-for-swap costs no Influence at all (see engine._handle_burn_reserve_for_swap
+  // -- no liability logic in it whatsoever), so there's nothing to preview.
+  const selectedPair = selected.length === 2 && !burningReserveId ? selected : null;
   const [proposeCost, setProposeCost] = useState<0 | 1 | null>(null);
   useEffect(() => {
     if (!selectedPair) return;
@@ -326,19 +347,29 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           { proposal_id: poolingProposalId, entity_c: selected[0], entity_d: selected[1], visibility: poolVisibility },
           { expectedVersion: view.version, onSettled: onChanged },
         )
-      : await submitCommand(
-          gameId,
-          "PROPOSE_SWAP",
-          { entity_a: selected[0], entity_b: selected[1] },
-          { expectedVersion: view.version, onSettled: onChanged },
-        );
+      : burningReserveId
+        ? await submitCommand(
+            gameId,
+            "BURN_RESERVE_FOR_SWAP",
+            { reserve_holding_id: burningReserveId, entity_a: selected[0], entity_b: selected[1] },
+            { expectedVersion: view.version, onSettled: onChanged },
+          )
+        : await submitCommand(
+            gameId,
+            "PROPOSE_SWAP",
+            { entity_a: selected[0], entity_b: selected[1] },
+            { expectedVersion: view.version, onSettled: onChanged },
+          );
     setProposing(false);
     if (!result.ok) {
-      setProposeError(commandErrorMessage(result.data, poolingProposalId ? "Couldn't create that pool." : "Couldn't propose that swap."));
+      setProposeError(
+        commandErrorMessage(result.data, poolingProposalId ? "Couldn't create that pool." : burningReserveId ? "Couldn't burn that reserve." : "Couldn't propose that swap."),
+      );
       return;
     }
     setSelected([]);
     setPoolingProposalId(null);
+    setBurningReserveId(null);
   }
 
   return (
@@ -467,11 +498,20 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </div>
       )}
 
+      {burningReserveId && selected.length < 2 && (
+        <div className="flex items-center justify-between gap-2 rounded border border-purple-300 bg-purple-50 p-2 text-xs text-purple-900">
+          <span>Burning a reserve for a unilateral swap — tap two cards. Never revealed to you either way.</span>
+          <button type="button" onClick={cancelSelection} className="flex-shrink-0 underline">
+            Cancel
+          </button>
+        </div>
+      )}
+
       {selected.length === 2 && (
         <div className="flex flex-col gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
           <div className="flex items-center justify-between gap-2">
             <span className="text-blue-900">
-              {poolingProposalId ? "Pool" : "Propose"} {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
+              {poolingProposalId ? "Pool" : burningReserveId ? "Burn for swap" : "Propose"} {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
             </span>
             <div className="flex flex-shrink-0 gap-2">
               <button type="button" onClick={cancelSelection} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
@@ -480,10 +520,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               <button
                 type="button"
                 onClick={handleConfirm}
-                disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
+                disabled={proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null))}
                 className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
               >
-                {proposing ? "…" : `${poolingProposalId ? "Pool" : "Propose"}${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                {proposing
+                  ? "…"
+                  : burningReserveId
+                    ? "Burn"
+                    : `${poolingProposalId ? "Pool" : "Propose"}${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
               </button>
             </div>
           </div>
@@ -506,6 +550,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
       <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} onStartPool={startPooling} />
 
+      {view.pending_pickup ? (
+        <PendingPickupPanel gameId={gameId} view={view} pending={view.pending_pickup} onChanged={onChanged} />
+      ) : (
+        <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
+      )}
+
+      <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
+
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
         <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
@@ -522,6 +574,180 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       </div>
 
       <ActivityStream events={events} view={view} />
+    </div>
+  );
+}
+
+/** Deliberately self-only, no aggregate anywhere -- no count, no
+ * percentage, no hint of anyone else's state or how close the table is
+ * to closing. Readiness is a secret trigger, not a public countdown:
+ * the only thing anyone else ever learns is the sudden fact of closure
+ * itself once the threshold is actually reached (see describeEvent's
+ * CLOSE_THRESHOLD_REACHED/MARKET_CLOSED copy below). Matches the
+ * backend's own "owner-only live, never the aggregate" projection rule
+ * exactly -- there is no field to show a count from even if we wanted
+ * to. */
+function ReadyToCloseToggle({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
+  const self = view.players.find((p) => p.game_player_id === view.you);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!self) return null;
+  const ready = self.ready_to_close === true;
+
+  async function handleToggle() {
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(gameId, "SET_READY_TO_CLOSE", { ready: !ready }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusy(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't update readiness."));
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
+      <span className="text-zinc-700">{ready ? "You're marked ready to close." : "Mark yourself ready to close whenever you're done."}</span>
+      <button
+        type="button"
+        onClick={handleToggle}
+        disabled={busy}
+        className={`flex-shrink-0 rounded border px-3 py-1 text-xs font-medium disabled:opacity-50 ${
+          ready ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-zinc-300 text-zinc-700"
+        }`}
+      >
+        {busy ? "…" : ready ? "Ready ✓" : "Ready to close"}
+      </button>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+/** The frozen decision panel while a reserve pickup is pending -- present
+ * only via view.pending_pickup, injected server-side directly into the
+ * frozen cached_view (see engine._handle_pick_up_reserve). Everything
+ * else in `view` is frozen too while this is active (the whole poll
+ * response is the cached snapshot, not just this block) -- that's the
+ * "only this player freezes" design, not a bug in this component. */
+function PendingPickupPanel({
+  gameId,
+  view,
+  pending,
+  onChanged,
+}: {
+  gameId: string;
+  view: GameView;
+  pending: NonNullable<GameView["pending_pickup"]>;
+  onChanged: () => void;
+}) {
+  const [discarding, setDiscarding] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const myPortfolio = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
+
+  async function handleDiscard(holdingId: string) {
+    setError(null);
+    setDiscarding(holdingId);
+    const result = await submitCommand(
+      gameId,
+      "DISCARD_HOLDING",
+      { pending_pickup_id: pending.pending_pickup_id, holding_id_to_discard: holdingId },
+      { expectedVersion: view.version, onSettled: onChanged },
+    );
+    setDiscarding(null);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't discard that holding."));
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium text-amber-900">You drew {entityLabel(pending.revealed_entity_id, view)} — discard one of your five to keep it.</span>
+        <span className="flex-shrink-0 font-mono text-xs font-bold tabular-nums text-amber-900">{formatCountdownTo(new Date(pending.decision_deadline_at).getTime())}</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {myPortfolio.map((h) => (
+          <button
+            key={h.holding_id}
+            type="button"
+            onClick={() => handleDiscard(h.holding_id)}
+            disabled={discarding !== null}
+            className="rounded border border-amber-400 bg-white px-2 py-1 text-xs font-medium text-amber-900 disabled:opacity-50"
+          >
+            {discarding === h.holding_id ? "…" : `Discard ${h.entity_id ? entityLabel(h.entity_id, view) : "?"}`}
+          </button>
+        ))}
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+/** Own still-unrevealed reserves -- each a Pick Up slot (always legal
+ * during negotiation, no client-side pre-check) and, while inside the
+ * unilateral window, a Burn-for-swap trigger that hands off to
+ * MarketView's own card-selection flow. The Burn button being disabled
+ * once the window closes IS the final-window lockout indicator -- the
+ * server would 400 it anyway, this just surfaces that state up front
+ * instead of letting the tap fail silently. */
+function ReserveControls({
+  gameId,
+  view,
+  onChanged,
+  burningReserveId,
+  onStartBurn,
+  onCancelBurn,
+}: {
+  gameId: string;
+  view: GameView;
+  onChanged: () => void;
+  burningReserveId: string | null;
+  onStartBurn: (holdingId: string) => void;
+  onCancelBurn: () => void;
+}) {
+  const [pickingUp, setPickingUp] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const myReserves = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "reserve_unrevealed");
+  const canBurn = view.unilateral_cutoff_at !== null && !isPastDeadline(new Date(view.unilateral_cutoff_at).getTime());
+
+  if (myReserves.length === 0) return null;
+
+  async function handlePickUp(holdingId: string) {
+    setError(null);
+    setPickingUp(holdingId);
+    const result = await submitCommand(gameId, "PICK_UP_RESERVE", { reserve_holding_id: holdingId }, { expectedVersion: view.version, onSettled: onChanged });
+    setPickingUp(null);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't pick that up."));
+  }
+
+  return (
+    <div className="rounded border border-zinc-200 bg-white p-3">
+      <h2 className="mb-2 text-sm font-medium text-zinc-700">Reserves</h2>
+      <ul className="flex flex-col gap-1.5">
+        {myReserves.map((h, i) => (
+          <li key={h.holding_id} className="flex items-center justify-between gap-2 text-sm text-zinc-900">
+            <span>Reserve {i + 1}</span>
+            <span className="flex flex-shrink-0 gap-1">
+              <button
+                type="button"
+                onClick={() => handlePickUp(h.holding_id)}
+                disabled={pickingUp !== null}
+                className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+              >
+                {pickingUp === h.holding_id ? "…" : "Pick up"}
+              </button>
+              <button
+                type="button"
+                onClick={() => (burningReserveId === h.holding_id ? onCancelBurn() : onStartBurn(h.holding_id))}
+                disabled={!canBurn}
+                title={canBurn ? undefined : "The unilateral swap window has closed"}
+                className={`rounded border px-2 py-1 text-xs font-medium disabled:opacity-30 ${
+                  burningReserveId === h.holding_id ? "border-purple-500 bg-purple-100 text-purple-900" : "border-purple-300 text-purple-700"
+                }`}
+              >
+                {burningReserveId === h.holding_id ? "Cancel burn" : "Burn for swap"}
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {!canBurn && <p className="mt-2 text-xs text-zinc-400">The unilateral swap window has closed — Pick Up is still open.</p>}
+      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
     </div>
   );
 }
@@ -574,7 +800,7 @@ function OpenProposals({
   gameId: string;
   view: GameView;
   onChanged: () => void;
-  onVisualize: (pairs: [string, string][]) => void;
+  onVisualize: (pairs: [string, string, string][]) => void;
   onStartPool: (proposalId: string) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -615,7 +841,7 @@ function OpenProposals({
                 <span className="flex flex-shrink-0 gap-1">
                   <button
                     type="button"
-                    onClick={() => onVisualize([[p.entity_a, p.entity_b]])}
+                    onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
                     className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
                   >
                     Visualize
@@ -679,7 +905,12 @@ function OpenProposals({
                           {visible && (
                             <button
                               type="button"
-                              onClick={() => onVisualize([[p.entity_a, p.entity_b], [pool.entity_c!, pool.entity_d!]])}
+                              onClick={() =>
+                                onVisualize([
+                                  [p.entity_a, p.entity_b, p.rising_entity_id],
+                                  [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                                ])
+                              }
                               className="rounded border border-zinc-300 px-2 py-0.5"
                             >
                               Visualize
@@ -746,6 +977,15 @@ const _ACTIVITY_EVENT_TYPES = new Set([
   "PRIVATE_POOL_CREATED",
   "PUBLIC_POOL_CREATED",
   "POOL_RESOLVED",
+  // Game-lifecycle events -- narrative/informational, so only surfaced
+  // under the "All" filter, never the default "Executed" one (they're
+  // not a proposal/pool resolving, so matchesActivityFilter's "executed"
+  // branch already excludes them regardless of this set).
+  "CLOSE_THRESHOLD_REACHED",
+  "MARKET_CLOSED",
+  "PORTFOLIOS_REVEALED",
+  "GAME_SCORED",
+  "GAME_ENDED",
 ]);
 const _TONE_CLASSES: Record<string, string> = {
   open: "text-blue-700",
@@ -781,6 +1021,10 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     if (reason === "executed") return { text: `${swap} — accepted`, tone: "success" };
     if (reason === "withdrawn_by_initiator") return { text: `${swap} — withdrawn`, tone: "muted" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
+    // Deliberately loud, never masked (the opposite of Pass) -- the
+    // market moved far enough that the proposed direction was no longer
+    // valid. See the market-direction-reversal design writeup.
+    if (reason === "voided_market_swung") return { text: `${swap} — voided, market swung`, tone: "warning" };
     return { text: `${swap} — resolved`, tone: "muted" };
   }
   if (event.type === "PRIVATE_POOL_CREATED" || event.type === "PUBLIC_POOL_CREATED") {
@@ -802,8 +1046,25 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     if (reason === "invalidated_by_initiator_action") return { text: `${swap} — pool abandoned by its own initiator`, tone: "muted" };
     if (reason === "preempted_by_other_action" && pool) return { text: `${swap} — ${describePreemption(pool, view)}`, tone: "warning" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
+    if (reason === "voided_market_swung") return { text: `${swap} — voided, market swung`, tone: "warning" };
+    if (reason === "base_proposal_voided") return { text: `${swap} — base proposal voided, market swung`, tone: "warning" };
     return { text: `${swap} — pool resolved`, tone: "muted" };
   }
+  if (event.type === "CLOSE_THRESHOLD_REACHED") {
+    // Deliberately doesn't echo the payload's numeric `count` -- readiness
+    // stays a secret trigger, not a public countdown, right up until this
+    // exact instant; even here the reveal is the closing itself, not a
+    // number. See the Stage 6 design writeup.
+    return { text: "Ready threshold reached", tone: "warning" };
+  }
+  if (event.type === "MARKET_CLOSED") {
+    const reason = event.payload.reason as string;
+    if (reason === "TIME_EXPIRED") return { text: "Market closed — time ran out", tone: "warning" };
+    if (reason === "READY_THRESHOLD") return { text: "Market closed — ready threshold reached", tone: "warning" };
+    return { text: "Market closed", tone: "warning" };
+  }
+  if (event.type === "PORTFOLIOS_REVEALED") return { text: "Portfolios revealed", tone: "open" };
+  if (event.type === "GAME_SCORED" || event.type === "GAME_ENDED") return { text: "Game scored", tone: "success" };
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
 
@@ -819,6 +1080,134 @@ function matchesActivityFilter(event: EventView, filter: ActivityFilter): boolea
   if (!_ACTIVITY_EVENT_TYPES.has(event.type)) return false;
   if (filter === "all") return true;
   return (event.type === "PROPOSAL_RESOLVED" || event.type === "POOL_RESOLVED") && event.payload.reason === "executed";
+}
+
+/** Zone-specific "what you never ended up using" copy for the reveal
+ * section below -- postgame is deliberately maximally transparent (see
+ * the Stage 6/7 design writeup): a discarded holding was seen and let
+ * go, a surrendered-unused reserve was never picked up at all, a
+ * pickup-surrendered one was seen but lost to the clock, and a
+ * burned-unseen one -- the "oh, I burned Motorboat" beat -- was never
+ * seen even by its own owner until this exact screen. */
+function neverUsedLabel(zone: string): string {
+  if (zone === "discarded") return "discarded after Pick Up";
+  if (zone === "surrendered_unused") return "never picked up";
+  if (zone === "pickup_surrendered") return "revealed but lost to the clock";
+  if (zone === "burned_unseen") return "burned for a swap, never seen";
+  return zone;
+}
+
+/** Stage 7 — the results screen. No new backend data needed:
+ * compute_final_scores' result already merges into project() at SCORED
+ * (realized_haircut_depth/wiped_entity_ids/results/winners), and
+ * holdings are unconditionally revealed across every zone once scored
+ * (confirmed directly against _holding_view's default reveal=True) --
+ * this is purely a rendering pass over data the backend already hands
+ * over in full. */
+function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
+  const { events } = useGameEvents(gameId);
+  const results = view.results ?? [];
+  const winners = new Set(view.winners ?? []);
+  const depth = view.realized_haircut_depth ?? 0;
+  const wiped = new Set(view.wiped_entity_ids ?? []);
+  const holdings = view.holdings ?? [];
+  const sortedResults = [...results].sort((a, b) => b.final_value - a.final_value);
+  const topValue = sortedResults[0]?.final_value;
+  const closeReasonText =
+    view.close_reason === "TIME_EXPIRED" ? "Time ran out." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
+
+  return (
+    <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
+      <div className="flex items-center justify-between">
+        <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
+      </div>
+
+      <div className="rounded border border-zinc-200 bg-white p-4 text-center">
+        <h1 className="text-lg font-bold text-zinc-900">Game over</h1>
+        {closeReasonText && <p className="text-sm text-zinc-500">{closeReasonText}</p>}
+        <p className="mt-2 text-base font-medium text-emerald-700">
+          {winners.size > 1
+            ? `${[...winners].map((id) => playerLabel(id, view)).join(" & ")} tie at ${topValue}!`
+            : `${playerLabel([...winners][0] ?? null, view)} wins with ${topValue}!`}
+        </p>
+        <p className="mt-1 text-xs text-zinc-500">{depth > 0 ? `Positions 1–${depth} were wiped by the realized risk.` : "Nothing was wiped this game."}</p>
+      </div>
+
+      <div>
+        <h2 className="mb-2 text-sm font-medium text-zinc-700">Leaderboard</h2>
+        <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
+          {sortedResults.map((r) => {
+            const isWinner = winners.has(r.game_player_id);
+            return (
+              <li key={r.game_player_id} className="flex items-center justify-between text-sm text-zinc-900">
+                <span className={isWinner ? "font-semibold text-emerald-700" : undefined}>
+                  {isWinner ? "🏆 " : ""}
+                  {playerLabel(r.game_player_id, view)}
+                </span>
+                <span className="tabular-nums text-zinc-700">{r.final_value}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div>
+        <h2 className="mb-2 text-sm font-medium text-zinc-700">Final market</h2>
+        <div className="-mx-4 overflow-x-auto px-4 pb-2">
+          <div className="flex gap-2">
+            {view.market.map((entity) => {
+              const isWiped = wiped.has(entity.entity_id);
+              return (
+                <div
+                  key={entity.entity_id}
+                  className={`flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded border p-2 text-center ${
+                    isWiped ? "border-red-200 bg-red-50 opacity-60" : "border-zinc-200 bg-white"
+                  }`}
+                >
+                  <span className="text-xs text-zinc-400">{entity.position}</span>
+                  <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
+                  <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                  {isWiped && <span className="text-[10px] font-bold text-red-600">WIPED</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4">
+        {view.players.map((player) => {
+          const own = holdings.filter((h) => h.owner_player_id === player.game_player_id && h.zone === "portfolio");
+          const neverUsed = holdings.filter((h) => h.owner_player_id === player.game_player_id && h.zone !== "portfolio");
+          return (
+            <div key={player.game_player_id} className="rounded border border-zinc-200 bg-white p-3">
+              <h3 className="mb-2 text-sm font-medium text-zinc-900">{player.display_name}&apos;s final portfolio</h3>
+              <div className="flex flex-wrap gap-2">
+                {own.map((h) => (
+                  <span
+                    key={h.holding_id}
+                    className={`rounded border px-2 py-1 text-xs ${
+                      h.entity_id && wiped.has(h.entity_id) ? "border-red-200 bg-red-50 text-red-700 line-through" : "border-zinc-200 text-zinc-700"
+                    }`}
+                  >
+                    {h.display_name}
+                  </span>
+                ))}
+              </div>
+              {neverUsed.length > 0 && (
+                <div className="mt-2 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
+                  <span className="font-medium">Never used: </span>
+                  {neverUsed.map((h) => `${h.display_name} (${neverUsedLabel(h.zone)})`).join(", ")}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <ActivityStream events={events} view={view} />
+    </div>
+  );
 }
 
 /** Chronological narrative, distinct from OpenProposals' actionable
