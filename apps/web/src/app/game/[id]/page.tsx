@@ -605,6 +605,12 @@ function OpenProposals({
               <div className="flex items-center justify-between gap-2">
                 <span>
                   {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
+                  {/* Self-only, proposer-only, anonymous -- the proposer's one
+                      and only channel to Pass feedback. See the Pass design
+                      writeup: never identities, never shown to anyone else. */}
+                  {isMine && p.passed_count !== undefined && (
+                    <span className="ml-2 text-xs font-normal text-zinc-400">Passed: {p.passed_count}</span>
+                  )}
                 </span>
                 <span className="flex flex-shrink-0 gap-1">
                   <button
@@ -621,6 +627,21 @@ function OpenProposals({
                       className="rounded border border-purple-300 px-2 py-1 text-xs font-medium text-purple-700"
                     >
                       Pool
+                    </button>
+                  )}
+                  {!isMine && (
+                    // No confirmation -- treated like Accept, one deliberate
+                    // tap. No client-side legality pre-check either (already
+                    // -passed, or holding an open Pool on this proposal): the
+                    // server's rejection surfaces through the same error path
+                    // every other illegal action already uses.
+                    <button
+                      type="button"
+                      onClick={() => runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.")}
+                      disabled={busyId === p.proposal_id}
+                      className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+                    >
+                      {busyId === p.proposal_id ? "…" : "Pass"}
                     </button>
                   )}
                   {isMine ? (

@@ -20,6 +20,7 @@ from gotiate.domain.entities import (
     PoolResolutionReason,
     PoolVisibility,
     Proposal,
+    ProposalResolutionReason,
     ResolutionStatus,
 )
 from gotiate.domain.events import EventType, GameEvent
@@ -112,8 +113,19 @@ def project(game: Game, audience: Audience) -> dict:
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
-        "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values()],
-        "pools": [_project_pool(game, pool, audience) for pool in game.pools.values()],
+        # A proposal (and every Pool attached to it) is omitted entirely
+        # -- not hidden client-side -- from the live view of any player
+        # who has PASS_PROPOSAL'd it. This is the actual enforcement of
+        # "this negotiation ceases to exist in my world"; the engine-side
+        # legality checks (can't accept/pool after passing) are the
+        # backstop, this is what makes it true even before a player tries
+        # to act. See the Pass design writeup.
+        "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values() if not _proposal_passed_by(p, audience)],
+        "pools": [
+            _project_pool(game, pool, audience)
+            for pool in game.pools.values()
+            if not _proposal_passed_by(game.proposals.get(pool.base_proposal_id), audience)
+        ],
     }
 
     if scored:
@@ -193,6 +205,10 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.HAIRCUT_PROFILE_SELECTED: EventVisibility.SERVER_ONLY,
     EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
+    # Own pass only, in the passer's own history -- the proposer's only
+    # channel to Pass feedback is the anonymous, aggregate passed_count on
+    # the live proposal (project()/_project_proposal), never this event.
+    EventType.PROPOSAL_PASSED: EventVisibility.ACTOR_ONLY,
     # Payload carries entity_c/entity_d directly -- the actual swap.
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
@@ -254,6 +270,16 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
                 or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
             )
             views.append(_event_view(event, redact=() if can_see_contents else _POOL_CONTENT_KEYS))
+            continue
+        if event.type is EventType.PROPOSAL_RESOLVED:
+            # Same masking _public_resolution_reason applies to the live
+            # proposal projection -- EXPIRED_ALL_PASSED must never appear
+            # live, in the event log any more than in the proposal's own
+            # current-state view. See the Pass design writeup.
+            view = _event_view(event)
+            if view["payload"].get("reason") == ProposalResolutionReason.EXPIRED_ALL_PASSED.value:
+                view = {**view, "payload": {**view["payload"], "reason": ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value}}
+            views.append(view)
             continue
         views.append(_event_view(event))  # PUBLIC
     return views
@@ -374,6 +400,25 @@ def liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> i
     return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
 
 
+def _proposal_passed_by(proposal: Proposal | None, audience: Audience) -> bool:
+    return proposal is not None and isinstance(audience, PlayerAudience) and audience.game_player_id in proposal.passed_player_ids
+
+
+def _public_resolution_reason(reason: ProposalResolutionReason | None, audience: Audience) -> str | None:
+    """EXPIRED_ALL_PASSED is masked back to WITHDRAWN_BY_INITIATOR for
+    every live audience -- publicly indistinguishable from an ordinary
+    withdrawal, by design. If we reported "no takers" live, we'd have
+    reconstructed the exact public stigma Pass exists to avoid, one level
+    removed. ReplayAudience sees the true reason, same "revealed once
+    scored" precedent as everything else post-game. See the Pass design
+    writeup."""
+    if reason is None:
+        return None
+    if reason is ProposalResolutionReason.EXPIRED_ALL_PASSED and not isinstance(audience, ReplayAudience):
+        return ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value
+    return reason.value
+
+
 def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dict:
     out: dict = {
         "proposal_id": proposal.proposal_id,
@@ -381,7 +426,7 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         "entity_b": proposal.swap.entity_b,
         "proposer_id": proposal.swap.initiator_player_id,
         "status": proposal.status.value,
-        "resolution_reason": proposal.resolution_reason.value if proposal.resolution_reason else None,
+        "resolution_reason": _public_resolution_reason(proposal.resolution_reason, audience),
     }
     if isinstance(audience, PlayerAudience):
         if audience.game_player_id == proposal.swap.initiator_player_id:
@@ -389,6 +434,11 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
             # reload, since the "the number never changes after you press
             # it" promise is only meaningful if it's still visible later.
             out["my_influence_liability"] = proposal.initiator_influence_liability
+            # Anonymous, aggregate-only -- never identities. This is the
+            # proposer's one and only channel to Pass feedback; PROPOSAL_PASSED
+            # itself is ACTOR_ONLY in EVENT_VISIBILITY, so there's no live
+            # event stream of individual passes to correlate against timing.
+            out["passed_count"] = len(proposal.passed_player_ids)
         elif proposal.status == ResolutionStatus.OPEN:
             # A live, fresh preview of what accepting would cost *this*
             # viewer right now -- never stored, recomputed on every read.

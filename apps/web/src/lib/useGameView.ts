@@ -48,6 +48,10 @@ export interface ProposalView {
   // open, a live preview of what accepting would cost you right now.
   my_influence_liability?: 0 | 1;
   my_accept_liability?: 0 | 1;
+  // Self-only, proposer-only -- anonymous count of players who've
+  // PASS_PROPOSAL'd this proposal. Never present for anyone else,
+  // including the players who passed. See the Pass design writeup.
+  passed_count?: number;
 }
 
 export interface PoolView {

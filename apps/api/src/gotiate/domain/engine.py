@@ -585,12 +585,53 @@ def _handle_withdraw_proposal(game: Game, *, payload: dict, actor_game_player_id
     return events
 
 
+def _all_others_passed(game: Game, proposal: Proposal) -> bool:
+    """True once every seated player except the proposal's own initiator
+    has PASS_PROPOSAL'd it -- mathematically dead, nobody rejected it.
+    See the Pass design writeup."""
+    others = {p.game_player_id for p in game.players} - {proposal.swap.initiator_player_id}
+    return others <= proposal.passed_player_ids
+
+
+def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    _require_negotiation(game)
+    _require_no_pending_pickup(game, actor_game_player_id)
+    proposal = _require_open_proposal(game, payload["proposal_id"])
+    if proposal.swap.initiator_player_id == actor_game_player_id:
+        raise IllegalCommandError("the proposer cannot pass their own proposal")
+    if actor_game_player_id in proposal.passed_player_ids:
+        raise IllegalCommandError("you already passed this proposal")
+    # Scoped to the actor's OWN open Pool on this proposal -- other
+    # players' Pools, public or private, never block a Pass. "You can't
+    # leave the hand while your own chips are in the pot."
+    if any(
+        pool.status == ResolutionStatus.OPEN
+        and pool.base_proposal_id == proposal.proposal_id
+        and pool.swap.initiator_player_id == actor_game_player_id
+        for pool in game.pools.values()
+    ):
+        raise IllegalCommandError("withdraw your Pool on this proposal before passing")
+
+    proposal.passed_player_ids.add(actor_game_player_id)
+    events = [_emit(game, now, EventType.PROPOSAL_PASSED, actor=actor_game_player_id, payload={"proposal_id": proposal.proposal_id})]
+
+    # By construction, no Pool can be open here: a passed player can never
+    # hold one (blocked above) and can never create a new one (proposals
+    # are only poolable by players who haven't passed -- see
+    # _handle_create_pool). So this is a pure status flip, never a cascade.
+    if _all_others_passed(game, proposal):
+        events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXPIRED_ALL_PASSED, None, now))
+    return events
+
+
 def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
     proposal = _require_open_proposal(game, payload["proposal_id"])
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("cannot accept your own proposal")
+    if actor_game_player_id in proposal.passed_player_ids:
+        raise IllegalCommandError("you passed this proposal and can no longer accept it")
 
     # The accepter's liability is fresh, evaluated right now against their
     # current holdings, and charged straight away -- no commit interval,
@@ -615,6 +656,8 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     proposal = _require_open_proposal(game, payload["proposal_id"])
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("the proposer cannot pool their own proposal")
+    if actor_game_player_id in proposal.passed_player_ids:
+        raise IllegalCommandError("you passed this proposal and can no longer pool onto it")
 
     entity_c, entity_d = payload["entity_c"], payload["entity_d"]
     if entity_c == entity_d:
@@ -717,6 +760,8 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         raise IllegalCommandError("cannot accept your own pool")
     if pool.visibility is PoolVisibility.PRIVATE and actor_game_player_id != base.swap.initiator_player_id:
         raise IllegalCommandError("only the base proposer may accept a private pool")
+    if actor_game_player_id in base.passed_player_ids:
+        raise IllegalCommandError("you passed this proposal and can no longer accept a Pool on it")
 
     # Accepting a pool affirms BOTH legs at once -- the accepter's total
     # liability is the OR of a base-leg bit and a pool-leg bit, capped at 1
@@ -882,6 +927,7 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,
     "WITHDRAW_PROPOSAL": _handle_withdraw_proposal,
+    "PASS_PROPOSAL": _handle_pass_proposal,
     "ACCEPT_PROPOSAL": _handle_accept_proposal,
     "CREATE_POOL": _handle_create_pool,
     "WITHDRAW_POOL": _handle_withdraw_pool,

@@ -33,6 +33,10 @@ class EventType(StrEnum):
     PICKUP_FAILED = "PICKUP_FAILED"
     RESERVE_BURNED_FOR_SWAP = "RESERVE_BURNED_FOR_SWAP"
     READY_TO_CLOSE_CHANGED = "READY_TO_CLOSE_CHANGED"  # ledger only, actor-visible live
+    # ledger only, actor-visible live -- see PASS_PROPOSAL. Never shown to
+    # the proposer or anyone else; the proposer's only channel is the
+    # aggregate passed_count on the live proposal projection.
+    PROPOSAL_PASSED = "PROPOSAL_PASSED"
     # Fired by apply_due_time_transitions once haircut_reveal_fraction of
     # the clock has elapsed -- see the Haircut-risk design writeup. A game
     # that closes via the ready-threshold before this fires never sees it

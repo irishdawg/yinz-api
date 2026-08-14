@@ -50,6 +50,12 @@ class ProposalResolutionReason(StrEnum):
     EXECUTED = "executed"
     WITHDRAWN_BY_INITIATOR = "withdrawn_by_initiator"
     MARKET_CLOSED = "market_closed"
+    # Every other seated player has PASS_PROPOSAL'd -- mathematically dead,
+    # nobody rejected it. Never shown live as this value: projections.py's
+    # _public_resolution_reason masks it back to WITHDRAWN_BY_INITIATOR for
+    # every live audience, so Pass never becomes a public signal. See the
+    # Pass design writeup.
+    EXPIRED_ALL_PASSED = "expired_all_passed"
 
 
 class PoolResolutionReason(StrEnum):
@@ -347,6 +353,10 @@ class Proposal(BaseModel):
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
     resolution_reason: ProposalResolutionReason | None = None
+    # Add-only, permanent per player -- see PASS_PROPOSAL. A player in this
+    # set never sees this proposal (or any Pool on it) in their own live
+    # view again; see projections.project()'s omission filter.
+    passed_player_ids: set[str] = Field(default_factory=set)
 
 
 class Pool(BaseModel):

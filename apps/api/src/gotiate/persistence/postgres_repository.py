@@ -207,6 +207,18 @@ class PostgresGameRepository:
                             proposal.resolution_reason.value if proposal.resolution_reason else None,
                         ),
                     )
+                    # Add-only, never removed -- a plain insert-or-ignore per
+                    # member of the in-memory set, same shape as the set
+                    # itself (membership only, no per-pass metadata).
+                    for passed_player_id in proposal.passed_player_ids:
+                        await cur.execute(
+                            """
+                            insert into proposal_passes (proposal_id, game_id, game_player_id)
+                            values (%s, %s, %s)
+                            on conflict (proposal_id, game_player_id) do nothing
+                            """,
+                            (proposal.proposal_id, game.id, passed_player_id),
+                        )
                 for pool in game.pools.values():
                     await cur.execute(
                         """
@@ -413,6 +425,11 @@ class PostgresGameRepository:
             await cur.execute("select * from proposals where game_id = %s", (game_id,))
             proposal_rows = await cur.fetchall()
 
+            await cur.execute("select * from proposal_passes where game_id = %s", (game_id,))
+            passed_player_ids_by_proposal: dict[str, set[str]] = {}
+            for r in await cur.fetchall():
+                passed_player_ids_by_proposal.setdefault(str(r["proposal_id"]), set()).add(str(r["game_player_id"]))
+
             await cur.execute("select * from pools where game_id = %s", (game_id,))
             pool_rows = await cur.fetchall()
 
@@ -422,7 +439,9 @@ class PostgresGameRepository:
             await cur.execute("select * from holdings where game_id = %s", (game_id,))
             holding_rows = await cur.fetchall()
 
-        return _to_game(game_row, player_rows, private_rows, market_rows, proposal_rows, pool_rows, pool_content_rows, holding_rows)
+        return _to_game(
+            game_row, player_rows, private_rows, market_rows, proposal_rows, passed_player_ids_by_proposal, pool_rows, pool_content_rows, holding_rows
+        )
 
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None:
         async with self._connection() as conn:
@@ -509,6 +528,7 @@ def _to_game(
     private_rows: dict[str, DictRow],
     market_rows: list[DictRow],
     proposal_rows: list[DictRow],
+    passed_player_ids_by_proposal: dict[str, set[str]],
     pool_rows: list[DictRow],
     pool_content_rows: dict[str, DictRow],
     holding_rows: list[DictRow],
@@ -555,6 +575,7 @@ def _to_game(
             resolved_at_seq_no=pr["resolved_at_seq_no"],
             resolved_by_player_id=str(pr["resolved_by_player_id"]) if pr["resolved_by_player_id"] else None,
             resolution_reason=ProposalResolutionReason(pr["resolution_reason"]) if pr["resolution_reason"] else None,
+            passed_player_ids=passed_player_ids_by_proposal.get(pid, set()),
         )
 
     pools: dict[str, Pool] = {}
