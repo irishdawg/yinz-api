@@ -378,16 +378,18 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       )}
 
       <div>
-        <h2 className="mb-2 text-sm font-medium text-zinc-700">
-          Scale ({view.market.length}) <span className="font-normal text-zinc-400">— tap two to propose a swap</span>
-        </h2>
-        {/* Payout chance and the card grid share one scroll container (two
-            stacked flex rows, not two independently-scrolling elements) so
-            they always stay column-aligned without any scroll-sync code --
-            both iterate view.market in the same position-sorted order with
-            the same per-item width. Payout chance is keyed by *position*,
-            not by whichever entity happens to occupy it -- see
-            projections.py's haircut_risk_band_depth. */}
+        <span className="text-xs font-medium text-zinc-500">Payout chance</span>
+        {/* Every row here -- position numbers, payout chance, the card grid
+            -- is a plain, label-free flex row with identical per-item width
+            and gap, all iterating view.market in the same position-sorted
+            order. That's what guarantees column alignment; a leading label
+            sharing a row with the numbered cells (the previous shape of
+            this markup) throws every cell after it out of alignment with
+            the rows above and below, which is exactly the bug this fixed.
+            All three rows share one scroll container so they scroll
+            together without any scroll-sync code. Payout chance is keyed
+            by *position*, not by whichever entity happens to occupy it --
+            see projections.py's haircut_risk_band_depth. */}
         <div ref={marketScrollRef} className="-mx-4 overflow-x-auto px-4 pb-2">
           <div className="mb-1 flex gap-2 text-center">
             {view.market.map((entity) => (
@@ -396,18 +398,15 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               </div>
             ))}
           </div>
-          <div className="mb-2 flex items-center gap-2">
-            <span className="w-10 flex-shrink-0 text-xs font-medium leading-tight text-zinc-500">Payout chance</span>
-            <div className="flex flex-1 gap-2 text-center">
-              {view.market.map((entity) => {
-                const cell = payoutChanceCell(entity.position, view.haircut_risk_band_depth, view.haircut_profile);
-                return (
-                  <div key={entity.entity_id} className={`w-28 flex-shrink-0 text-xs font-bold ${cell.className}`}>
-                    {cell.text}
-                  </div>
-                );
-              })}
-            </div>
+          <div className="mb-2 flex gap-2 text-center">
+            {view.market.map((entity) => {
+              const cell = payoutChanceCell(entity.position, view.haircut_risk_band_depth, view.haircut_profile);
+              return (
+                <div key={entity.entity_id} className={`w-28 flex-shrink-0 text-xs font-bold ${cell.className}`}>
+                  {cell.text}
+                </div>
+              );
+            })}
           </div>
           <div className="flex gap-2">
             {view.market.map((entity) => {
@@ -447,6 +446,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               );
             })}
           </div>
+        </div>
+        <div className="my-3 flex items-center gap-3 text-xs text-zinc-400">
+          <div className="h-px flex-1 bg-zinc-200" />
+          <span>Tap two positions above to propose a swap</span>
+          <div className="h-px flex-1 bg-zinc-200" />
         </div>
       </div>
 
