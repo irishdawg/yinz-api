@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
 import { usePlayerName } from "@/lib/usePlayerName";
@@ -125,7 +126,7 @@ export default function Home() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center bg-zinc-50 px-6">
       <main className="w-full max-w-sm">
-        <h1 className="mb-8 text-2xl font-semibold text-zinc-900">Gotiate</h1>
+        <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} className="mb-8" priority />
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1">
             <span className="text-sm font-medium text-zinc-700">Your name</span>

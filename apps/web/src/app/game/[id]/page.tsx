@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
@@ -343,7 +344,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   return (
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-zinc-900">Market</h1>
+        <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
         <span className="font-mono text-2xl font-bold tabular-nums text-zinc-900">{formatMarketCountdown(view.started_at, view.max_duration_s)}</span>
       </div>
 
@@ -1009,6 +1010,7 @@ function LobbyRoom({
   return (
     <div className="flex flex-1 flex-col items-center gap-8 bg-zinc-50 px-6 py-10">
       <div className="flex flex-col items-center gap-4">
+        <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
         <h1 className="text-2xl font-semibold text-zinc-900">Waiting for players</h1>
         {joinCode && (
           <>
