@@ -66,8 +66,8 @@ def test_config_rejects_a_profile_whose_max_depth_drifts_from_the_risk_band():
     # The enforced invariant from the design writeup: every profile's
     # max_depth must equal round(market_size * risk_depth_fraction) for its
     # player count, so config and profile data can never silently drift
-    # apart. This profile has max_depth=2, not the 9-entity market's
-    # expected round(9 * 0.35) = 3.
+    # apart. This profile has max_depth=2, not the 11-entity market's
+    # expected round(11 * 0.35) = 4.
     with pytest.raises(ValueError, match="max_depth"):
         GameConfig(haircut_profiles_by_players={2: [HaircutProfile(depth_probabilities=[0.5, 0.3, 0.2])]})
 

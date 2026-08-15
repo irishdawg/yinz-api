@@ -101,8 +101,8 @@ def test_start_game_succeeds_for_every_real_theme_set_and_player_count(theme_set
 
 @pytest.mark.parametrize("theme_set_id", REAL_THEME_SETS)
 def test_locked_entities_are_always_dealt_into_the_market(theme_set_id):
-    # 2 players is the smallest market (9) against the largest real content
-    # (40) — the most sampling pressure available, not the trivial case
+    # 2 players is tied for the smallest market (11) against the largest
+    # real content (40) — real sampling pressure, not the trivial case
     # where everything fits regardless.
     locked_keys = {e.theme_key for e in themes.get_theme_set(theme_set_id).entities if e.is_locked}
     assert locked_keys, f"{theme_set_id} fixture has no locked entities to actually test against"
@@ -143,7 +143,7 @@ def test_too_many_locked_entities_for_market_size_is_rejected_cleanly(fake_theme
             theme_set_id="tiny_v1",
             market_size_by_players={2: 3},
             # Overriding market_size_by_players alone would leave the default
-            # haircut_profiles_by_players[2] (authored for market_size=9)
+            # haircut_profiles_by_players[2] (authored for market_size=11)
             # mismatched against the new size=3 market -- GameConfig's own
             # validator catches that drift, so this override has to travel
             # with a matching profile, unrelated as it is to what this test

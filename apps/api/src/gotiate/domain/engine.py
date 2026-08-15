@@ -25,7 +25,10 @@ from gotiate.domain.entities import (
     HaircutProfile,
     Holding,
     HoldingZone,
+    MarketCorrectionMove,
+    MarketCorrectionResolutionReason,
     MarketEntity,
+    PendingMarketCorrection,
     PendingPickup,
     PickupFailureReason,
     Pool,
@@ -210,9 +213,58 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
         game.haircut_profile_revealed_at = now
         events.append(_emit(game, now, EventType.HAIRCUT_RISK_REVEALED, actor=None, payload={}))
 
+    if len(game.players) == 2:
+        events += _apply_due_market_correction_transitions(game, now)
+
     if game.phase == GamePhase.NEGOTIATION and game.started_at is not None and game.max_duration_s is not None:
         if now >= game.started_at + timedelta(seconds=game.max_duration_s):
             events += close_market(game, CloseReason.TIME_EXPIRED, now)
+
+    return events
+
+
+def _apply_due_market_correction_transitions(game: Game, now: datetime) -> list[GameEvent]:
+    """2-player-only anti-stagnation mechanic -- see the Market Correction
+    design writeup. Two independent transitions: expire a pending
+    correction nobody triggered in time, or offer a new one once the
+    market's been quiet long enough and the post-resolution cooldown has
+    cleared. Kept as its own function (rather than inlined into
+    apply_due_time_transitions) purely for readability -- called from
+    both apply_due_time_transitions and mirrored in
+    is_time_transition_due, same discipline as every other transition
+    here."""
+    events: list[GameEvent] = []
+    correction = game.pending_market_correction
+
+    if correction is not None:
+        if now >= correction.expires_at:
+            events.append(_resolve_market_correction(game, correction, MarketCorrectionResolutionReason.EXPIRED, None, now))
+        return events
+
+    if (
+        game.market_correction_cooldown_until is not None
+        and now >= game.market_correction_cooldown_until
+        and game.last_negotiated_execution_at is not None
+        and now - game.last_negotiated_execution_at >= timedelta(seconds=game.config.market_correction_stagnation_seconds)
+    ):
+        new_correction = _construct_market_correction(game, now, random.Random())
+        if new_correction is not None:
+            game.pending_market_correction = new_correction
+            events.append(
+                _emit(
+                    game,
+                    now,
+                    EventType.MARKET_CORRECTION_OFFERED,
+                    actor=None,
+                    payload={"correction_id": new_correction.correction_id, "expires_at": new_correction.expires_at.isoformat()},
+                )
+            )
+        # Construction failing (no legal destination for either eligible
+        # candidate) is expected to be exceptionally rare -- deliberately
+        # NOT pushing the cooldown here, so the next tick just retries
+        # against whatever the board looks like by then, rather than
+        # sitting dark for a full cooldown period over what should
+        # self-resolve as soon as anything on the board changes.
 
     return events
 
@@ -241,6 +293,18 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
         return True
     if game.haircut_profile_revealed_at is None and game.haircut_reveal_at is not None and now >= game.haircut_reveal_at:
         return True
+    if len(game.players) == 2:
+        correction = game.pending_market_correction
+        if correction is not None:
+            if now >= correction.expires_at:
+                return True
+        elif (
+            game.market_correction_cooldown_until is not None
+            and now >= game.market_correction_cooldown_until
+            and game.last_negotiated_execution_at is not None
+            and now - game.last_negotiated_execution_at >= timedelta(seconds=game.config.market_correction_stagnation_seconds)
+        ):
+            return True
     return game.started_at is not None and game.max_duration_s is not None and now >= game.started_at + timedelta(seconds=game.max_duration_s)
 
 
@@ -296,6 +360,13 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
     for pool in list(game.pools.values()):
         if pool.status == ResolutionStatus.OPEN:
             events.append(_resolve_pool(game, pool, PoolResolutionReason.MARKET_CLOSED, None, now, spend=False))
+
+    # An offered-but-unresolved Market Correction is moot once the game
+    # ends -- EXPIRED is the closest existing fit ("this opportunity is
+    # now gone"), not a new reason just for this.
+    pending_correction = game.pending_market_correction
+    if pending_correction is not None:
+        events.append(_resolve_market_correction(game, pending_correction, MarketCorrectionResolutionReason.EXPIRED, None, now))
 
     for player in game.players:
         if player.pending_pickup is not None:
@@ -518,6 +589,14 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     )
     game.close_threshold = game.config.close_threshold(n)
 
+    # 2-player-only, but harmless to set regardless -- every check that
+    # consumes these already gates on len(game.players) == 2. No extra
+    # grace beyond the stagnation threshold itself: cooldown starts
+    # already-cleared, at started_at. See the Market Correction design
+    # writeup.
+    game.last_negotiated_execution_at = now
+    game.market_correction_cooldown_until = now
+
     # Chosen and locked now, hidden until haircut_reveal_at -- see the
     # Haircut-risk design writeup. game.max_duration_s is already assigned
     # above, so this can reference it directly rather than recomputing from
@@ -653,7 +732,18 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
         accepter.influence_available -= 1
         accepter.influence_spent += 1
 
-    events = _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id)
+    # A negotiated deal executing is proof the market isn't frozen --
+    # unconditional, resolved *before* this deal's own _execute_swap runs
+    # (not after), so a deal that happens to also cross a pending
+    # correction's locked move still resolves it as MARKET_RESUMED, never
+    # INVALIDATED -- ordering caught on review, not incidental. See the
+    # Market Correction design writeup.
+    game.last_negotiated_execution_at = now
+    events: list[GameEvent] = []
+    pending_correction = game.pending_market_correction
+    if pending_correction is not None:
+        events.append(_resolve_market_correction(game, pending_correction, MarketCorrectionResolutionReason.MARKET_RESUMED, None, now))
+    events += _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id)
     events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
     events += resolve_sibling_pools(game, proposal, actor_game_player_id, now)
     return events
@@ -800,7 +890,16 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         accepter.influence_available -= 1
         accepter.influence_spent += 1
 
-    events = _execute_swap(game, base.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
+    # Same ordering rule as _handle_accept_proposal -- resolve any pending
+    # correction as MARKET_RESUMED *before* either leg's _execute_swap
+    # runs, so the reason is deterministic regardless of incidental
+    # overlap. See the Market Correction design writeup.
+    game.last_negotiated_execution_at = now
+    events: list[GameEvent] = []
+    pending_correction = game.pending_market_correction
+    if pending_correction is not None:
+        events.append(_resolve_market_correction(game, pending_correction, MarketCorrectionResolutionReason.MARKET_RESUMED, None, now))
+    events += _execute_swap(game, base.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
     events += _execute_swap(game, pool.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
     events.append(_resolve_proposal(game, base, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
     events.append(_resolve_pool(game, pool, PoolResolutionReason.EXECUTED, actor_game_player_id, now, spend=True))
@@ -892,7 +991,7 @@ def _handle_discard_holding(game: Game, *, payload: dict, actor_game_player_id: 
     reserve.zone = HoldingZone.PORTFOLIO
     player.pending_pickup = None
 
-    return [
+    events = [
         _emit(
             game,
             now,
@@ -901,6 +1000,15 @@ def _handle_discard_holding(game: Game, *, payload: dict, actor_game_player_id: 
             payload={"pending_pickup_id": pp.pending_pickup_id, "reserve_holding_id": reserve.holding_id, "discarded_holding_id": discard_id},
         )
     ]
+    # A discard changes portfolio ownership without moving any market
+    # position -- the one invalidation path a pending correction needs
+    # that _execute_swap's own choke point can't cover, since this never
+    # calls it. See _market_correction_still_valid / the Market
+    # Correction design writeup.
+    pending_correction = game.pending_market_correction
+    if pending_correction is not None and not _market_correction_still_valid(game):
+        events.append(_resolve_market_correction(game, pending_correction, MarketCorrectionResolutionReason.INVALIDATED, None, now))
+    return events
 
 
 def _handle_decline_pickup(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -967,6 +1075,42 @@ def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_i
     return events
 
 
+def _handle_trigger_market_correction(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """Either player may trigger; the other has no veto. Never automatic
+    -- this handler is the *only* path a correction ever actually
+    executes through. Not exempt from the optimistic-concurrency check
+    (unlike DISCARD_HOLDING/DECLINE_PICKUP): this is a normal, live
+    -polled, game-level offer visible to both players through the
+    ordinary view, not a frozen per-player snapshot, so a client's own
+    expected_version is meaningfully fresh. See the Market Correction
+    design writeup."""
+    _require_negotiation(game)
+    correction = game.pending_market_correction
+    if correction is None or correction.correction_id != payload["correction_id"]:
+        raise IllegalCommandError("no matching Market Correction available")
+    if not _market_correction_still_valid(game):
+        # Defense-in-depth -- the invalidation hooks (the _execute_swap
+        # choke point, and the DISCARD_HOLDING check) should already have
+        # cleared this if it were broken. Re-check anyway rather than
+        # trust that nothing slipped through, and clean up if so.
+        game.pending_market_correction = None
+        raise IllegalCommandError("that Market Correction is no longer valid")
+
+    # Clear *before* executing either swap -- otherwise _execute_swap's
+    # own invalidation scan would see this still pending after the first
+    # leg and mistakenly resolve it as invalidated the instant its own
+    # first move succeeds (its locked direction trivially "crosses" once
+    # it's done exactly what it promised). Real bug caught on review, not
+    # hypothetical -- see _invalidate_crossed_negotiations' comment on
+    # this same point.
+    game.pending_market_correction = None
+    events: list[GameEvent] = []
+    for move in correction.moves:
+        events += _execute_swap(game, move.swap, now)
+    events.append(_resolve_market_correction(game, correction, MarketCorrectionResolutionReason.TRIGGERED, actor_game_player_id, now))
+    return events
+
+
 _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "CANCEL_GAME": _handle_cancel_game,
     "EXTEND_LOBBY_TIMER": _handle_extend_lobby_timer,
@@ -984,6 +1128,7 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "DISCARD_HOLDING": _handle_discard_holding,
     "DECLINE_PICKUP": _handle_decline_pickup,
     "BURN_RESERVE_FOR_SWAP": _handle_burn_reserve_for_swap,
+    "TRIGGER_MARKET_CORRECTION": _handle_trigger_market_correction,
     "SET_READY_TO_CLOSE": _handle_set_ready_to_close,
 }
 
@@ -1105,11 +1250,220 @@ def _invalidate_crossed_negotiations(
         if {pool.swap.entity_a, pool.swap.entity_b} & moved and _direction_crossed(game, pool.swap):
             events.append(_resolve_pool(game, pool, PoolResolutionReason.VOIDED_MARKET_SWUNG, None, now, spend=False))
 
+    # A pending Market Correction's own moves are real SwapIntents with
+    # locked directions too -- same crossing check, same infrastructure.
+    # When TRIGGER_MARKET_CORRECTION executes its own two moves, it
+    # clears game.pending_market_correction *before* calling
+    # _execute_swap for either one, so this is always a no-op for a
+    # correction resolving itself (there's nothing left here to find) --
+    # see _handle_trigger_market_correction. This only ever fires for an
+    # *unrelated* swap (a unilateral burn) crossing a still-pending
+    # correction. A negotiated deal never reaches this path either -- see
+    # _handle_accept_proposal/_handle_accept_pool, which resolve any
+    # pending correction as MARKET_RESUMED before their own swap runs.
+    pending_correction = game.pending_market_correction
+    if pending_correction is not None and not _market_correction_still_valid(game):
+        events.append(_resolve_market_correction(game, pending_correction, MarketCorrectionResolutionReason.INVALIDATED, None, now))
+
     return events
 
 
 def _direction_crossed(game: Game, swap: SwapIntent) -> bool:
     return _rising_entity(game, swap.entity_a, swap.entity_b) != swap.rising_entity_id
+
+
+def _market_correction_still_valid(game: Game) -> bool:
+    """True if every move in game.pending_market_correction still holds
+    its construction-time premise: locked direction hasn't crossed, the
+    source is still owned by the targeted player, and the destination is
+    still unowned by every player. True (vacuously) if nothing is
+    pending. See the Market Correction design writeup."""
+    correction = game.pending_market_correction
+    if correction is None:
+        return True
+    for move in correction.moves:
+        if _direction_crossed(game, move.swap):
+            return False
+        if not _owns(game, move.target_player_id, move.swap.entity_a):
+            return False
+        if any(_owns(game, p.game_player_id, move.swap.entity_b) for p in game.players):
+            return False
+    return True
+
+
+def _resolve_market_correction(
+    game: Game,
+    correction: PendingMarketCorrection,
+    reason: MarketCorrectionResolutionReason,
+    resolved_by: str | None,
+    now: datetime,
+) -> GameEvent:
+    """Takes `correction` explicitly rather than reading
+    game.pending_market_correction itself -- TRIGGER_MARKET_CORRECTION
+    needs to clear that field *before* executing either of the
+    correction's own swaps (see the self-invalidation fix in
+    _handle_trigger_market_correction), so by the time this runs for the
+    triggered case the field is already None. Idempotent either way:
+    always (re-)clears it and pushes the cooldown forward. The payload
+    always carries the full `moves` detail regardless of reason -- see
+    projections.project_events' bespoke redaction for MARKET_CORRECTION_RESOLVED,
+    which hides it live unless reason == "triggered" (or the audience is
+    Replay), so a future Replay build gets full transparency for free."""
+    game.pending_market_correction = None
+    game.market_correction_cooldown_until = now + timedelta(seconds=game.config.market_correction_cooldown_seconds)
+    payload = {
+        "correction_id": correction.correction_id,
+        "reason": reason.value,
+        "moves": [
+            {"target_player_id": m.target_player_id, "entity_a": m.swap.entity_a, "entity_b": m.swap.entity_b} for m in correction.moves
+        ],
+    }
+    return _emit(game, now, EventType.MARKET_CORRECTION_RESOLVED, actor=resolved_by, payload=payload)
+
+
+def _projected_value(game: Game, player_id: str) -> int:
+    """Duplicated from projections._portfolio_value rather than imported
+    -- same reasoning projections.py already gives for duplicating
+    _rising_entity/_owns from here instead of importing across the
+    engine<->projections boundary: keeps this module's only dependency
+    on projections local and explicit (the one existing exception,
+    `from gotiate.domain.projections import PlayerAudience, project` in
+    _handle_pick_up_reserve, is for the *public* projection API, not a
+    private helper). Server-internal only -- never shown to players,
+    never mentioned in any Market Correction copy. See the design
+    writeup's confidentiality rule."""
+    n = len(game.market)
+    positions = {eid: m.position for eid, m in game.market.items()}
+    holdings = [h for h in game.holdings.values() if h.owner_player_id == player_id and h.zone == HoldingZone.PORTFOLIO]
+    return sum(n - positions[h.entity_id] + 1 for h in holdings)
+
+
+def _clamp_displacement(raw: float, market_size: int) -> int:
+    return max(1, min(market_size - 1, round(raw)))
+
+
+def _find_correction_destination(game: Game, source_position: int, target_displacement: int, unavailable: set[str]) -> str | None:
+    """Nearest-legal-destination search, in the exact preference order
+    from the Market Correction design writeup: closer to the exact
+    target position wins, among every position strictly below (worse
+    than) the source that isn't in `unavailable` (owned by either player,
+    or already claimed by this correction's other move). A single pass
+    over every position below the source is cheap at this market's size
+    (<=17) and naturally finds the exact target first when it's
+    available, since distance 0 always wins ties."""
+    market_size = len(game.market)
+    entity_by_position = {m.position: eid for eid, m in game.market.items()}
+    exact_target = min(market_size, source_position + target_displacement)
+    best: str | None = None
+    best_distance: int | None = None
+    for pos in range(source_position + 1, market_size + 1):
+        candidate = entity_by_position.get(pos)
+        if candidate is None or candidate in unavailable:
+            continue
+        distance = abs(pos - exact_target)
+        if best_distance is None or distance < best_distance:
+            best, best_distance = candidate, distance
+    return best
+
+
+def _construct_one_correction_move(
+    game: Game, player_id: str, target_displacement: int, unavailable_destinations: set[str], rng: random.Random
+) -> MarketCorrectionMove | None:
+    """Targeting rules, locked: start from the player's top two *distinct*
+    owned entities by current position. A doubled/anchor holding (owned
+    x2+) is excluded if the other of the top two is singly-owned; only
+    when *both* are doubled does a double become eligible. Selection
+    within the eligible set is uniform-random, never damage-optimized.
+    If the randomly-drawn candidate has no legal destination, the
+    *other* eligible candidate is tried before giving up -- never chains
+    multiple swaps to force an exact displacement."""
+    positions = {eid: m.position for eid, m in game.market.items()}
+    owned_counts: dict[str, int] = {}
+    for h in game.holdings.values():
+        if h.owner_player_id == player_id and h.zone == HoldingZone.PORTFOLIO:
+            owned_counts[h.entity_id] = owned_counts.get(h.entity_id, 0) + 1
+    top_two = sorted(owned_counts, key=lambda eid: positions[eid])[:2]
+    if not top_two:
+        return None
+
+    singly_owned = [eid for eid in top_two if owned_counts[eid] == 1]
+    eligible = singly_owned if singly_owned else top_two
+
+    # Owned by either player, in PORTFOLIO -- a 2-player game, so this is
+    # exactly "owned by neither" once combined with the caller's own
+    # already-claimed-destination exclusions.
+    owned_by_anyone = {h.entity_id for h in game.holdings.values() if h.zone == HoldingZone.PORTFOLIO}
+    unavailable = owned_by_anyone | unavailable_destinations
+
+    candidates = list(eligible)
+    rng.shuffle(candidates)
+    for source_id in candidates:
+        destination = _find_correction_destination(game, positions[source_id], target_displacement, unavailable)
+        if destination is not None:
+            return MarketCorrectionMove(
+                target_player_id=player_id,
+                swap=SwapIntent(entity_a=source_id, entity_b=destination, initiator_player_id=player_id, rising_entity_id=destination),
+            )
+    return None
+
+
+def _market_correction_target_displacements(game: Game) -> tuple[str, str, dict[str, int]]:
+    """The bounded score-gap -> displacement formula, pure and rng-free:
+    gap = |projected leader - projected trailer| (server-internal only,
+    see _projected_value); spread scales linearly with gap up to
+    gap_saturation, then holds flat at max_spread; leader gets base -
+    spread/2, trailer gets base + spread/2, both clamped to
+    [1, market_size - 1]. Split out from _construct_market_correction so
+    the formula itself is unit-testable independent of destination
+    -search/market-boundary effects (an achieved displacement can be
+    truncated by hitting the market edge -- that's _find_correction_destination's
+    concern, not this formula's). See the Market Correction design writeup."""
+    players = game.players
+    assert len(players) == 2
+    market_size = len(game.market)
+    p0_id, p1_id = players[0].game_player_id, players[1].game_player_id
+    v0, v1 = _projected_value(game, p0_id), _projected_value(game, p1_id)
+    leader_id, trailer_id = (p0_id, p1_id) if v0 >= v1 else (p1_id, p0_id)
+    gap = abs(v0 - v1)
+
+    base = game.config.market_correction_base_displacement_fraction * market_size
+    max_spread = game.config.market_correction_max_spread_fraction * market_size
+    gap_saturation = game.config.market_correction_gap_saturation_fraction * market_size
+    spread = max_spread * min(1.0, gap / gap_saturation) if gap_saturation > 0 else 0.0
+    target_displacement = {
+        leader_id: _clamp_displacement(base - spread / 2, market_size),
+        trailer_id: _clamp_displacement(base + spread / 2, market_size),
+    }
+    return leader_id, trailer_id, target_displacement
+
+
+def _construct_market_correction(game: Game, now: datetime, rng: random.Random) -> PendingMarketCorrection | None:
+    """2-player-only. Builds a hidden, fixed correction -- one downward
+    move per player -- before either player has chosen anything; that's
+    load-bearing, not incidental (accepting is a wager on a fixed unknown
+    outcome, never a roll the server makes after seeing the acceptance).
+    Severity is derived from the private Projected Value gap and never
+    shown; returns None if either player's eligible top-two holdings have
+    no legal destination this cycle (expected to be exceptionally rare).
+    See the Market Correction design writeup."""
+    players = game.players
+    _leader_id, _trailer_id, target_displacement = _market_correction_target_displacements(game)
+
+    used_destinations: set[str] = set()
+    moves: list[MarketCorrectionMove] = []
+    for player in players:
+        move = _construct_one_correction_move(game, player.game_player_id, target_displacement[player.game_player_id], used_destinations, rng)
+        if move is None:
+            return None
+        used_destinations.add(move.swap.entity_b)
+        moves.append(move)
+
+    return PendingMarketCorrection(
+        correction_id=new_id(),
+        offered_at=now,
+        expires_at=now + timedelta(seconds=game.config.market_correction_offer_seconds),
+        moves=moves,
+    )
 
 
 def _market_entity(game: Game, entity_id: str) -> MarketEntity:

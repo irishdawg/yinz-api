@@ -77,6 +77,20 @@ function pairKey(a: string, b: string): string {
  * actor are all already public with zero mention of which reserve funded
  * it.
  *
+ * **Market Correction never credits support markers, ever.** A
+ * corrective move is real (it goes through the same SWAP_EXECUTED /
+ * engine._execute_swap choke point as everything else here), but nobody
+ * authored its direction -- so a triggered correction's two swaps must
+ * be *claimed*, exactly like an executed proposal/pool leg claims its
+ * own swap, WITHOUT crediting any player. MARKET_CORRECTION_RESOLVED's
+ * payload only ever carries its `moves` live when reason === "triggered"
+ * (see projections.project_events' bespoke redaction) -- expired/
+ * invalidated/market_resumed corrections never reveal what they would
+ * have done, so there's nothing to claim for those, and their swaps
+ * never happened anyway. If a triggering player needs attribution
+ * in the ticker, it comes from MARKET_CORRECTION_RESOLVED's own
+ * actor_game_player_id, entirely separate from this function.
+ *
  * `pools` (the live view.pools, not the event log) is the source of a
  * pool's own entities/initiator/base_proposal_id -- not the
  * PRIVATE_POOL_CREATED event's payload, which a non-insider's client may
@@ -181,6 +195,14 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
       if (!direction) continue;
       creditLeg(direction.rising, direction.falling, [pool.initiatorId, accepterId]);
       claimSwap(pool.entityC, pool.entityD);
+    } else if (event.type === "MARKET_CORRECTION_RESOLVED" && event.payload.reason === "triggered") {
+      // Claims both swaps so they never fall into the "unclaimed =
+      // unilateral" bucket below -- deliberately no bump()/clear() calls
+      // at all. See the design note above.
+      const moves = (event.payload.moves as { entity_a: string; entity_b: string }[] | undefined) ?? [];
+      for (const move of moves) {
+        claimSwap(move.entity_a, move.entity_b);
+      }
     }
   }
 

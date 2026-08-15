@@ -51,6 +51,7 @@ from gotiate.domain.entities import (
     Holding,
     HoldingZone,
     MarketEntity,
+    PendingMarketCorrection,
     PendingPickup,
     Pool,
     PoolResolutionReason,
@@ -142,7 +143,9 @@ class PostgresGameRepository:
                         max_duration_s = %s, unilateral_cutoff_at = %s, unilateral_window_closed_at = %s,
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
                         haircut_profile = %s, haircut_reveal_at = %s, haircut_profile_revealed_at = %s,
-                        realized_haircut_depth = %s, cancellation_reason = %s
+                        realized_haircut_depth = %s, cancellation_reason = %s,
+                        pending_market_correction = %s, last_negotiated_execution_at = %s,
+                        market_correction_cooldown_until = %s
                     where id = %s
                     """,
                     (
@@ -165,6 +168,9 @@ class PostgresGameRepository:
                         game.haircut_profile_revealed_at,
                         game.realized_haircut_depth,
                         game.cancellation_reason.value if game.cancellation_reason else None,
+                        Json(game.pending_market_correction.model_dump(mode="json")) if game.pending_market_correction else None,
+                        game.last_negotiated_execution_at,
+                        game.market_correction_cooldown_until,
                         game.id,
                     ),
                 )
@@ -647,6 +653,13 @@ def _to_game(
         haircut_reveal_at=game_row["haircut_reveal_at"],
         haircut_profile_revealed_at=game_row["haircut_profile_revealed_at"],
         realized_haircut_depth=game_row["realized_haircut_depth"],
+        pending_market_correction=(
+            PendingMarketCorrection.model_validate(game_row["pending_market_correction"])
+            if game_row["pending_market_correction"]
+            else None
+        ),
+        last_negotiated_execution_at=game_row["last_negotiated_execution_at"],
+        market_correction_cooldown_until=game_row["market_correction_cooldown_until"],
     )
 
 

@@ -16,6 +16,7 @@ from gotiate.domain.entities import (
     GamePlayer,
     Holding,
     HoldingZone,
+    MarketCorrectionResolutionReason,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -83,6 +84,15 @@ def project(game: Game, audience: Audience) -> dict:
         "started_at": game.started_at,
         "max_duration_s": game.max_duration_s,
         "unilateral_cutoff_at": game.unilateral_cutoff_at,
+        # Public once offered, but only {correction_id, expires_at} --
+        # never the moves/displacement. See the Market Correction design
+        # writeup: the constitutional rule is public, the contents aren't
+        # until it triggers.
+        "pending_market_correction": (
+            {"correction_id": game.pending_market_correction.correction_id, "expires_at": game.pending_market_correction.expires_at}
+            if game.pending_market_correction is not None
+            else None
+        ),
         # Public once set (same tier as unilateral_cutoff_at) -- the
         # deadline itself isn't a secret, only the profile's contents are
         # until it passes. See the Haircut-risk design writeup.
@@ -238,6 +248,13 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.RESERVE_BURNED_FOR_SWAP: EventVisibility.SERVER_ONLY,
     EventType.READY_TO_CLOSE_CHANGED: EventVisibility.ACTOR_ONLY,
     EventType.HAIRCUT_RISK_REVEALED: EventVisibility.PUBLIC,
+    # Both PUBLIC -- OFFERED's payload is minimal by construction (never
+    # entities/displacement), and RESOLVED gets a bespoke special-case in
+    # project_events (below) redacting `moves` unless reason=="triggered",
+    # same shape as PROPOSAL_RESOLVED's EXPIRED_ALL_PASSED masking. See
+    # the Market Correction design writeup.
+    EventType.MARKET_CORRECTION_OFFERED: EventVisibility.PUBLIC,
+    EventType.MARKET_CORRECTION_RESOLVED: EventVisibility.PUBLIC,
     EventType.UNILATERAL_WINDOW_CLOSED: EventVisibility.PUBLIC,
     EventType.CLOSE_THRESHOLD_REACHED: EventVisibility.PUBLIC,
     EventType.MARKET_CLOSED: EventVisibility.PUBLIC,
@@ -289,6 +306,17 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
             if view["payload"].get("reason") == ProposalResolutionReason.EXPIRED_ALL_PASSED.value:
                 view = {**view, "payload": {**view["payload"], "reason": ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value}}
             views.append(view)
+            continue
+        if event.type is EventType.MARKET_CORRECTION_RESOLVED:
+            # The payload always carries the full `moves` detail
+            # internally (so a future Replay build gets full transparency
+            # for free -- same "postgame reveals everything" precedent as
+            # burned-unseen reserves), but a live audience only ever sees
+            # it once reason == "triggered" -- the hidden contents of an
+            # expired/invalidated/still-resuming correction are never
+            # revealed live. See the Market Correction design writeup.
+            reveal_moves = is_replay or event.payload.get("reason") == MarketCorrectionResolutionReason.TRIGGERED.value
+            views.append(_event_view(event, redact=() if reveal_moves else {"moves"}))
             continue
         views.append(_event_view(event))  # PUBLIC
     return views

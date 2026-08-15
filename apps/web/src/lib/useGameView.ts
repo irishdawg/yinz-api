@@ -139,6 +139,13 @@ export interface GameView {
     revealed_entity_id: string;
     decision_deadline_at: string;
   };
+  // 2-player-only anti-stagnation mechanic -- always present (like
+  // haircut_profile), null unless a correction is currently offered.
+  // Deliberately minimal even then -- never the entities/displacement
+  // involved, which only ever appear in a
+  // MARKET_CORRECTION_RESOLVED(reason=triggered) activity entry. See
+  // the Market Correction design writeup.
+  pending_market_correction: { correction_id: string; expires_at: string } | null;
   // Present once phase is SCORED -- compute_final_scores' result, merged
   // in by project(). See the Haircut-risk design writeup.
   realized_haircut_depth?: number;

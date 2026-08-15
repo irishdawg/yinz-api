@@ -192,7 +192,7 @@ class GameConfig(BaseModel):
     affect a live game — see domain model §09."""
 
     market_size_by_players: dict[int, int] = Field(
-        default_factory=lambda: {2: 9, 3: 11, 4: 13, 5: 15, 6: 17}
+        default_factory=lambda: {2: 11, 3: 11, 4: 13, 5: 15, 6: 17}
     )
     # n=3 is deliberately stricter (max_pair_overlap=1, isolation is a
     # hard reject) than the rest -- a pair sharing 2 of 4 interests forms
@@ -238,12 +238,14 @@ class GameConfig(BaseModel):
     # truncated or extended per player count's own max_depth).
     haircut_profiles_by_players: dict[int, list[HaircutProfile]] = Field(
         default_factory=lambda: {
-            2: [
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.39]),  # Cliff
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.69]),  # Deep burn
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.71]),  # Brutal plateau
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.39]),  # Moderate
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.20]),  # Mild
+            2: [  # identical to 3 -- both round to max_depth=4 now that n=2's
+                # market_size is 11, same existing precedent as 4/5 sharing
+                # profiles. See the Market-Correction market-size writeup.
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.21]),
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.46]),
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.57]),
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.24]),
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.12]),
             ],
             3: [
                 HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.21]),
@@ -280,8 +282,7 @@ class GameConfig(BaseModel):
     # engine._handle_start_game / apply_due_time_transitions.
     haircut_reveal_fraction: float = 0.5
     # Target risky depth = round(market_size * risk_depth_fraction) -- see
-    # the worked table in the design writeup (9->3, 11->4, 13->5, 15->5,
-    # 17->6).
+    # the worked table in the design writeup (11->4, 13->5, 15->5, 17->6).
     risk_depth_fraction: float = 0.35
     starting_influence: int = 10
     unilateral_cutoff_fraction: float = 0.10
@@ -298,6 +299,32 @@ class GameConfig(BaseModel):
     # defaults to still-private in replay, trivially flippable later
     # without a schema change.
     influence_revealed_in_replay: bool = False
+
+    # 2-player-only anti-stagnation mechanic -- flat, not player-count
+    # -keyed, since this never applies to any other count; a per-count
+    # dict would be premature. Grounded in the real 2p clock/market
+    # (480s, 11-slot -- widened from 9 specifically to give the
+    # correction's mutually-unowned-destination search more room; see
+    # the Market Correction market-size writeup) -- see the Market
+    # Correction design writeup. 90s ~= 18.75% of the 480s 2p clock --
+    # long enough that active negotiation never trips it, short enough
+    # to matter within an 8-minute game.
+    market_correction_stagnation_seconds: float = 90.0
+    # 15s, not the originally-drafted 45s -- "that turns the grenade
+    # into patio furniture."
+    market_correction_offer_seconds: float = 15.0
+    # Prevents a permanently-stalled game from re-offering the instant
+    # the last one lapses -- without this, "time since last negotiated
+    # deal" alone would regenerate a correction continuously once
+    # crossed once.
+    market_correction_cooldown_seconds: float = 90.0
+    # Severity formula (see engine._severity_for_market_correction):
+    # spread = max_spread * min(1, gap / gap_saturation); leader gets
+    # base - spread/2, trailer gets base + spread/2, both clamped to
+    # [1, market_size - 1].
+    market_correction_base_displacement_fraction: float = 0.5
+    market_correction_max_spread_fraction: float = 0.4
+    market_correction_gap_saturation_fraction: float = 1.0
 
     join_code_length: int = 7
     # Bounds the brute-force window on a live join code independent of how
@@ -439,6 +466,49 @@ class PendingPickup(BaseModel):
     cached_view: dict = Field(default_factory=dict)
 
 
+class MarketCorrectionMove(BaseModel):
+    """One corrective leg -- the targeted player's own holding (falling)
+    swapped against a mutually-unowned neutral entity (rising). `swap` is
+    a real SwapIntent with its own locked rising_entity_id, exactly like
+    a proposal's -- routed through the same engine._execute_swap ->
+    _invalidate_crossed_negotiations choke point, so an intervening
+    action that crosses it is caught by the exact infrastructure that
+    already protects ordinary proposals. See the Market Correction
+    design writeup."""
+
+    target_player_id: str
+    swap: SwapIntent
+
+
+class MarketCorrectionResolutionReason(StrEnum):
+    TRIGGERED = "triggered"
+    EXPIRED = "expired"
+    # Any negotiated deal (accepted proposal/pool) executed while this was
+    # pending -- unconditional, regardless of whether that deal touched
+    # either move's entities. Distinct from INVALIDATED below: the market
+    # resuming is sufficient on its own, it's not "this got structurally
+    # broken." See _handle_accept_proposal/_handle_accept_pool.
+    MARKET_RESUMED = "market_resumed"
+    # A move's locked direction crossed, or a move's source/destination
+    # ownership changed -- burns and DISCARD_HOLDING only, never
+    # negotiated deals (which always resolve as MARKET_RESUMED instead).
+    # See _market_correction_still_valid.
+    INVALIDATED = "invalidated"
+
+
+class PendingMarketCorrection(BaseModel):
+    """Hidden until triggered or resolved -- see projections.project(),
+    which exposes only {correction_id, expires_at} while this is pending,
+    never `moves`. Constructed once, in full, before either player
+    chooses; never recomputed underneath an acceptance -- see the
+    invalidation rules in engine.py. 2-player-only mechanic."""
+
+    correction_id: str
+    offered_at: datetime
+    expires_at: datetime
+    moves: list[MarketCorrectionMove]  # always exactly 2, one per player
+
+
 # --------------------------------------------------------------------------
 # Players
 # --------------------------------------------------------------------------
@@ -491,6 +561,17 @@ class Game(BaseModel):
     unilateral_cutoff_at: datetime | None = None
     unilateral_window_closed_at: datetime | None = None
     close_threshold: int | None = None
+
+    # 2-player-only anti-stagnation mechanic -- see the Market Correction
+    # design writeup. last_negotiated_execution_at is set at START_GAME
+    # to started_at and updated only by an accepted proposal/pool
+    # (never a burn, never the correction itself); market_correction_cooldown_until
+    # is also set to started_at initially (no extra grace beyond the
+    # stagnation threshold itself), then pushed forward every time a
+    # correction is offered.
+    pending_market_correction: PendingMarketCorrection | None = None
+    last_negotiated_execution_at: datetime | None = None
+    market_correction_cooldown_until: datetime | None = None
 
     # Chosen and locked at START_GAME, hidden until haircut_reveal_at (or
     # until the game is SCORED, whichever comes first -- see project()) --

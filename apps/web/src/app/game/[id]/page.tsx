@@ -92,6 +92,10 @@ function entityLabel(entityId: string, view: GameView): string {
   return view.market.find((m) => m.entity_id === entityId)?.display_name ?? entityId;
 }
 
+function positionOf(entityId: string, view: GameView): number | null {
+  return view.market.find((m) => m.entity_id === entityId)?.position ?? null;
+}
+
 function playerLabel(playerId: string | null, view: GameView): string {
   if (!playerId) return "The market";
   return view.players.find((p) => p.game_player_id === playerId)?.display_name ?? "Someone";
@@ -421,6 +425,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </div>
       )}
 
+      <MarketCorrectionBanner gameId={gameId} view={view} onChanged={onChanged} />
+
       <div>
         <span className="text-xs font-medium text-zinc-500">Payout chance</span>
         {/* Every row here -- position numbers, payout chance, the card grid
@@ -635,6 +641,55 @@ function ReadyToCloseToggle({ gameId, view, onChanged }: { gameId: string; view:
         }`}
       >
         {busy ? "…" : ready ? "Ready ✓" : "Ready to close"}
+      </button>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+/** 2-player-only anti-stagnation mechanic -- public to both players the
+ * instant one is offered, deliberately minimal (never entities or
+ * displacement, only the id + countdown -- see useGameView.ts). Either
+ * player may trigger; there's no veto and no confirmation dialog, same
+ * one-tap convention as Accept/Ready. A real expectedVersion is sent
+ * (unlike DISCARD_HOLDING/DECLINE_PICKUP) -- this is a normal, live
+ * -polled, game-level offer, not a frozen per-player snapshot. See the
+ * Market Correction design writeup. */
+function MarketCorrectionBanner({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
+  const correction = view.pending_market_correction;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!correction) return null;
+  const correctionId = correction.correction_id;
+
+  async function handleTrigger() {
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(
+      gameId,
+      "TRIGGER_MARKET_CORRECTION",
+      { correction_id: correctionId },
+      { expectedVersion: view.version, onSettled: onChanged },
+    );
+    setBusy(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't trigger the Market Correction."));
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded border border-indigo-300 bg-indigo-50 p-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-indigo-900">Market Correction available. Ready to shake things up?</span>
+        <span className="flex-shrink-0 font-mono text-xs font-bold tabular-nums text-indigo-700">
+          {formatCountdownTo(new Date(correction.expires_at).getTime())}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={handleTrigger}
+        disabled={busy}
+        className="self-start rounded bg-indigo-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        {busy ? "…" : "Trigger Market Correction"}
       </button>
       {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
@@ -1104,12 +1159,23 @@ const _ACTIVITY_EVENT_TYPES = new Set([
   "PORTFOLIOS_REVEALED",
   "GAME_SCORED",
   "GAME_ENDED",
+  // 2-player-only anti-stagnation mechanic -- narrative/informational like
+  // the lifecycle events above, so only surfaced under "All" (matchesActivityFilter's
+  // "executed" branch only ever matches PROPOSAL_RESOLVED/POOL_RESOLVED).
+  // See the Market Correction design writeup.
+  "MARKET_CORRECTION_OFFERED",
+  "MARKET_CORRECTION_RESOLVED",
 ]);
 const _TONE_CLASSES: Record<string, string> = {
   open: "text-blue-700",
   success: "text-emerald-700",
   muted: "text-zinc-500",
   warning: "text-amber-700",
+  // Distinct from every other tone above (not blue/emerald/zinc/amber, and
+  // not the market-card badges' emerald/purple either) -- a correction is
+  // unmistakably not a player-authored proposal, pool, or burn. See the
+  // Market Correction design writeup.
+  correction: "text-indigo-700",
 };
 
 /** Was this pool's base proposal ultimately won by a *different* pool, or
@@ -1183,6 +1249,30 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
   }
   if (event.type === "PORTFOLIOS_REVEALED") return { text: "Portfolios revealed", tone: "open" };
   if (event.type === "GAME_SCORED" || event.type === "GAME_ENDED") return { text: "Game scored", tone: "success" };
+  if (event.type === "MARKET_CORRECTION_OFFERED") {
+    return { text: "Market Correction available", tone: "correction" };
+  }
+  if (event.type === "MARKET_CORRECTION_RESOLVED") {
+    const reason = event.payload.reason as string;
+    if (reason === "triggered") {
+      // moves is only ever present live when reason === "triggered" --
+      // projections.project_events redacts it for every other reason. Each
+      // line reads the entity's own name plus its old -> new position;
+      // positions have already swapped by the time this event is walked,
+      // so entity_b's *current* position is where entity_a used to sit.
+      const moves = (event.payload.moves as { target_player_id: string; entity_a: string; entity_b: string }[] | undefined) ?? [];
+      const lines = moves.map((m) => {
+        const oldPosition = positionOf(m.entity_b, view);
+        const newPosition = positionOf(m.entity_a, view);
+        return `${entityLabel(m.entity_a, view)} #${oldPosition ?? "?"} → #${newPosition ?? "?"} — market correction`;
+      });
+      return { text: ["Market Correction triggered", ...lines].join("\n"), tone: "correction" };
+    }
+    if (reason === "expired") return { text: "Market Correction expired unused", tone: "correction" };
+    if (reason === "invalidated") return { text: "Market Correction cancelled — the market moved", tone: "correction" };
+    if (reason === "market_resumed") return { text: "Market Correction cancelled — trading resumed", tone: "correction" };
+    return { text: "Market Correction resolved", tone: "correction" };
+  }
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
 
@@ -1406,7 +1496,7 @@ function ActivityStream({ events, view }: { events: EventView[]; view: GameView 
           .map((event) => {
             const { text, tone } = describeEvent(event, view);
             return (
-              <li key={event.seq_no} className={_TONE_CLASSES[tone]}>
+              <li key={event.seq_no} className={`whitespace-pre-line ${_TONE_CLASSES[tone]}`}>
                 {text}
               </li>
             );

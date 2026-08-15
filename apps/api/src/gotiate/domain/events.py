@@ -42,6 +42,16 @@ class EventType(StrEnum):
     # that closes via the ready-threshold before this fires never sees it
     # live; project() reveals the profile anyway once phase is SCORED.
     HAIRCUT_RISK_REVEALED = "HAIRCUT_RISK_REVEALED"
+    # 2-player-only anti-stagnation mechanic -- see the Market Correction
+    # design writeup. OFFERED's payload is deliberately minimal
+    # ({correction_id, expires_at}, never entities/displacement).
+    # RESOLVED's payload always carries the full `moves` detail
+    # internally (so a future Replay build gets full transparency for
+    # free) but project_events redacts `moves` live unless
+    # reason == "triggered", the same bespoke-special-case treatment
+    # PROPOSAL_RESOLVED's EXPIRED_ALL_PASSED masking already uses.
+    MARKET_CORRECTION_OFFERED = "MARKET_CORRECTION_OFFERED"
+    MARKET_CORRECTION_RESOLVED = "MARKET_CORRECTION_RESOLVED"
 
     # Close & scoring
     UNILATERAL_WINDOW_CLOSED = "UNILATERAL_WINDOW_CLOSED"

@@ -152,7 +152,7 @@ def test_generated_states_never_violate_their_own_hard_constraints(n):
     # trials. 15 real full-pipeline runs per player count is enough to
     # catch a broken hard-reject check without slowing down every `pytest`.
     config = DEFAULT_CONFIG_BY_PLAYERS[n]
-    market_size = {2: 9, 3: 11, 4: 13, 5: 15, 6: 17}[n]
+    market_size = {2: 11, 3: 11, 4: 13, 5: 15, 6: 17}[n]
     rng = random.Random(20260813 + n)
     player_ids = [f"p{i}" for i in range(n)]
 
