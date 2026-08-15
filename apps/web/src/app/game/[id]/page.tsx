@@ -1120,6 +1120,9 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
       <div className="flex items-center justify-between">
         <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
+        <Link href="/" className="text-sm font-medium text-zinc-700 underline">
+          Play again
+        </Link>
       </div>
 
       <div className="rounded border border-zinc-200 bg-white p-4 text-center">
