@@ -479,9 +479,22 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                     <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
                       <span>↑</span>
                       {markers.map((m) => (
-                        <span key={m.playerId} title={playerLabel(m.playerId, view)}>
+                        <span
+                          key={m.playerId}
+                          title={`${playerLabel(m.playerId, view)}${m.unilateralCount > 0 ? " — unilateral move" : ""}`}
+                        >
                           {playerInitial(m.playerId, view)}
                           {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
+                          {/* Distinct from negotiated support: this player burned a
+                              reserve to force this rise themselves, not just agreed
+                              to it with someone. See the unilateral-marker design
+                              writeup -- deliberately not folded into the emerald
+                              count above. */}
+                          {m.unilateralCount > 0 && (
+                            <span className="text-purple-600" title="Unilateral reserve burn">
+                              ⚡
+                            </span>
+                          )}
                         </span>
                       ))}
                     </div>
