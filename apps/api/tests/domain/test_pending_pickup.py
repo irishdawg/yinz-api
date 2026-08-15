@@ -106,8 +106,8 @@ def test_pickup_times_out_and_surrenders_reserve_original_five_restored():
     original = game.player_by_id(tedy).pending_pickup.original_portfolio_holding_ids
 
     # Nobody discards. A later, unrelated command from someone else arrives
-    # after the 5.0s deadline plus the 500ms transport grace.
-    late = t0 + timedelta(seconds=6)
+    # after the 12.0s deadline plus the 500ms transport grace.
+    late = t0 + timedelta(seconds=13)
     engine.handle_command(
         game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=hanky, expected_version=None, now=late
     )
@@ -115,6 +115,86 @@ def test_pickup_times_out_and_surrenders_reserve_original_five_restored():
     assert game.player_by_id(tedy).pending_pickup is None
     assert game.holdings[reserve.holding_id].zone.value == "pickup_surrendered"
     assert all(game.holdings[hid].zone.value == "portfolio" for hid in original)
+
+
+def test_decline_pickup_keeps_original_five_and_surrenders_reserve():
+    game = make_started_game(2)
+    tedy = game.players[0].game_player_id
+    reserve = _reserve_of(game, tedy)
+
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )
+    pp = game.player_by_id(tedy).pending_pickup
+    original = pp.original_portfolio_holding_ids
+
+    engine.handle_command(
+        game,
+        command_type="DECLINE_PICKUP",
+        payload={"pending_pickup_id": pp.pending_pickup_id},
+        actor_game_player_id=tedy,
+        expected_version=None,
+        now=now(),
+    )
+
+    assert game.player_by_id(tedy).pending_pickup is None
+    assert game.holdings[reserve.holding_id].zone.value == "pickup_surrendered"
+    assert all(game.holdings[hid].zone.value == "portfolio" for hid in original)
+
+
+def test_decline_pickup_rejected_without_a_matching_open_pending_pickup():
+    game = make_started_game(2)
+    tedy = game.players[0].game_player_id
+    with pytest.raises(IllegalCommandError):
+        engine.handle_command(
+            game, command_type="DECLINE_PICKUP", payload={"pending_pickup_id": "not-real"}, actor_game_player_id=tedy, expected_version=None, now=now()
+        )
+
+    reserve = _reserve_of(game, tedy)
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )
+    pp = game.player_by_id(tedy).pending_pickup
+    with pytest.raises(IllegalCommandError):
+        engine.handle_command(
+            game, command_type="DECLINE_PICKUP", payload={"pending_pickup_id": "wrong-id"}, actor_game_player_id=tedy, expected_version=None, now=now()
+        )
+    assert game.player_by_id(tedy).pending_pickup is not None
+    assert game.player_by_id(tedy).pending_pickup.pending_pickup_id == pp.pending_pickup_id
+
+
+def test_decline_pickup_is_exempt_from_the_stale_version_check():
+    # Same exemption DISCARD_HOLDING already gets, for the same reason --
+    # a frozen client can't know the live version, since the rest of the
+    # game keeps moving during the lock.
+    game = make_started_game(3)
+    tedy, mortia, _ = [p.game_player_id for p in game.players]
+    reserve = _reserve_of(game, tedy)
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )
+    stale_version = game.version
+    entities = list(game.market.keys())
+    engine.handle_command(
+        game,
+        command_type="PROPOSE_SWAP",
+        payload={"entity_a": entities[0], "entity_b": entities[1]},
+        actor_game_player_id=mortia,
+        expected_version=None,
+        now=now(),
+    )
+    assert game.version != stale_version
+
+    pp = game.player_by_id(tedy).pending_pickup
+    engine.handle_command(
+        game,
+        command_type="DECLINE_PICKUP",
+        payload={"pending_pickup_id": pp.pending_pickup_id},
+        actor_game_player_id=tedy,
+        expected_version=stale_version,  # deliberately stale -- must not raise
+        now=now(),
+    )
+    assert game.player_by_id(tedy).pending_pickup is None
 
 
 def test_stale_pending_pickup_id_is_rejected():

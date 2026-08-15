@@ -88,6 +88,10 @@ class PoolVisibility(StrEnum):
 class PickupFailureReason(StrEnum):
     DECISION_TIMEOUT = "decision_timeout"
     MARKET_CLOSED = "market_closed"
+    # Player-triggered "Skip" -- same _fail_pending_pickup machinery as a
+    # timeout, distinct reason so replay/analytics can tell "chose to
+    # skip" from "ran out of time". See DECLINE_PICKUP.
+    DECLINED_BY_PLAYER = "declined_by_player"
 
 
 class CloseReason(StrEnum):
@@ -253,7 +257,9 @@ class GameConfig(BaseModel):
     unilateral_cutoff_fraction: float = 0.10
     portfolio_shape: list[int] = Field(default_factory=lambda: [2, 1, 1, 1])
     reserve_count: int = 2
-    pickup_decision_seconds: float = 5.0
+    # 5s was too short to read and decide, especially on a phone -- real
+    # playtest feedback. See the Stage 5 Reserve UX overhaul design writeup.
+    pickup_decision_seconds: float = 12.0
     pickup_transport_grace_ms: int = 500
     allow_public_pools: bool = True
     allow_private_pools: bool = True

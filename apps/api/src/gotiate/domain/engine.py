@@ -125,6 +125,8 @@ def join_game(
 # Command dispatch
 # --------------------------------------------------------------------------
 
+_VERSION_EXEMPT_COMMANDS = frozenset({"DISCARD_HOLDING", "DECLINE_PICKUP"})
+
 
 def handle_command(
     game: Game,
@@ -143,9 +145,11 @@ def handle_command(
     if handler is None:
         raise IllegalCommandError(f"unknown command type {command_type!r}")
 
-    # DISCARD_HOLDING is deliberately exempt — it's bound to pending_pickup_id
-    # instead, since the rest of the game keeps moving during a player's lock.
-    if command_type != "DISCARD_HOLDING" and expected_version is not None and expected_version != game.version:
+    # DISCARD_HOLDING and DECLINE_PICKUP are deliberately exempt -- both
+    # are bound to pending_pickup_id instead, since the rest of the game
+    # keeps moving during a player's lock and a frozen client can't know
+    # the live version.
+    if command_type not in _VERSION_EXEMPT_COMMANDS and expected_version is not None and expected_version != game.version:
         err = StaleVersionError(f"expected version {expected_version}, game is at {game.version}")
         err.partial_events = events
         raise err
@@ -899,6 +903,22 @@ def _handle_discard_holding(game: Game, *, payload: dict, actor_game_player_id: 
     ]
 
 
+def _handle_decline_pickup(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """"Skip" -- the player keeps their original five and the reserve goes
+    back to unseen-and-surrendered, exactly the outcome a timeout already
+    produces. Reuses _fail_pending_pickup's existing machinery unchanged,
+    just player-triggered instead of clock-triggered, tagged with a
+    distinct reason. No _require_negotiation needed, same reasoning as
+    _handle_discard_holding: close_market force-resolves every open
+    pending pickup before phase can leave NEGOTIATION, so `pp is None`
+    alone is already equivalent to a phase check here."""
+    player = game.player_by_id(actor_game_player_id)
+    pp = player.pending_pickup
+    if pp is None or pp.pending_pickup_id != payload["pending_pickup_id"]:
+        raise IllegalCommandError("no matching open pending pickup")
+    return _fail_pending_pickup(game, player, PickupFailureReason.DECLINED_BY_PLAYER, now)
+
+
 def _handle_burn_reserve_for_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
@@ -962,6 +982,7 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "ACCEPT_POOL": _handle_accept_pool,
     "PICK_UP_RESERVE": _handle_pick_up_reserve,
     "DISCARD_HOLDING": _handle_discard_holding,
+    "DECLINE_PICKUP": _handle_decline_pickup,
     "BURN_RESERVE_FOR_SWAP": _handle_burn_reserve_for_swap,
     "SET_READY_TO_CLOSE": _handle_set_ready_to_close,
 }

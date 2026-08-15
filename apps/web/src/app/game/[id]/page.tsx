@@ -336,6 +336,18 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const displayedProposeCost = selectedPair ? proposeCost : null;
   const proposeUnaffordable = displayedProposeCost === 1 && (self?.influence?.available ?? 0) < 1;
 
+  // Dedicated decision mode -- every hook above still runs every render
+  // (rules of hooks), but nothing below this point ever executes or
+  // renders while a pickup is pending. In particular `events` (from
+  // useGameEvents, a *separate* poll with no concept of freezing) never
+  // reaches the decision view -- it's a fully self-contained component
+  // reading only from `view`/`pending`, so there's nothing live to leak
+  // through the activity ticker or support markers by construction, not
+  // just by discipline. See the Stage 5 Reserve UX design writeup.
+  if (view.pending_pickup) {
+    return <PendingPickupDecisionView gameId={gameId} view={view} pending={view.pending_pickup} onChanged={onChanged} />;
+  }
+
   async function handleConfirm() {
     if (selected.length !== 2) return;
     setProposeError(null);
@@ -550,11 +562,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
       <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} onStartPool={startPooling} />
 
-      {view.pending_pickup ? (
-        <PendingPickupPanel gameId={gameId} view={view} pending={view.pending_pickup} onChanged={onChanged} />
-      ) : (
-        <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
-      )}
+      <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
 
       <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
 
@@ -620,13 +628,33 @@ function ReadyToCloseToggle({ gameId, view, onChanged }: { gameId: string; view:
   );
 }
 
-/** The frozen decision panel while a reserve pickup is pending -- present
- * only via view.pending_pickup, injected server-side directly into the
- * frozen cached_view (see engine._handle_pick_up_reserve). Everything
- * else in `view` is frozen too while this is active (the whole poll
- * response is the cached snapshot, not just this block) -- that's the
- * "only this player freezes" design, not a bug in this component. */
-function PendingPickupPanel({
+/** Card treatment for the pending-pickup decision surface -- composes two
+ * independent facts, same principle as the results screen's overlay:
+ * border *weight* signals ownership (bold = one of the original five,
+ * matches MarketView's own convention, and is the tappable discard
+ * target), a ring signals the just-revealed reserve (NEW), and anything
+ * that's neither fades quieter as positional-only context. The two can
+ * coexist -- the drawn reserve can coincide with an already-owned
+ * entity. */
+function pendingPickupCardClasses(ownedCount: number, isNew: boolean): string {
+  const weight = ownedCount > 0 ? "border-2 border-zinc-900 bg-white" : "border border-zinc-100 bg-zinc-50 opacity-60";
+  const ring = isNew ? "ring-4 ring-amber-400" : "";
+  return `${weight} ${ring}`.trim();
+}
+
+/** The dedicated decision-mode screen while a reserve pickup is pending --
+ * present only via view.pending_pickup, injected server-side directly
+ * into the frozen cached_view (see engine._handle_pick_up_reserve).
+ * Deliberately self-contained: reads only `view`/`pending`, never
+ * `useGameEvents` or anything else independently polled, so there's
+ * nothing live to leak through the activity ticker or support markers by
+ * construction -- see MarketView's early-return call site. Everything
+ * else in `view` (market positions, payout chances, holdings) is frozen
+ * too, the whole poll response being the cached snapshot, not just this
+ * component's own slice -- "only this player freezes" is already true
+ * server-side; this view just makes it the *entire* screen instead of
+ * one panel buried among live negotiation UI. */
+function PendingPickupDecisionView({
   gameId,
   view,
   pending,
@@ -637,42 +665,119 @@ function PendingPickupPanel({
   pending: NonNullable<GameView["pending_pickup"]>;
   onChanged: () => void;
 }) {
-  const [discarding, setDiscarding] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const myPortfolio = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
+  const marketScrollRef = useRef<HTMLDivElement>(null);
 
-  async function handleDiscard(holdingId: string) {
+  // Center the NEW card on mount so it's not off-screen on a phone --
+  // same scroll-centering technique visualizeProposal already uses.
+  useEffect(() => {
+    const container = marketScrollRef.current;
+    const card = container?.querySelector<HTMLElement>(`[data-entity-id="${pending.revealed_entity_id}"]`);
+    if (!container || !card) return;
+    container.scrollTo({ left: card.offsetLeft + card.offsetWidth / 2 - container.clientWidth / 2, behavior: "smooth" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const myHoldings = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
+  const ownedByEntity = new Map<string, HoldingView[]>();
+  for (const h of myHoldings) {
+    if (!h.entity_id) continue;
+    const list = ownedByEntity.get(h.entity_id) ?? [];
+    list.push(h);
+    ownedByEntity.set(h.entity_id, list);
+  }
+
+  async function handleDiscard(entityId: string) {
+    // Two copies of a doubled/anchor holding are fungible -- either one
+    // is a legal discard target, it doesn't matter which.
+    const holding = ownedByEntity.get(entityId)?.[0];
+    if (!holding || busy) return;
     setError(null);
-    setDiscarding(holdingId);
+    setBusy(true);
     const result = await submitCommand(
       gameId,
       "DISCARD_HOLDING",
-      { pending_pickup_id: pending.pending_pickup_id, holding_id_to_discard: holdingId },
-      { expectedVersion: view.version, onSettled: onChanged },
+      { pending_pickup_id: pending.pending_pickup_id, holding_id_to_discard: holding.holding_id },
+      { onSettled: onChanged },
     );
-    setDiscarding(null);
+    setBusy(false);
     if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't discard that holding."));
   }
 
+  async function handleSkip() {
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(gameId, "DECLINE_PICKUP", { pending_pickup_id: pending.pending_pickup_id }, { onSettled: onChanged });
+    setBusy(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't skip."));
+  }
+
   return (
-    <div className="flex flex-col gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-medium text-amber-900">You drew {entityLabel(pending.revealed_entity_id, view)} — discard one of your five to keep it.</span>
-        <span className="flex-shrink-0 font-mono text-xs font-bold tabular-nums text-amber-900">{formatCountdownTo(new Date(pending.decision_deadline_at).getTime())}</span>
+    <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
+      <div className="flex items-center justify-between">
+        <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
+        <span className="font-mono text-2xl font-bold tabular-nums text-amber-700">{formatCountdownTo(new Date(pending.decision_deadline_at).getTime())}</span>
       </div>
-      <div className="flex flex-wrap gap-2">
-        {myPortfolio.map((h) => (
-          <button
-            key={h.holding_id}
-            type="button"
-            onClick={() => handleDiscard(h.holding_id)}
-            disabled={discarding !== null}
-            className="rounded border border-amber-400 bg-white px-2 py-1 text-xs font-medium text-amber-900 disabled:opacity-50"
-          >
-            {discarding === h.holding_id ? "…" : `Discard ${h.entity_id ? entityLabel(h.entity_id, view) : "?"}`}
-          </button>
-        ))}
+
+      <div className="rounded border border-amber-300 bg-amber-50 p-4 text-center">
+        <p className="font-medium text-amber-900">You drew {entityLabel(pending.revealed_entity_id, view)}</p>
+        <p className="mt-1 text-xs text-amber-800">Tap one of your holdings below to replace it, or Skip.</p>
       </div>
+
+      <div>
+        <div ref={marketScrollRef} className="-mx-4 overflow-x-auto px-4 pb-2">
+          <div className="mb-1 flex gap-2 text-center">
+            {view.market.map((entity) => (
+              <div key={entity.entity_id} className="w-28 flex-shrink-0 text-xs text-zinc-400">
+                {entity.position}
+              </div>
+            ))}
+          </div>
+          <div className="mb-2 flex gap-2 text-center">
+            {view.market.map((entity) => {
+              const cell = payoutChanceCell(entity.position, view.haircut_risk_band_depth, view.haircut_profile);
+              return (
+                <div key={entity.entity_id} className={`w-28 flex-shrink-0 text-xs font-bold ${cell.className}`}>
+                  {cell.text}
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex gap-2">
+            {view.market.map((entity) => {
+              const owned = ownedByEntity.get(entity.entity_id) ?? [];
+              const isNew = entity.entity_id === pending.revealed_entity_id;
+              const tappable = owned.length > 0 && !busy;
+              return (
+                <button
+                  key={entity.entity_id}
+                  type="button"
+                  data-entity-id={entity.entity_id}
+                  onClick={() => tappable && handleDiscard(entity.entity_id)}
+                  disabled={!tappable}
+                  className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${pendingPickupCardClasses(owned.length, isNew)}`}
+                >
+                  <span className={`text-xs ${owned.length > 0 || isNew ? "text-zinc-400" : "text-zinc-300"}`}>{entity.position}</span>
+                  <span className={`font-mono text-sm font-bold ${owned.length > 0 || isNew ? "text-zinc-900" : "text-zinc-300"}`}>{entity.ticker_symbol}</span>
+                  <span className={`text-xs leading-tight ${owned.length > 0 || isNew ? "text-zinc-600" : "text-zinc-300"}`}>{entity.display_name}</span>
+                  {owned.length > 1 && <span className="text-xs font-bold text-zinc-900">×{owned.length}</span>}
+                  {isNew && <span className="text-[10px] font-bold text-amber-600">NEW</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={handleSkip}
+        disabled={busy}
+        className="rounded border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
+      >
+        {busy ? "…" : "Skip — keep current portfolio"}
+      </button>
       {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
   );
