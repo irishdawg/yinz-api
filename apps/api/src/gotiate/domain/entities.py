@@ -221,27 +221,57 @@ class GameConfig(BaseModel):
     # round(market_size_by_players[n] * risk_depth_fraction) for that same
     # n, enforced by the model_validator below so config and profile data
     # can never silently drift apart.
+    #
+    # Five named shapes per player count, spanning TWO independent axes,
+    # not just "how scary is #1" -- severity at the top AND how deep the
+    # danger zone cascades. Cliff/Deep burn/Brutal plateau are all "#1 is
+    # dangerous" but disagree sharply on whether #2/#3 recover quickly or
+    # stay dangerous too; Moderate/Mild are calmer at the top with their
+    # own distinct decay shapes. Deliberately NOT tuned so #2/#3 are
+    # reliably safe -- a deep, cascading danger zone is intended: it's
+    # what stops "push everything up" from being a context-free good
+    # move ("you can have #2, I don't want it"). See the playtest-driven
+    # Haircut-range design writeup for the worked cumulative-certainty
+    # curves these were derived from (Cliff/Deep burn/Brutal
+    # plateau/Moderate/Mild, by position: roughly 6/32/61/79/90,
+    # 6/15/31/54/73, 9/18/29/43/62, 25/43/61/76/87, 55/69/80/88/94 --
+    # truncated or extended per player count's own max_depth).
     haircut_profiles_by_players: dict[int, list[HaircutProfile]] = Field(
         default_factory=lambda: {
             2: [
-                HaircutProfile(depth_probabilities=[0.70, 0.18, 0.09, 0.03]),
-                HaircutProfile(depth_probabilities=[0.45, 0.25, 0.20, 0.10]),
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.39]),  # Cliff
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.69]),  # Deep burn
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.71]),  # Brutal plateau
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.39]),  # Moderate
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.20]),  # Mild
             ],
             3: [
-                HaircutProfile(depth_probabilities=[0.65, 0.17, 0.10, 0.05, 0.03]),
-                HaircutProfile(depth_probabilities=[0.42, 0.23, 0.17, 0.11, 0.07]),
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.21]),
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.46]),
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.57]),
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.24]),
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.12]),
             ],
             4: [
-                HaircutProfile(depth_probabilities=[0.68, 0.14, 0.08, 0.06, 0.03, 0.01]),
-                HaircutProfile(depth_probabilities=[0.48, 0.19, 0.14, 0.11, 0.06, 0.02]),
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.10]),
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.27]),
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.38]),
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.13]),
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.06]),
             ],
-            5: [
-                HaircutProfile(depth_probabilities=[0.68, 0.14, 0.08, 0.06, 0.03, 0.01]),
-                HaircutProfile(depth_probabilities=[0.48, 0.19, 0.14, 0.11, 0.06, 0.02]),
+            5: [  # identical to 4 -- both round to max_depth=5, same existing precedent
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.10]),
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.27]),
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.38]),
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.13]),
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.06]),
             ],
             6: [
-                HaircutProfile(depth_probabilities=[0.62, 0.14, 0.09, 0.06, 0.04, 0.03, 0.02]),
-                HaircutProfile(depth_probabilities=[0.40, 0.18, 0.14, 0.11, 0.09, 0.06, 0.02]),
+                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.06, 0.04]),
+                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.14, 0.13]),
+                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.16, 0.22]),
+                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.07, 0.06]),
+                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.03, 0.03]),
             ],
         }
     )

@@ -45,16 +45,17 @@ def test_max_depth_is_the_highest_index_with_nonzero_probability():
 
 
 def test_worked_example_certainty_curve_matches_the_design_writeup():
-    # The exact 13-slot-market worked example from the design discussion:
-    # cumulative certainty 48/67/81/92/98/100% at positions 1-6. Not a
-    # dedicated server-side certainty() function (certainty is computed
-    # client-side from the public profile, by design), so this exercises
-    # the authored default profile data directly against the same
+    # The "Moderate" shape's worked cumulative-certainty curve from the
+    # playtest-driven Haircut-range design writeup: 25/43/61/76/87/100%
+    # at positions 1-6 for a 13-slot market (n=4). Not a dedicated
+    # server-side certainty() function (certainty is computed client-side
+    # from the public profile, by design), so this exercises the authored
+    # default profile data directly against the same
     # sum(depth_probabilities[0:position]) formula the frontend uses.
     profile = next(
-        p for p in GameConfig().haircut_profiles_by_players[4] if p.depth_probabilities == [0.48, 0.19, 0.14, 0.11, 0.06, 0.02]
+        p for p in GameConfig().haircut_profiles_by_players[4] if p.depth_probabilities == [0.25, 0.18, 0.18, 0.15, 0.11, 0.13]
     )
-    expected = [0.48, 0.67, 0.81, 0.92, 0.98, 1.00]
+    expected = [0.25, 0.43, 0.61, 0.76, 0.87, 1.00]
     cumulative = 0.0
     for position, want in enumerate(expected, start=1):
         cumulative = sum(profile.depth_probabilities[0:position])
@@ -76,6 +77,43 @@ def test_default_config_profiles_satisfy_their_own_risk_band_invariant():
     # the validator running against the actual authored profile sets, not
     # a synthetic one.
     GameConfig()
+
+
+def test_certainty_is_monotonic_and_reaches_100_percent_at_the_risk_band_boundary():
+    # Automatic for any valid HaircutProfile (non-negative, sums to 1.0) --
+    # not a property specific to any one authored shape, so this checks
+    # every configured profile across every player count, not just one.
+    for profiles in GameConfig().haircut_profiles_by_players.values():
+        for profile in profiles:
+            cumulative = 0.0
+            for p in profile.depth_probabilities:
+                new_cumulative = cumulative + p
+                assert new_cumulative >= cumulative - 1e-9  # monotonic non-decreasing
+                cumulative = new_cumulative
+            assert cumulative == pytest.approx(1.0, abs=1e-9)
+
+
+def test_every_player_count_has_at_least_one_severe_profile():
+    # Playtest-driven correction: the original profile set never went
+    # below ~48% survival at position #1, which made the top of the
+    # market feel too safe. At least one configured profile per player
+    # count must put #1's own survival (depth_probabilities[0]) at or
+    # below 10% -- "radioactive," not just "a bit risky." See the
+    # Haircut-range design writeup.
+    for n, profiles in GameConfig().haircut_profiles_by_players.items():
+        assert any(p.depth_probabilities[0] <= 0.10 for p in profiles), f"player count {n} has no severe (<=10%) profile"
+
+
+def test_position_one_survival_spans_a_materially_broad_range_per_player_count():
+    # Regression guard against the configured range quietly re-clustering
+    # later -- not pinning the exact values (5/25/55 or any other specific
+    # anchors), just requiring the spread to stay real. Deliberately not
+    # constraining #2/#3 at all -- a deep, cascading danger zone is
+    # intended behavior, not something to tune toward safety.
+    for n, profiles in GameConfig().haircut_profiles_by_players.items():
+        top_survivals = [p.depth_probabilities[0] for p in profiles]
+        spread = max(top_survivals) - min(top_survivals)
+        assert spread >= 0.45, f"player count {n}'s #1-survival spread is only {spread:.2f}, expected >= 0.45"
 
 
 # --------------------------------------------------------------------------
