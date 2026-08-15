@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { useGameView, type GameView, type PoolView } from "@/lib/useGameView";
+import { useGameView, type GameView, type HoldingView, type PoolView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 import { computeSupportMarkers, formatSupportCount } from "@/lib/supportMarkers";
@@ -1097,13 +1097,37 @@ function neverUsedLabel(zone: string): string {
   return zone;
 }
 
+/** Card treatment for the results-screen market overlay -- composes three
+ * independent facts rather than picking one winner-take-all style: border
+ * *weight* signals ownership (bold = in the selected player's final
+ * portfolio, matches MarketView's own ownership convention), border
+ * *color* signals wiped (red, always, regardless of who's selected --
+ * "wiped positions remain visibly wiped independent of which player is
+ * selected"), and a dashed style plus muted fill marks a never-used
+ * reveal (burned/discarded/surrendered) when the position isn't also a
+ * live portfolio holding. Anything irrelevant to the selected player
+ * fades back rather than disappearing, per the "remain visible as
+ * context, but visually quieter" requirement. */
+function resultsCardClasses(isWiped: boolean, ownedCount: number, hasNeverUsed: boolean): string {
+  const weight = ownedCount > 0 ? "border-2" : hasNeverUsed ? "border border-dashed" : "border";
+  if (isWiped) return `${weight} border-red-300 bg-red-50`;
+  if (ownedCount > 0) return `${weight} border-zinc-900 bg-white`;
+  if (hasNeverUsed) return `${weight} border-zinc-400 bg-zinc-100`;
+  return `${weight} border-zinc-100 bg-zinc-50 opacity-50`;
+}
+
 /** Stage 7 — the results screen. No new backend data needed:
  * compute_final_scores' result already merges into project() at SCORED
  * (realized_haircut_depth/wiped_entity_ids/results/winners), and
  * holdings are unconditionally revealed across every zone once scored
  * (confirmed directly against _holding_view's default reveal=True) --
  * this is purely a rendering pass over data the backend already hands
- * over in full. */
+ * over in full. The leaderboard is the *only* selector -- clicking a
+ * name projects that player's final holdings directly onto the one
+ * shared Final Market strip below it, rather than each player getting
+ * their own separate text block (real playtest feedback: a stacked
+ * per-player list forced the reader to mentally re-map it onto the
+ * market strip that was already right there). */
 function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const { events } = useGameEvents(gameId);
   const results = view.results ?? [];
@@ -1115,6 +1139,32 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const topValue = sortedResults[0]?.final_value;
   const closeReasonText =
     view.close_reason === "TIME_EXPIRED" ? "Time ran out." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
+
+  // Default = the first winner in results order (ties keep whichever one
+  // sorted first, per compute_final_scores' own player-iteration order --
+  // stable sort preserves that). Falls back to the top-ranked player if
+  // winners is ever empty (defensive; shouldn't happen once scored).
+  const [selectedOverride, setSelectedOverride] = useState<string | null>(null);
+  const defaultSelectedId = sortedResults.find((r) => winners.has(r.game_player_id))?.game_player_id ?? sortedResults[0]?.game_player_id ?? null;
+  const selectedPlayerId = selectedOverride ?? defaultSelectedId;
+  const selectedResult = results.find((r) => r.game_player_id === selectedPlayerId);
+
+  // Grouped once per selection, not per card -- portfolio holdings counted
+  // for the ×N badge (a doubled/anchor entity), every other zone kept as
+  // its own list (rare, but two never-used holdings can reference the
+  // same entity) so each gets its own small caption below.
+  const portfolioCounts = new Map<string, number>();
+  const neverUsedByEntity = new Map<string, HoldingView[]>();
+  for (const h of holdings) {
+    if (h.owner_player_id !== selectedPlayerId || !h.entity_id) continue;
+    if (h.zone === "portfolio") {
+      portfolioCounts.set(h.entity_id, (portfolioCounts.get(h.entity_id) ?? 0) + 1);
+    } else {
+      const list = neverUsedByEntity.get(h.entity_id) ?? [];
+      list.push(h);
+      neverUsedByEntity.set(h.entity_id, list);
+    }
+  }
 
   return (
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
@@ -1141,13 +1191,22 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
         <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
           {sortedResults.map((r) => {
             const isWinner = winners.has(r.game_player_id);
+            const isSelected = r.game_player_id === selectedPlayerId;
             return (
-              <li key={r.game_player_id} className="flex items-center justify-between text-sm text-zinc-900">
-                <span className={isWinner ? "font-semibold text-emerald-700" : undefined}>
-                  {isWinner ? "🏆 " : ""}
-                  {playerLabel(r.game_player_id, view)}
-                </span>
-                <span className="tabular-nums text-zinc-700">{r.final_value}</span>
+              <li key={r.game_player_id}>
+                <button
+                  type="button"
+                  onClick={() => setSelectedOverride(r.game_player_id)}
+                  className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm text-zinc-900 ${
+                    isSelected ? "bg-blue-50 ring-1 ring-blue-400" : ""
+                  }`}
+                >
+                  <span className={isWinner ? "font-semibold text-emerald-700" : undefined}>
+                    {isWinner ? "🏆 " : ""}
+                    {playerLabel(r.game_player_id, view)}
+                  </span>
+                  <span className="tabular-nums text-zinc-700">{r.final_value}</span>
+                </button>
               </li>
             );
           })}
@@ -1155,57 +1214,36 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
       </div>
 
       <div>
-        <h2 className="mb-2 text-sm font-medium text-zinc-700">Final market</h2>
+        <h2 className="mb-2 text-sm font-medium text-zinc-700">
+          {playerLabel(selectedPlayerId, view)}&apos;s final position — <span className="tabular-nums">{selectedResult?.final_value ?? "—"}</span>
+        </h2>
         <div className="-mx-4 overflow-x-auto px-4 pb-2">
           <div className="flex gap-2">
             {view.market.map((entity) => {
               const isWiped = wiped.has(entity.entity_id);
+              const ownedCount = portfolioCounts.get(entity.entity_id) ?? 0;
+              const neverUsed = neverUsedByEntity.get(entity.entity_id) ?? [];
+              const muted = ownedCount === 0 && neverUsed.length === 0 && !isWiped;
               return (
                 <div
                   key={entity.entity_id}
-                  className={`flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded border p-2 text-center ${
-                    isWiped ? "border-red-200 bg-red-50 opacity-60" : "border-zinc-200 bg-white"
-                  }`}
+                  className={`flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
                 >
-                  <span className="text-xs text-zinc-400">{entity.position}</span>
-                  <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
-                  <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                  <span className={`text-xs ${muted ? "text-zinc-300" : "text-zinc-400"}`}>{entity.position}</span>
+                  <span className={`font-mono text-sm font-bold ${muted ? "text-zinc-300" : "text-zinc-900"}`}>{entity.ticker_symbol}</span>
+                  <span className={`text-xs leading-tight ${muted ? "text-zinc-300" : "text-zinc-600"}`}>{entity.display_name}</span>
+                  {ownedCount > 1 && <span className="text-xs font-bold text-zinc-900">×{ownedCount}</span>}
                   {isWiped && <span className="text-[10px] font-bold text-red-600">WIPED</span>}
+                  {neverUsed.map((h, i) => (
+                    <span key={i} className="text-[9px] font-medium leading-tight text-zinc-500">
+                      {neverUsedLabel(h.zone)}
+                    </span>
+                  ))}
                 </div>
               );
             })}
           </div>
         </div>
-      </div>
-
-      <div className="flex flex-col gap-4">
-        {view.players.map((player) => {
-          const own = holdings.filter((h) => h.owner_player_id === player.game_player_id && h.zone === "portfolio");
-          const neverUsed = holdings.filter((h) => h.owner_player_id === player.game_player_id && h.zone !== "portfolio");
-          return (
-            <div key={player.game_player_id} className="rounded border border-zinc-200 bg-white p-3">
-              <h3 className="mb-2 text-sm font-medium text-zinc-900">{player.display_name}&apos;s final portfolio</h3>
-              <div className="flex flex-wrap gap-2">
-                {own.map((h) => (
-                  <span
-                    key={h.holding_id}
-                    className={`rounded border px-2 py-1 text-xs ${
-                      h.entity_id && wiped.has(h.entity_id) ? "border-red-200 bg-red-50 text-red-700 line-through" : "border-zinc-200 text-zinc-700"
-                    }`}
-                  >
-                    {h.display_name}
-                  </span>
-                ))}
-              </div>
-              {neverUsed.length > 0 && (
-                <div className="mt-2 border-t border-zinc-100 pt-2 text-xs text-zinc-500">
-                  <span className="font-medium">Never used: </span>
-                  {neverUsed.map((h) => `${h.display_name} (${neverUsedLabel(h.zone)})`).join(", ")}
-                </div>
-              )}
-            </div>
-          );
-        })}
       </div>
 
       <ActivityStream events={events} view={view} />
