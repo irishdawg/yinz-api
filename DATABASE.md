@@ -16,10 +16,11 @@ point of keeping them together.
 yinz-api/
 ├── apps/
 │   ├── api/
-│   │   └── src/gotiate/domain/theme_data/   # theme content — JSON stays
-│   │                                         # here, seeded into Postgres,
-│   │                                         # not hand-entered in the
-│   │                                         # Supabase dashboard
+│   │   └── src/gotiate/domain/theme_data/   # theme content fixture --
+│   │                                         # Postgres is the real app's
+│   │                                         # source of truth now, this
+│   │                                         # JSON is the offline test
+│   │                                         # suite's copy, hand-synced
 │   └── web/
 ├── supabase/
 │   ├── migrations/                  # ordered, timestamped .sql files
@@ -91,11 +92,18 @@ live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
   zero. No undocumented manual setup steps.
 - Never edit a migration once it's been applied to a shared project. Fix
   mistakes with a new forward migration.
-- Theme content (`fictional_companies_v1`, `dragons_v1`, `cats_v1`, ...)
-  lives as the JSON files already in
-  `apps/api/src/gotiate/domain/theme_data/` and gets seeded from there —
-  not typed into the Supabase UI, and not hand-duplicated into a second
-  SQL source that can drift from the JSON.
+- Theme content (`fictional_companies_v1`, `dragons_v1`, `cats_v1`, ...):
+  `theme_sets`/`theme_entities` in Supabase are the real deployed app's
+  source of truth (`themes.PostgresThemeRepository`, loaded once into an
+  in-memory cache at FastAPI startup — see `CURRENT_WORK.md` for why it
+  can't be a live per-call query). `apps/api/src/gotiate/domain/theme_data/*.json`
+  still exists as the offline test suite's fixture (tests must never touch
+  real Postgres) and the real app's fallback with no database configured —
+  kept in sync with Postgres **by hand**, no tooling enforces it. Edit
+  content via a forward migration (see
+  `20260817220000_theme_entity_content_update.sql` for the pattern) or the
+  dashboard-plus-a-reproducing-migration convention above, then mirror the
+  same change into the JSON in the same commit.
 - **FastAPI remains the only authoritative gameplay writer, full stop.**
   Every table's grants revoke `INSERT`/`UPDATE`/`DELETE` from the
   `authenticated` and `anon` roles explicitly — not relying on RLS alone to
@@ -204,10 +212,14 @@ enabled, zero policies, grants only to `gotiate_backend`), and global
 follows the "Rules" section above — check a table's own migration for
 which bucket it's in rather than trusting a stale count anywhere.
 
-Theme content is seeded via `apps/api/scripts/generate_theme_seed.py`,
-which reads `apps/api/src/gotiate/domain/theme_data/*.json` — re-run it
-and paste the output into a fresh migration whenever theme content
-changes; never hand-edit an applied migration.
+`apps/api/scripts/generate_theme_seed.py` reads
+`apps/api/src/gotiate/domain/theme_data/*.json` and generates INSERT
+statements — useful for seeding a *brand-new* theme set (or a theme set's
+first version) into Postgres for the first time. Editing *existing*
+content goes the other direction now (Postgres is the source of truth —
+see the "Theme content" bullet above and `CURRENT_WORK.md`): write a
+migration, then hand-mirror the same change into the JSON. Never hand-edit
+an applied migration either way.
 
 For the chronological story of how this schema got here — including two
 real bugs caught and fixed live, and one reversal — see `HISTORY.md`

@@ -23,7 +23,7 @@
     },
     {
       "theme_key": "fc_004",
-      "display_name": "Krumholtz Office Machines",
+      "display_name": "Krumholtz Business Machine",
       "ticker_symbol": "KRUM",
       "is_locked": false
     },
@@ -43,13 +43,15 @@
       "theme_key": "fc_007",
       "display_name": "Standard Banana",
       "ticker_symbol": "BANA",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/banana.png"
     },
     {
       "theme_key": "fc_008",
-      "display_name": "Digler Telecom",
+      "display_name": "Digler Disposal",
       "ticker_symbol": "DIGL",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/digler.png"
     },
     {
       "theme_key": "fc_009",
@@ -97,7 +99,8 @@
       "theme_key": "fc_016",
       "display_name": "Tocksin Chemical",
       "ticker_symbol": "TOCK",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/tocksin.png"
     },
     {
       "theme_key": "fc_017",
@@ -145,7 +148,8 @@
       "theme_key": "fc_024",
       "display_name": "Hertzman Electric",
       "ticker_symbol": "HERT",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/hertzman.png"
     },
     {
       "theme_key": "fc_025",
@@ -155,7 +159,7 @@
     },
     {
       "theme_key": "fc_026",
-      "display_name": "Wunderbar Sausage Machinery",
+      "display_name": "Wunderbar Sausage",
       "ticker_symbol": "WURST",
       "is_locked": false
     },
@@ -193,7 +197,8 @@
       "theme_key": "fc_032",
       "display_name": "Pinebox Studios",
       "ticker_symbol": "PINE",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/pinebox.png"
     },
     {
       "theme_key": "fc_033",
@@ -217,7 +222,8 @@
       "theme_key": "fc_036",
       "display_name": "Feral Logistics",
       "ticker_symbol": "FERL",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/feral.png"
     },
     {
       "theme_key": "fc_037",

@@ -13,6 +13,47 @@ don't let this file accumulate stale "already done" entries.
 
 ---
 
+## Theme content is now Postgres-sourced for the real app, JSON is a fixture kept in sync by hand
+
+`theme_sets`/`theme_entities` in Supabase are the real deployed app's source
+of truth as of this change — `themes.PostgresThemeRepository` loads them
+into an in-memory cache once at FastAPI startup (`main.py`'s `lifespan`);
+`themes.py`'s own module docstring explains why this can't be a live
+per-call query (the domain layer — `engine.py`/`projections.py` — is
+deliberately synchronous/zero-I/O, so `get()` can't await anything).
+Consequence: **a content edit in Supabase takes effect on the next
+deploy/restart, not live.** Not a bug — a deliberate simplicity trade-off
+(no cache-invalidation machinery for a table that changes rarely), but
+worth knowing if an edit doesn't seem to show up.
+
+`theme_data/*.json` (`apps/api/src/gotiate/domain/theme_data/`) still
+exists and is still what `JsonFileThemeRepository` reads — it's the
+offline test suite's fixture (tests must never touch real Postgres, see
+`AGENTS.md`) and the real app's fallback when `GOTIATE_BACKEND_DATABASE_URL`
+isn't set. **There is no automated sync between the two anymore** — a
+content edit made only in Supabase (or only in the JSON) will silently
+drift from the other. Kept in sync by hand as of this change (see
+`supabase/migrations/20260817220000_theme_entity_content_update.sql` and
+the matching JSON edit in the same commit); no tooling enforces this going
+forward.
+
+No per-game version pinning: both repositories always resolve the *latest*
+version for a `theme_set_id`. `GameConfig.theme_set_version` exists but
+nothing reads it — a content rename made after a game started (or after
+it's SCORED, for replay) can retroactively change what that game displays,
+which is exactly what the original `theme_sets`/`theme_entities` schema
+comment (`20260809232702_theme_content_schema.sql`) says must never happen.
+This isn't a regression from the Postgres switch — the JSON-backed path
+never implemented this either — but it's now more likely to actually bite,
+since editing Supabase directly (rather than a code change + PR + deploy)
+is a much lower-friction way to rename an entity mid-tournament. Fixing it
+means threading `theme_set_version` through `engine._handle_start_game`
+and `projections.py`'s own `themes.get_theme_set()` call, pinning it at
+`START_GAME` time onto the persisted game — real scope, deliberately not
+done as part of this change.
+
+---
+
 ## Two pre-existing tests are intermittently flaky in a full suite run
 
 Not caused by any specific feature — found while adding the real-names

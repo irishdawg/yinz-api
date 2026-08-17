@@ -59,8 +59,24 @@ def select_market_entities(theme_set: ThemeSet, market_size: int, rng: random.Ra
         )
     # Locked entities are always dealt in; the swappable pool fills whatever's
     # left. "Locked" means always present, not fixed to a particular position
-    # -- position is decided fresh per Phase B candidate, not here.
-    return locked + rng.sample(swappable, market_size - len(locked))
+    # -- position is decided fresh per Phase B candidate, not here (this
+    # function only ever decides *which* entities, never where they sit).
+    #
+    # Within the swappable pool, entities with a logo_url are favored --
+    # only a handful of entities have real art today, and having them show
+    # up more often (never guaranteed, never a fixed slot: still an rng.sample
+    # draw within whichever tier is being filled from) makes a dealt market
+    # feel less placeholder-y without requiring full art coverage before any
+    # of it matters. Falls back to the icon-less pool once the icon'd one
+    # runs out, same as before if no entity in this theme set has a logo yet.
+    remaining = market_size - len(locked)
+    with_logo = [e for e in swappable if e.logo_url]
+    without_logo = [e for e in swappable if not e.logo_url]
+    if len(with_logo) >= remaining:
+        selected_swappable = rng.sample(with_logo, remaining)
+    else:
+        selected_swappable = with_logo + rng.sample(without_logo, remaining - len(with_logo))
+    return locked + selected_swappable
 
 
 def _deal_portfolio(entity_ids: list[str], shape: list[int], rng: random.Random) -> list[str]:

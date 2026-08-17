@@ -1,11 +1,20 @@
 #!/usr/bin/env python
-"""Regenerate the theme-content seed migration from src/gotiate/domain/theme_data/*.json.
+"""Generate INSERT statements for src/gotiate/domain/theme_data/*.json's
+content, for seeding a brand-new theme set (or a theme set's very first
+version) into Postgres.
 
-The JSON files are the source of truth (DATABASE.md) -- this script is
-how that content gets into Postgres, so a new theme set or an edited one
-never needs hand-written SQL. Run it and paste the output into a fresh
-migration file (supabase migration new seed_theme_content_vN), don't edit
-a migration that's already been applied to a shared project.
+Postgres (`theme_sets`/`theme_entities`) is the real deployed app's source
+of truth as of the Postgres-backed theme content change (see
+CURRENT_WORK.md) -- editing an *existing* entity now goes the other
+direction: change it in Supabase (or write a migration directly, see
+20260817220000_theme_entity_content_update.sql for the pattern), then
+hand-mirror the same change into the JSON file so the offline test suite's
+fixture doesn't drift. This script still earns its keep for the JSON
+-first case: authoring a whole new theme set (or new entities within one)
+as JSON, then generating the INSERTs to seed it into Postgres for the
+first time. Paste the output into a fresh migration file (supabase
+migration new seed_<whatever>), don't edit a migration that's already
+been applied to a shared project.
 
 Usage: python scripts/generate_theme_seed.py
 """

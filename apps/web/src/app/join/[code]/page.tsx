@@ -22,7 +22,10 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!name) return;
+    if (!name) {
+      setError("Enter your name first.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -54,7 +57,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <button
             type="submit"
-            disabled={!ready || !name || submitting}
+            disabled={!ready || submitting}
             className="rounded bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
           >
             {ready ? (submitting ? "Joining…" : "Join game") : "Starting session…"}

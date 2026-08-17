@@ -151,7 +151,12 @@ The market is `market_size_by_players[n]` positions wide: `{2: 11, 3: 11,
 position N is worst. Entities are drawn from the game's theme set
 (`theme_set_id`, default `fictional_companies_v1`; also `dragons_v1`,
 `cats_v1`) — a theme set's `is_locked` entities are always dealt into every
-market regardless of size; the rest are sampled to fill out the remainder.
+market regardless of size; the rest are sampled to fill out the remainder
+(`setup.select_market_entities`), favoring entities that have a `logo_url`
+over ones that don't (falls back to the plain pool once the icon'd one
+runs out) — selection only, never a fixed subset (still an `rng.sample`
+draw within whichever tier is being filled from) and never position,
+which stays entirely up to the geometry phase below.
 
 Each player's portfolio shape is `portfolio_shape` (default `[2, 1, 1, 1]`)
 — 4 distinct entities, one of them doubled (an "anchor" holding worth double

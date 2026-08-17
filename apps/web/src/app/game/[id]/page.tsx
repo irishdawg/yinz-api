@@ -105,15 +105,39 @@ function playerInitial(playerId: string, view: GameView): string {
   return playerLabel(playerId, view).charAt(0).toUpperCase();
 }
 
-/** A just-resolved (executed) proposal/pool, held onto client-side just long
- * enough to render a frozen "ACCEPTED" row before it fades -- see
- * MarketView's lingeringDeals state. */
+/** A just-resolved proposal/pool, held onto client-side just long enough to
+ * overlay its *own, still-in-place* row with a frozen banner before it
+ * fades -- see MarketView's lingeringDeals state. Keyed by proposal_id/
+ * pool_id specifically so OpenProposals can look this up per-row and
+ * transform that exact row in place, rather than removing it and
+ * rendering a separate entry elsewhere (which used to make an accepted
+ * deal visually jump to a different position in the list).
+ *
+ * "everyone_passed" exists because EXPIRED_ALL_PASSED is masked to the
+ * identical withdrawn_by_initiator reason as a genuine self-withdraw for
+ * every live audience, proposer included (see the Pass design writeup) --
+ * MarketView disambiguates the two client-side via myExplicitWithdrawalsRef
+ * before ever calling addLingeringDeal with this kind. */
 interface LingeringDeal {
   key: string;
+  kind: "accepted" | "everyone_passed";
+  accepterLabel?: string; // only ever set for kind "accepted"
+  fading: boolean;
+}
+
+/** A proposal I just PASS_PROPOSAL'd on -- unlike every other resolution,
+ * Pass omits the proposal from *my own* view.proposals entirely, live (see
+ * the Pass design writeup), so there's no server-projected row left to
+ * overlay the way lingeringDeals does. This snapshots just enough to keep
+ * rendering the row myself, client-only, for the same linger-then-fade
+ * beat -- captured at the moment of the click, from data OpenProposals
+ * already has in scope, no event-log correlation needed (I already know
+ * I'm the one who passed). */
+interface PassLingeringEntry {
+  proposalId: string;
   entityA: string;
   entityB: string;
-  proposerLabel: string;
-  accepterLabel: string;
+  proposerId: string;
   fading: boolean;
 }
 
@@ -359,19 +383,31 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   }
 
   // A just-executed proposal/pool used to just vanish from the open list
-  // the instant it resolved -- easy to miss who did what. Instead it
-  // lingers as a frozen, labeled "ACCEPTED" row for a beat, then fades.
-  // Sourced from the event log (not a poll diff of view.proposals) since
-  // the event carries the accepter's identity (actor_game_player_id) that
-  // a bare status flip on the resolved proposal itself doesn't.
+  // the instant it resolved -- easy to miss who did what. Instead its own
+  // row (still in its original list position -- see OpenProposals, which
+  // looks this map up per-proposal/pool-id rather than rendering a
+  // separately-positioned ghost entry) freezes under a translucent "Accepted
+  // by X" overlay for a beat, then fades. Sourced from the event log (not a
+  // poll diff of view.proposals) since the event carries the accepter's
+  // identity (actor_game_player_id) that a bare status flip on the resolved
+  // proposal itself doesn't.
   const [lingeringDeals, setLingeringDeals] = useState<LingeringDeal[]>([]);
   const processedSeqRef = useRef(0);
   const lingeringInitializedRef = useRef(false);
+  // Populated the instant *this* player clicks Withdraw on their own
+  // proposal (see OpenProposals' onSelfWithdrawProposal) -- the only way to
+  // tell "I withdrew this" apart from "everyone passed and it auto
+  // -expired" once both collapse to the same masked resolution reason.
+  const myExplicitWithdrawalsRef = useRef<Set<string>>(new Set());
 
-  function addLingeringDeal(key: string, entityA: string, entityB: string, proposerLabel: string, accepterLabel: string) {
-    setLingeringDeals((prev) => [...prev, { key, entityA, entityB, proposerLabel, accepterLabel, fading: false }]);
+  function addLingeringDeal(key: string, kind: LingeringDeal["kind"], accepterLabel?: string) {
+    setLingeringDeals((prev) => [...prev, { key, kind, accepterLabel, fading: false }]);
     setTimeout(() => setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, fading: true } : d))), 2200);
     setTimeout(() => setLingeringDeals((prev) => prev.filter((d) => d.key !== key)), 2900);
+  }
+
+  function markSelfWithdrawnProposal(proposalId: string) {
+    myExplicitWithdrawalsRef.current.add(proposalId);
   }
 
   useEffect(() => {
@@ -391,13 +427,21 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       if (e.type === "PROPOSAL_RESOLVED" && e.payload.reason === "executed") {
         const proposal = view.proposals.find((p) => p.proposal_id === e.payload.proposal_id);
         if (!proposal) continue; // omitted from this player's own view (e.g. they'd passed it) -- nothing to render
-        addLingeringDeal(proposal.proposal_id, proposal.entity_a, proposal.entity_b, playerLabel(proposal.proposer_id, view), playerLabel(e.actor_game_player_id, view));
+        addLingeringDeal(proposal.proposal_id, "accepted", playerLabel(e.actor_game_player_id, view));
         visualizeProposal([[proposal.entity_a, proposal.entity_b, proposal.rising_entity_id]]);
       } else if (e.type === "POOL_RESOLVED" && e.payload.reason === "executed") {
         const pool = view.pools.find((p) => p.pool_id === e.payload.pool_id);
         if (!pool || !pool.entity_c || !pool.entity_d || !pool.rising_entity_id) continue;
-        addLingeringDeal(pool.pool_id, pool.entity_c, pool.entity_d, playerLabel(pool.initiator_id, view), playerLabel(e.actor_game_player_id, view));
+        addLingeringDeal(pool.pool_id, "accepted", playerLabel(e.actor_game_player_id, view));
         visualizeProposal([[pool.entity_c, pool.entity_d, pool.rising_entity_id]]);
+      } else if (e.type === "PROPOSAL_RESOLVED" && e.payload.reason === "withdrawn_by_initiator") {
+        const proposal = view.proposals.find((p) => p.proposal_id === e.payload.proposal_id);
+        // Only my own proposals are even relevant here -- and only when I
+        // didn't just click Withdraw myself, since that's the one other
+        // cause of this exact same masked reason.
+        if (!proposal || proposal.proposer_id !== view.you) continue;
+        if (myExplicitWithdrawalsRef.current.has(proposal.proposal_id)) continue;
+        addLingeringDeal(proposal.proposal_id, "everyone_passed");
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view.proposals/view.pools intentionally read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
@@ -779,6 +823,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         onVisualize={visualizeProposal}
         onStartPool={startPooling}
         lingeringDeals={lingeringDeals}
+        onSelfWithdrawProposal={markSelfWithdrawnProposal}
       />
 
       <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
@@ -1170,6 +1215,7 @@ function OpenProposals({
   onVisualize,
   onStartPool,
   lingeringDeals,
+  onSelfWithdrawProposal,
 }: {
   gameId: string;
   view: GameView;
@@ -1177,12 +1223,64 @@ function OpenProposals({
   onVisualize: (pairs: [string, string, string][]) => void;
   onStartPool: (proposalId: string) => void;
   lingeringDeals: LingeringDeal[];
+  onSelfWithdrawProposal: (proposalId: string) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const open = view.proposals.filter((p) => p.status === "open");
+  // My own passes only -- see PassLingeringEntry. Keyed by proposal_id,
+  // same as lingeringById below.
+  const [passLingering, setPassLingering] = useState<Map<string, PassLingeringEntry>>(new Map());
+  const openCount = view.proposals.filter((p) => p.status === "open").length;
   const self = view.players.find((p) => p.game_player_id === view.you);
   const available = self?.influence?.available ?? 0;
+  // Keyed by proposal_id/pool_id -- a resolved-but-still-lingering row is
+  // found and overlaid in place below, never rendered as a second, freshly
+  // -positioned entry (that used to make an accepted deal visually jump to
+  // wherever the ghost list happened to render it).
+  const lingeringById = new Map(lingeringDeals.map((d) => [d.key, d]));
+
+  function addPassLingering(proposalId: string, entityA: string, entityB: string, proposerId: string) {
+    setPassLingering((prev) => new Map(prev).set(proposalId, { proposalId, entityA, entityB, proposerId, fading: false }));
+    setTimeout(() => {
+      setPassLingering((prev) => {
+        const entry = prev.get(proposalId);
+        if (!entry) return prev;
+        return new Map(prev).set(proposalId, { ...entry, fading: true });
+      });
+    }, 2200);
+    setTimeout(() => {
+      setPassLingering((prev) => {
+        if (!prev.has(proposalId)) return prev;
+        const next = new Map(prev);
+        next.delete(proposalId);
+        return next;
+      });
+    }, 2900);
+  }
+
+  // Row order is otherwise exactly view.proposals' own stable dict
+  // -insertion order (see the lingeringById comment above) -- the one
+  // exception is a proposal I've just passed on, which is omitted from my
+  // own view.proposals *immediately* (unlike every other resolution), so
+  // there's nothing left there to anchor its position to. rowOrder instead
+  // remembers the last-known merged order and only ever appends genuinely
+  // new open proposals at the end, so a just-passed row keeps sitting
+  // exactly where it was instead of vanishing outright or jumping
+  // elsewhere once its lingering entry lands.
+  const [rowOrder, setRowOrder] = useState<string[]>(() => view.proposals.filter((p) => p.status === "open").map((p) => p.proposal_id));
+  useEffect(() => {
+    const openProposalIds = new Set(view.proposals.filter((p) => p.status === "open").map((p) => p.proposal_id));
+    // Syncing local row ordering with the external system (server's open
+    // -proposal set, plus the lingering maps) -- same carve-out/precedent
+    // as ShareLinkButton's effect further down.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRowOrder((prev) => {
+      const kept = prev.filter((id) => openProposalIds.has(id) || lingeringById.has(id) || passLingering.has(id));
+      const added = [...openProposalIds].filter((id) => !kept.includes(id));
+      return added.length === 0 && kept.length === prev.length ? prev : [...kept, ...added];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- lingeringById is just lingeringDeals (already a dep) reshaped fresh each render.
+  }, [view.proposals, lingeringDeals, passLingering]);
 
   async function runCommand(id: string, type: string, payload: Record<string, unknown>, fallback: string) {
     setError(null);
@@ -1190,33 +1288,48 @@ function OpenProposals({
     const result = await submitCommand(gameId, type, payload, { expectedVersion: view.version, onSettled: onChanged });
     setBusyId(null);
     if (!result.ok) setError(commandErrorMessage(result.data, fallback));
+    return result;
   }
 
-  if (open.length === 0 && lingeringDeals.length === 0) return null;
+  if (rowOrder.length === 0) return null;
 
   return (
     <div>
-      <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({open.length})</h2>
+      <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({openCount})</h2>
       <ul className="flex flex-col gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
-        {/* Frozen "ACCEPTED" ghosts of whatever just executed -- see
-            MarketView's lingeringDeals. No actions on these, just a beat to
-            register who did what before they fade. */}
-        {lingeringDeals.map((d) => (
-          <li
-            key={d.key}
-            className={`flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 transition-opacity duration-700 last:border-0 last:pb-0 ${
-              d.fading ? "opacity-0" : "opacity-100"
-            }`}
-          >
-            <span>
-              {d.proposerLabel} → {d.accepterLabel}: {entityLabel(d.entityA, view)} ↔ {entityLabel(d.entityB, view)}
-            </span>
-            <span className="flex-shrink-0 rounded bg-emerald-100 px-2 py-1 text-xs font-bold text-emerald-700">ACCEPTED</span>
-          </li>
-        ))}
-        {open.map((p) => {
+        {rowOrder.map((id) => {
+          const p = view.proposals.find((proposal) => proposal.proposal_id === id);
+          if (!p) {
+            // Gone from view.proposals -- only ever true for my own just
+            // -passed proposal (see the rowOrder comment above); render the
+            // client-only snapshot instead, frozen, no actions.
+            const passEntry = passLingering.get(id);
+            if (!passEntry) return null;
+            return (
+              <li
+                key={id}
+                className="relative flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 last:border-0 last:pb-0"
+              >
+                <span>
+                  {playerLabel(passEntry.proposerId, view)}: {entityLabel(passEntry.entityA, view)} ↔ {entityLabel(passEntry.entityB, view)}
+                </span>
+                <RowOverlay text="You Passed" tone="yellow" fading={passEntry.fading} />
+              </li>
+            );
+          }
+
           const isMine = p.proposer_id === view.you;
-          const pools = view.pools.filter((pool) => pool.base_proposal_id === p.proposal_id && pool.status === "open");
+          const lingering = lingeringById.get(p.proposal_id);
+          // Mirrors the server's own rule (PASS/CREATE_POOL both reject
+          // while I already hold an open Pool of my own on this proposal)
+          // -- Pool/Pass simply aren't offered in that state instead of
+          // being offered and then bouncing off a server rejection.
+          const myOpenPoolOnThis = view.pools.some(
+            (pool) => pool.base_proposal_id === p.proposal_id && pool.initiator_id === view.you && pool.status === "open",
+          );
+          const pools = view.pools.filter(
+            (pool) => pool.base_proposal_id === p.proposal_id && (pool.status === "open" || lingeringById.has(pool.pool_id)),
+          );
           return (
             <li
               key={p.proposal_id}
@@ -1224,11 +1337,14 @@ function OpenProposals({
               // remember to press every time, then just hovering/tapping the
               // swap text -- now the whole row triggers it, since a player's
               // cursor lands anywhere on the row while reading it, not just
-              // on the text itself.
-              onMouseEnter={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-              onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-              title="Hover or tap to visualize"
-              className="flex cursor-pointer flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0 hover:bg-zinc-50"
+              // on the text itself. Not wired up at all once resolved --
+              // nothing left to evaluate.
+              onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+              onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+              title={lingering ? undefined : "Hover or tap to visualize"}
+              className={`relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0 ${
+                lingering ? "" : "cursor-pointer hover:bg-zinc-50"
+              }`}
             >
               <div className="flex items-center justify-between gap-2">
                 <span>
@@ -1240,49 +1356,64 @@ function OpenProposals({
                     <span className="ml-2 text-xs font-normal text-zinc-400">Passed: {p.passed_count}</span>
                   )}
                 </span>
-                <span className="flex flex-shrink-0 gap-1">
-                  {!isMine && (
-                    <button
-                      type="button"
-                      onClick={() => onStartPool(p.proposal_id)}
-                      className="rounded border border-purple-300 px-2 py-1 text-xs font-medium text-purple-700"
-                    >
-                      Pool
-                    </button>
-                  )}
-                  {!isMine && (
-                    // No confirmation -- treated like Accept, one deliberate
-                    // tap. No client-side legality pre-check either (already
-                    // -passed, or holding an open Pool on this proposal): the
-                    // server's rejection surfaces through the same error path
-                    // every other illegal action already uses.
-                    <button
-                      type="button"
-                      onClick={() => runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.")}
-                      disabled={busyId === p.proposal_id}
-                      className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
-                    >
-                      {busyId === p.proposal_id ? "…" : "Pass"}
-                    </button>
-                  )}
-                  {isMine ? (
-                    <button
-                      type="button"
-                      onClick={() => runCommand(p.proposal_id, "WITHDRAW_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't withdraw.")}
-                      disabled={busyId === p.proposal_id}
-                      className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
-                    >
-                      {busyId === p.proposal_id ? "…" : "Withdraw"}
-                    </button>
-                  ) : (
-                    <AcceptButton
-                      liability={p.my_accept_liability}
-                      available={available}
-                      busy={busyId === p.proposal_id}
-                      onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
-                    />
-                  )}
-                </span>
+                {!lingering && (
+                  <span className="flex flex-shrink-0 gap-1">
+                    {!isMine && !myOpenPoolOnThis && (
+                      <button
+                        type="button"
+                        onClick={() => onStartPool(p.proposal_id)}
+                        className="rounded border border-purple-300 px-2 py-1 text-xs font-medium text-purple-700"
+                      >
+                        Pool
+                      </button>
+                    )}
+                    {!isMine && !myOpenPoolOnThis && (
+                      // No confirmation -- treated like Accept, one deliberate
+                      // tap. On success (and only then), lingers this exact
+                      // row under a "You Passed" overlay for a beat -- see
+                      // addPassLingering. entity_a/b/proposer_id are captured
+                      // *before* the request, since a successful Pass omits
+                      // this proposal from view.proposals on the very next
+                      // poll, taking the server's own copy of that data with
+                      // it.
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const { entity_a: entityA, entity_b: entityB, proposer_id: proposerId } = p;
+                          const result = await runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.");
+                          if (result.ok) addPassLingering(p.proposal_id, entityA, entityB, proposerId);
+                        }}
+                        disabled={busyId === p.proposal_id}
+                        className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+                      >
+                        {busyId === p.proposal_id ? "…" : "Pass"}
+                      </button>
+                    )}
+                    {isMine ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Recorded *before* the request settles -- see
+                          // MarketView's myExplicitWithdrawalsRef -- so the
+                          // event-processing effect never has to race it.
+                          onSelfWithdrawProposal(p.proposal_id);
+                          runCommand(p.proposal_id, "WITHDRAW_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't withdraw.");
+                        }}
+                        disabled={busyId === p.proposal_id}
+                        className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+                      >
+                        {busyId === p.proposal_id ? "…" : "Withdraw"}
+                      </button>
+                    ) : (
+                      <AcceptButton
+                        liability={p.my_accept_liability}
+                        available={available}
+                        busy={busyId === p.proposal_id}
+                        onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
+                      />
+                    )}
+                  </span>
+                )}
               </div>
 
               {pools.length > 0 && (
@@ -1290,77 +1421,116 @@ function OpenProposals({
                   {pools.map((pool) => {
                     const isPoolMine = pool.initiator_id === view.you;
                     const visible = Boolean(pool.entity_c && pool.entity_d);
-                    const visualizePoolLeg = visible
-                      ? () =>
-                          onVisualize([
-                            [p.entity_a, p.entity_b, p.rising_entity_id],
-                            [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
-                          ])
-                      : undefined;
+                    const poolLingering = lingeringById.get(pool.pool_id);
+                    const visualizePoolLeg =
+                      visible && !poolLingering
+                        ? () =>
+                            onVisualize([
+                              [p.entity_a, p.entity_b, p.rising_entity_id],
+                              [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                            ])
+                        : undefined;
                     return (
                       <li
                         key={pool.pool_id}
                         onMouseEnter={visualizePoolLeg}
                         onClick={visualizePoolLeg}
-                        title={visible ? "Hover or tap to visualize" : undefined}
-                        className={`flex items-center justify-between gap-2 text-xs text-zinc-700 ${visible ? "cursor-pointer hover:bg-zinc-50" : ""}`}
+                        title={visualizePoolLeg ? "Hover or tap to visualize" : undefined}
+                        className={`relative flex items-center justify-between gap-2 text-xs text-zinc-700 ${visualizePoolLeg ? "cursor-pointer hover:bg-zinc-50" : ""}`}
                       >
                         <span>
                           {playerLabel(pool.initiator_id, view)} pooled {pool.visibility}
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
-                        <span className="flex flex-shrink-0 gap-1">
-                          {isPoolMine && (
-                            <>
-                              {pool.visibility === "private" && (
+                        {!poolLingering && (
+                          <span className="flex flex-shrink-0 gap-1">
+                            {isPoolMine && (
+                              <>
+                                {pool.visibility === "private" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => runCommand(pool.pool_id, "MAKE_POOL_PUBLIC", { pool_id: pool.pool_id }, "Couldn't make that public.")}
+                                    disabled={busyId === pool.pool_id}
+                                    className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
+                                  >
+                                    Make public
+                                  </button>
+                                )}
                                 <button
                                   type="button"
-                                  onClick={() => runCommand(pool.pool_id, "MAKE_POOL_PUBLIC", { pool_id: pool.pool_id }, "Couldn't make that public.")}
+                                  onClick={() => runCommand(pool.pool_id, "WITHDRAW_POOL", { pool_id: pool.pool_id }, "Couldn't withdraw that pool.")}
                                   disabled={busyId === pool.pool_id}
                                   className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
                                 >
-                                  Make public
+                                  {busyId === pool.pool_id ? "…" : "Withdraw"}
                                 </button>
-                              )}
+                              </>
+                            )}
+                            {!isPoolMine && pool.visibility === "private" && isMine && (
                               <button
                                 type="button"
-                                onClick={() => runCommand(pool.pool_id, "WITHDRAW_POOL", { pool_id: pool.pool_id }, "Couldn't withdraw that pool.")}
+                                onClick={() => runCommand(pool.pool_id, "DECLINE_POOL", { pool_id: pool.pool_id }, "Couldn't decline that pool.")}
                                 disabled={busyId === pool.pool_id}
                                 className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
                               >
-                                {busyId === pool.pool_id ? "…" : "Withdraw"}
+                                Decline
                               </button>
-                            </>
-                          )}
-                          {!isPoolMine && pool.visibility === "private" && isMine && (
-                            <button
-                              type="button"
-                              onClick={() => runCommand(pool.pool_id, "DECLINE_POOL", { pool_id: pool.pool_id }, "Couldn't decline that pool.")}
-                              disabled={busyId === pool.pool_id}
-                              className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
-                            >
-                              Decline
-                            </button>
-                          )}
-                          {!isPoolMine && (pool.visibility === "public" || isMine) && (
-                            <AcceptButton
-                              liability={pool.my_accept_liability}
-                              available={available}
-                              busy={busyId === pool.pool_id}
-                              onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
-                            />
-                          )}
-                        </span>
+                            )}
+                            {!isPoolMine && (pool.visibility === "public" || isMine) && (
+                              <AcceptButton
+                                liability={pool.my_accept_liability}
+                                available={available}
+                                busy={busyId === pool.pool_id}
+                                onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
+                              />
+                            )}
+                          </span>
+                        )}
+                        {/* No overlay rendered here even when poolLingering is set --
+                            accepting a pool always resolves its base proposal to
+                            executed in the same instant (see ACCEPT_POOL), so the
+                            outer <li>'s own overlay below already covers this row
+                            as part of the same group. A second overlay here would
+                            just double up the same "Accepted by X" text. */}
                       </li>
                     );
                   })}
                 </ul>
+              )}
+              {lingering && (
+                <RowOverlay
+                  text={lingering.kind === "accepted" ? `Accepted by ${lingering.accepterLabel}` : "Everyone Passed"}
+                  tone={lingering.kind === "accepted" ? "green" : "red"}
+                  fading={lingering.fading}
+                />
               )}
             </li>
           );
         })}
       </ul>
       {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+const _ROW_OVERLAY_TONE_CLASSES = {
+  green: "bg-emerald-500/25 text-emerald-900",
+  yellow: "bg-amber-400/30 text-amber-900",
+  red: "bg-red-500/25 text-red-900",
+} as const;
+
+/** Translucent banner overlaid on a proposal/pool row's own, still-in-place
+ * `<li>` (which must be `position: relative`) once it resolves in a way
+ * worth calling out -- covers the whole row rather than replacing it, so
+ * nothing shifts position while it lingers and fades. */
+function RowOverlay({ text, tone, fading }: { text: string; tone: keyof typeof _ROW_OVERLAY_TONE_CLASSES; fading: boolean }) {
+  return (
+    <div
+      className={`pointer-events-none absolute inset-0 flex items-center justify-center rounded text-sm font-bold transition-opacity duration-700 ${
+        _ROW_OVERLAY_TONE_CLASSES[tone]
+      } ${fading ? "opacity-0" : "opacity-100"}`}
+    >
+      {text}
     </div>
   );
 }
@@ -1641,6 +1811,7 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
                   <span className={isWinner ? "font-semibold text-emerald-700" : undefined}>
                     {isWinner ? "🏆 " : ""}
                     {playerLabel(r.game_player_id, view)}
+                    {r.game_player_id === view.you ? " - You" : ""}
                   </span>
                   <span className="tabular-nums text-zinc-700">{r.final_value}</span>
                 </button>

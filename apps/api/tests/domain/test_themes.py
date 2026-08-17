@@ -18,7 +18,7 @@ from gotiate.domain import engine, themes
 from gotiate.domain.entities import GameConfig, HaircutProfile
 from gotiate.domain.errors import IllegalCommandError, NotFoundError
 from gotiate.domain.projections import PlayerAudience, project
-from gotiate.domain.themes import ThemeEntityDefinition, ThemeRepository, ThemeSet
+from gotiate.domain.themes import PostgresThemeRepository, ThemeEntityDefinition, ThemeRepository, ThemeSet
 from tests.conftest import now
 
 REAL_THEME_SETS = ["fictional_companies_v1", "dragons_v1", "cats_v1"]
@@ -157,6 +157,36 @@ def test_too_many_locked_entities_for_market_size_is_rejected_cleanly(fake_theme
         engine.handle_command(
             game, command_type="START_GAME", payload={}, actor_game_player_id=game.host_player_id, expected_version=None, now=now()
         )
+
+
+# --------------------------------------------------------------------------
+# PostgresThemeRepository -- only the synchronous cache-reading half is
+# unit-tested here (constructed with pool=None; refresh() is never called,
+# so nothing ever touches it). refresh()'s own query is exercised manually
+# against the live database, same as every other Postgres-backed piece in
+# this codebase (AGENTS.md: no integration suite against real Postgres).
+# --------------------------------------------------------------------------
+
+
+def test_postgres_theme_repository_get_raises_before_any_refresh():
+    repo = PostgresThemeRepository(pool=None)  # type: ignore[arg-type]
+    with pytest.raises(NotFoundError):
+        repo.get("fictional_companies_v1")
+
+
+def test_postgres_theme_repository_list_ids_is_empty_before_any_refresh():
+    repo = PostgresThemeRepository(pool=None)  # type: ignore[arg-type]
+    assert repo.list_ids() == []
+
+
+def test_postgres_theme_repository_reads_from_its_cache():
+    repo = PostgresThemeRepository(pool=None)  # type: ignore[arg-type]
+    repo._cache = {"tiny_v1": _tiny_theme_set()}  # bypassing refresh() deliberately -- see the section comment above
+
+    assert repo.list_ids() == ["tiny_v1"]
+    assert repo.get("tiny_v1").theme_set_id == "tiny_v1"
+    with pytest.raises(NotFoundError):
+        repo.get("does_not_exist_v1")
 
 
 def test_unknown_theme_set_is_rejected_cleanly():

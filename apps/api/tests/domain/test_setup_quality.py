@@ -21,7 +21,9 @@ from gotiate.domain.setup import (
     _topology_hard_reject,
     _topology_metrics,
     generate_starting_state,
+    select_market_entities,
 )
+from gotiate.domain.themes import ThemeEntityDefinition, ThemeSet
 from tests.conftest import now
 
 THEME_SET = themes.get_theme_set("fictional_companies_v1")
@@ -30,6 +32,69 @@ DEFAULT_SHAPE = [2, 1, 1, 1]
 
 def _config(**overrides) -> SetupQualityConfig:
     return SetupQualityConfig(max_pair_overlap=overrides.pop("max_pair_overlap", 2), **overrides)
+
+
+def _swappable_pool(n_with_logo: int, n_without_logo: int, n_locked: int = 0) -> ThemeSet:
+    entities = (
+        [
+            ThemeEntityDefinition(theme_key=f"logo{i}", display_name=f"Logo {i}", ticker_symbol=f"L{i}", logo_url=f"https://example.com/{i}.png")
+            for i in range(n_with_logo)
+        ]
+        + [ThemeEntityDefinition(theme_key=f"plain{i}", display_name=f"Plain {i}", ticker_symbol=f"P{i}") for i in range(n_without_logo)]
+        + [ThemeEntityDefinition(theme_key=f"lock{i}", display_name=f"Lock {i}", ticker_symbol=f"K{i}", is_locked=True) for i in range(n_locked)]
+    )
+    return ThemeSet(theme_set_id="logo_test_v1", name="Logo Test", version=1, entities=entities)
+
+
+# --------------------------------------------------------------------------
+# select_market_entities -- which entities get dealt in, not where they sit
+# (position is Phase B's own concern, untouched by this function or these
+# tests). Real playtest ask: entities with a logo_url should be favored over
+# icon-less ones when filling the swappable pool, since only a handful of
+# entities have real art today and an empty market shouldn't have to wait
+# for full art coverage to feel less placeholder-y -- but still genuinely
+# random *within* whichever tier is being drawn from, never a fixed subset.
+# --------------------------------------------------------------------------
+
+
+def test_select_market_entities_favors_logo_entities_when_they_cover_the_market():
+    theme_set = _swappable_pool(n_with_logo=8, n_without_logo=8)
+    selected = select_market_entities(theme_set, market_size=5, rng=random.Random(0))
+    assert len(selected) == 5
+    assert all(e.logo_url for e in selected)
+
+
+def test_select_market_entities_fills_remainder_from_logo_less_pool_once_exhausted():
+    theme_set = _swappable_pool(n_with_logo=3, n_without_logo=8)
+    selected = select_market_entities(theme_set, market_size=7, rng=random.Random(0))
+    assert len(selected) == 7
+    # All 3 logo'd entities are in (never held back in favor of a plain one),
+    # the remaining 4 slots come from the logo-less pool.
+    assert sum(1 for e in selected if e.logo_url) == 3
+    assert sum(1 for e in selected if not e.logo_url) == 4
+
+
+def test_select_market_entities_falls_back_to_the_old_behavior_with_no_logos_at_all():
+    theme_set = _swappable_pool(n_with_logo=0, n_without_logo=10)
+    selected = select_market_entities(theme_set, market_size=6, rng=random.Random(0))
+    assert len(selected) == 6
+    assert all(not e.logo_url for e in selected)
+
+
+def test_select_market_entities_locked_entities_are_unaffected_by_logo_favoring():
+    theme_set = _swappable_pool(n_with_logo=2, n_without_logo=8, n_locked=2)
+    selected = select_market_entities(theme_set, market_size=6, rng=random.Random(0))
+    assert len(selected) == 6
+    locked_keys = {e.theme_key for e in theme_set.entities if e.is_locked}
+    assert locked_keys <= {e.theme_key for e in selected}
+
+
+def test_select_market_entities_is_still_random_within_the_logo_tier():
+    # More logo'd entities than slots -- selection *within* that tier must
+    # still vary across seeds, not collapse to a fixed/deterministic subset.
+    theme_set = _swappable_pool(n_with_logo=10, n_without_logo=0)
+    picks = {tuple(sorted(e.theme_key for e in select_market_entities(theme_set, market_size=3, rng=random.Random(seed)))) for seed in range(20)}
+    assert len(picks) > 1
 
 
 # --------------------------------------------------------------------------

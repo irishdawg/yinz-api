@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
@@ -23,6 +23,17 @@ export default function Home() {
   const [joinCodeInput, setJoinCodeInput] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const nameSectionRef = useRef<HTMLDivElement>(null);
+
+  // Typing a name is no longer optional-but-prefilled (see NamePicker) --
+  // nothing auto-populates it anymore, so a name-less submit needs to say
+  // so and point at the field, not just leave a button looking greyed out
+  // for no visible reason (real playtest feedback: the join-code box and
+  // the name box are far enough apart on screen that the connection
+  // wasn't obvious).
+  function scrollToNameSection() {
+    nameSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   useEffect(() => {
     ensureAnonymousSession()
@@ -58,7 +69,11 @@ export default function Home() {
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!name) return;
+    if (!name) {
+      setError("Enter your name first.");
+      scrollToNameSection();
+      return;
+    }
     setSubmitting(true);
     setError(null);
     setExistingGameId(null);
@@ -91,7 +106,12 @@ export default function Home() {
 
   async function handleJoinByCode() {
     const code = joinCodeInput.trim().toUpperCase();
-    if (!code || !name) return;
+    if (!code) return;
+    if (!name) {
+      setJoinError("Enter your name above first.");
+      scrollToNameSection();
+      return;
+    }
     setJoining(true);
     setJoinError(null);
     try {
@@ -125,7 +145,9 @@ export default function Home() {
       <main className="w-full max-w-sm">
         <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} className="mb-8" priority />
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <NamePicker onNameChange={setName} />
+          <div ref={nameSectionRef}>
+            <NamePicker onNameChange={setName} />
+          </div>
           {themeSets.length > 0 && (
             <label className="flex flex-col gap-1">
               <span className="text-sm font-medium text-zinc-700">Theme</span>
@@ -154,7 +176,7 @@ export default function Home() {
           )}
           <button
             type="submit"
-            disabled={!ready || !name || submitting}
+            disabled={!ready || submitting}
             className="rounded bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
           >
             {ready ? (submitting ? "Creating…" : "Create game") : "Starting session…"}
@@ -175,7 +197,7 @@ export default function Home() {
             <button
               type="button"
               onClick={handleJoinByCode}
-              disabled={!joinCodeInput.trim() || !name || joining}
+              disabled={!joinCodeInput.trim() || joining}
               className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
             >
               {joining ? "Joining…" : "Join game"}

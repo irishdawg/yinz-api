@@ -165,6 +165,8 @@ def _create_production_app() -> FastAPI:
     # Local import: only pulls in psycopg/psycopg_pool when actually needed,
     # so an in-memory-only environment (e.g. a contributor's machine
     # without a DB configured) doesn't need them installed to run the app.
+    from gotiate.domain import themes
+    from gotiate.domain.themes import PostgresThemeRepository
     from gotiate.persistence.player_names import PostgresPlayerNameRepository
     from gotiate.persistence.postgres_repository import PostgresGameRepository, create_pool
 
@@ -179,6 +181,7 @@ def _create_production_app() -> FastAPI:
     )
     repository = PostgresGameRepository(pool)
     player_name_repository = PostgresPlayerNameRepository(pool)
+    theme_repository = PostgresThemeRepository(pool)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -188,6 +191,15 @@ def _create_production_app() -> FastAPI:
         async with pool.connection() as conn:
             await conn.execute("select 1")
         logger.info("Postgres pool opened and health-checked")
+        # Theme content (engine.py/projections.py's own domain data, not
+        # per-request FastAPI state) is a global set once here, not passed
+        # through create_app() — see themes.py's own module docstring for
+        # why the pure, synchronous domain layer can't just query Postgres
+        # directly per call. A content edit made in Supabase after this
+        # point takes effect on the next deploy/restart, not live.
+        await theme_repository.refresh()
+        themes.set_theme_repository(theme_repository)
+        logger.info("Theme content loaded from Postgres (%s theme set(s))", len(theme_repository.list_ids()))
         yield
         await pool.close()
 
