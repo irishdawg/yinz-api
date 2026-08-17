@@ -318,7 +318,7 @@ class GameConfig(BaseModel):
     # deal" alone would regenerate a correction continuously once
     # crossed once.
     market_correction_cooldown_seconds: float = 90.0
-    # Severity formula (see engine._severity_for_market_correction):
+    # Severity formula (see engine._market_correction_target_displacements):
     # spread = max_spread * min(1, gap / gap_saturation); leader gets
     # base - spread/2, trailer gets base + spread/2, both clamped to
     # [1, market_size - 1].

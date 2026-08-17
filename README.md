@@ -3,6 +3,18 @@
 Monorepo for Gotiate ("Everything is Negotiable") — a real-time social
 negotiation/bluffing card game.
 
+**Start here:**
+- **`AGENTS.md`** (also `CLAUDE.md`, which just includes it) — architecture,
+  repo map, build/test commands, security boundaries, migration
+  conventions, operational gotchas. The onboarding doc.
+- **`GAMEPLAY.md`** — the current, authoritative gameplay specification
+  (rules and invariants only — no history).
+- **`DATABASE.md`** — current DB conventions and schema state.
+- **`CURRENT_WORK.md`** — unresolved decisions, deferred features, known
+  gaps.
+- **`HISTORY.md`** — chronological build narrative. Non-authoritative;
+  never overrides the above or the code/tests.
+
 ```
 yinz-api/
 ├── apps/
@@ -16,7 +28,7 @@ yinz-api/
 │                DATABASE.md.
 ├── render.yaml — Render service definition, scoped to apps/api via
 │                rootDir + buildFilter.
-└── DATABASE.md — Database rules, deploy flow, and current schema status.
+├── GAMEPLAY.md, DATABASE.md, CURRENT_WORK.md, HISTORY.md, AGENTS.md
 ```
 
 ## Why one repo
