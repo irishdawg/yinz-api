@@ -15,6 +15,26 @@ export interface SupportEntry {
 
 export type SupportMarkers = Map<string, SupportEntry[]>;
 
+/** One unclaimed SWAP_EXECUTED occurrence -- a unilateral reserve burn (or,
+ * in principle, an unclaimed Market Correction leg, but those are always
+ * claimed by MARKET_CORRECTION_RESOLVED(triggered) before this point, see
+ * the "Market Correction never credits support markers" note below). Same
+ * data computeSupportMarkers already derives for its own unilateralCount
+ * bump -- see findUnilateralSwaps, which shares that exact pass rather
+ * than re-deriving it. */
+export interface UnilateralSwapEvent {
+  entityA: string;
+  entityB: string;
+  positionA: number;
+  positionB: number;
+  actorId: string;
+  // The originating SWAP_EXECUTED event's own seq_no -- a stable identity
+  // for a specific occurrence, since the same entity pair can legitimately
+  // swap unilaterally more than once in a game (entityA/entityB alone
+  // aren't unique).
+  seqNo: number;
+}
+
 function pairKey(a: string, b: string): string {
   return [a, b].sort().join("::");
 }
@@ -98,7 +118,7 @@ function pairKey(a: string, b: string): string {
  * pool executed and became publicly visible. view.pools is refetched
  * every poll, so it always reflects current visibility, regardless of
  * when this specific client first saw the creation event. */
-export function computeSupportMarkers(events: EventView[], pools: PoolView[]): SupportMarkers {
+function _walkEvents(events: EventView[], pools: PoolView[]): { markers: SupportMarkers; unilateralSwaps: UnilateralSwapEvent[] } {
   const support = new Map<string, Map<string, { count: number; unilateralCount: number }>>();
   const proposalsById = new Map<string, { proposerId: string; entityA: string; entityB: string }>();
   const poolsById = new Map<string, { initiatorId: string; entityC: string; entityD: string }>();
@@ -121,7 +141,7 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
   // position snapshot so a later unilateral credit never depends on
   // lastSwapByPair (which only ever holds the *most recent* swap for a
   // pair, wrong if the same pair swaps unilaterally more than once).
-  const pendingSwapsByPair = new Map<string, { entityA: string; entityB: string; positionA: number; positionB: number; actorId: string | null }[]>();
+  const pendingSwapsByPair = new Map<string, { entityA: string; entityB: string; positionA: number; positionB: number; actorId: string | null; seqNo: number }[]>();
 
   function bump(entityId: string, playerId: string, kind: "support" | "unilateral") {
     const perEntity = support.get(entityId) ?? new Map<string, { count: number; unilateralCount: number }>();
@@ -147,10 +167,10 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
     const rising = swap.positionA < swap.positionB ? swap.entityA : swap.entityB;
     return { rising, falling: rising === swap.entityA ? swap.entityB : swap.entityA };
   }
-  function queueSwap(entityA: string, entityB: string, positionA: number, positionB: number, actorId: string | null) {
+  function queueSwap(entityA: string, entityB: string, positionA: number, positionB: number, actorId: string | null, seqNo: number) {
     const key = pairKey(entityA, entityB);
     const queue = pendingSwapsByPair.get(key) ?? [];
-    queue.push({ entityA, entityB, positionA, positionB, actorId });
+    queue.push({ entityA, entityB, positionA, positionB, actorId, seqNo });
     pendingSwapsByPair.set(key, queue);
   }
   function claimSwap(entityA: string, entityB: string) {
@@ -174,7 +194,7 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
       // it immediately (same command), the map always holds the swap that
       // belongs to whichever resolution reads it next.
       lastSwapByPair.set(pairKey(entityA, entityB), { entityA, entityB, positionA, positionB });
-      queueSwap(entityA, entityB, positionA, positionB, event.actor_game_player_id);
+      queueSwap(entityA, entityB, positionA, positionB, event.actor_game_player_id, event.seq_no);
     } else if (event.type === "PROPOSAL_RESOLVED" && event.payload.reason === "executed") {
       const proposalId = event.payload.proposal_id as string;
       const proposal = proposalsById.get(proposalId);
@@ -208,6 +228,7 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
 
   // Whatever's left unclaimed in any pair's queue is, by construction, a
   // unilateral burn -- see the design note above.
+  const unilateralSwaps: UnilateralSwapEvent[] = [];
   for (const queue of pendingSwapsByPair.values()) {
     for (const swap of queue) {
       if (!swap.actorId) continue;
@@ -215,17 +236,40 @@ export function computeSupportMarkers(events: EventView[], pools: PoolView[]): S
       const falling = rising === swap.entityA ? swap.entityB : swap.entityA;
       bump(rising, swap.actorId, "unilateral");
       clear(falling, swap.actorId);
+      unilateralSwaps.push({
+        entityA: swap.entityA,
+        entityB: swap.entityB,
+        positionA: swap.positionA,
+        positionB: swap.positionB,
+        actorId: swap.actorId,
+        seqNo: swap.seqNo,
+      });
     }
   }
 
-  const result: SupportMarkers = new Map();
+  const markers: SupportMarkers = new Map();
   for (const [entityId, perPlayer] of support) {
     const entries = [...perPlayer.entries()]
       .map(([playerId, { count, unilateralCount }]) => ({ playerId, count, unilateralCount }))
       .sort((x, y) => y.count + y.unilateralCount - (x.count + x.unilateralCount) || x.playerId.localeCompare(y.playerId));
-    if (entries.length > 0) result.set(entityId, entries);
+    if (entries.length > 0) markers.set(entityId, entries);
   }
-  return result;
+  return { markers, unilateralSwaps };
+}
+
+export function computeSupportMarkers(events: EventView[], pools: PoolView[]): SupportMarkers {
+  return _walkEvents(events, pools).markers;
+}
+
+/** Every unclaimed SWAP_EXECUTED across the full event log, in event order
+ * -- the raw data behind computeSupportMarkers' own unilateralCount bump,
+ * exposed separately for consumers that need the swap occurrences
+ * themselves (e.g. a "Hanky just swapped X for Y" lingering overlay),
+ * not just the aggregated per-entity marker counts. Shares _walkEvents'
+ * single claim-tracking pass rather than re-deriving it -- same
+ * unilateral-vs-claimed distinction, same Market Correction exclusion. */
+export function findUnilateralSwaps(events: EventView[], pools: PoolView[]): UnilateralSwapEvent[] {
+  return _walkEvents(events, pools).unilateralSwaps;
 }
 
 /** Real count stays uncapped internally (computeSupportMarkers never

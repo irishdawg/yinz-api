@@ -9,7 +9,7 @@ import { ensureAnonymousSession } from "@/lib/auth";
 import { useGameView, type GameView, type HoldingView, type PoolView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
-import { computeSupportMarkers, formatSupportCount } from "@/lib/supportMarkers";
+import { computeSupportMarkers, findUnilateralSwaps, formatSupportCount } from "@/lib/supportMarkers";
 import { certaintyAt } from "@/lib/haircutRisk";
 
 export default function GamePage({ params }: { params: Promise<{ id: string }> }) {
@@ -132,11 +132,24 @@ function playerInitial(playerId: string, view: GameView): string {
  * Only the proposer's own client can even attempt to tell the two apart
  * (via myExplicitWithdrawalsRef, tracking their own Withdraw clicks) --
  * every other player just sees "withdrawn", which is also the correct
- * default for the proposer's own client when it can't prove otherwise. */
+ * default for the proposer's own client when it can't prove otherwise.
+ *
+ * "unilateral_swap" is different from the other three kinds: there's no
+ * proposal/pool object behind it at all (BURN_RESERVE_FOR_SWAP is a direct
+ * market mutation), so it can't be found by re-checking view.proposals/
+ * view.pools the way the others are -- detected instead from the event log
+ * via findUnilateralSwaps (see MarketView's own detection effect for this
+ * kind specifically), keyed by the originating SWAP_EXECUTED event's own
+ * seq_no since the same entity pair can swap more than once in a game. The
+ * unilateral* fields carry everything OpenProposals needs to render it,
+ * since there's no live row to read entities/actor from. */
 interface LingeringDeal {
   key: string;
-  kind: "accepted" | "everyone_passed" | "withdrawn";
+  kind: "accepted" | "everyone_passed" | "withdrawn" | "unilateral_swap";
   accepterLabel?: string; // only ever set for kind "accepted", and only once the enriching event arrives
+  unilateralEntityA?: string; // only ever set for kind "unilateral_swap"
+  unilateralEntityB?: string;
+  unilateralActorLabel?: string;
   fading: boolean;
 }
 
@@ -384,6 +397,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     });
     setHighlighted(next);
     if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    // 3s ceiling for a tap (no "leave" gesture to clear it early) or an
+    // auto-triggered visualize (a just-resolved deal, nobody necessarily
+    // hovering anything) -- a real mouse hover clears it immediately on
+    // mouseleave instead, see clearVisualizeHighlight below.
     highlightTimeoutRef.current = setTimeout(() => setHighlighted(null), 3000);
 
     const container = marketScrollRef.current;
@@ -395,6 +412,18 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     const minLeft = Math.min(...els.map((el) => el.offsetLeft));
     const maxRight = Math.max(...els.map((el) => el.offsetLeft + el.offsetWidth));
     container.scrollTo({ left: (minLeft + maxRight) / 2 - container.clientWidth / 2, behavior: "smooth" });
+  }
+
+  // Real playtest feedback: Visualize was "too sticky" -- moving off a
+  // proposal row (not onto another one) still left the highlight sitting
+  // for the rest of its 3s ceiling. Only wired to onMouseLeave (a real
+  // mouse hover), never called for a tap/auto-trigger -- touch has no
+  // "leave" gesture to fire this from, and an auto-triggered visualize
+  // (a deal that just resolved) isn't tied to hovering anything to begin
+  // with, so both correctly keep running out their own 3s ceiling instead.
+  function clearVisualizeHighlight() {
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlighted(null);
   }
 
   // A just-resolved proposal/pool used to just vanish from the open list
@@ -410,8 +439,12 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // -expired" once both collapse to the same masked resolution reason.
   const myExplicitWithdrawalsRef = useRef<Set<string>>(new Set());
 
-  function addLingeringDeal(key: string, kind: LingeringDeal["kind"], accepterLabel?: string) {
-    setLingeringDeals((prev) => (prev.some((d) => d.key === key) ? prev : [...prev, { key, kind, accepterLabel, fading: false }]));
+  function addLingeringDeal(
+    key: string,
+    kind: LingeringDeal["kind"],
+    extra?: Pick<LingeringDeal, "unilateralEntityA" | "unilateralEntityB" | "unilateralActorLabel">,
+  ) {
+    setLingeringDeals((prev) => (prev.some((d) => d.key === key) ? prev : [...prev, { key, kind, fading: false, ...extra }]));
     setTimeout(() => setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, fading: true } : d))), 2200);
     setTimeout(() => setLingeringDeals((prev) => prev.filter((d) => d.key !== key)), 2900);
   }
@@ -516,6 +549,39 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view is read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
+  }, [events]);
+
+  // A unilateral BURN_RESERVE_FOR_SWAP has no proposal/pool object at all
+  // (a direct market mutation), so unlike the other three lingering kinds
+  // it can't be detected from view.proposals/view.pools -- the event log
+  // is the only source. findUnilateralSwaps re-derives the exact same
+  // claimed-vs-unclaimed distinction computeSupportMarkers already uses for
+  // its own unilateral marker (shared pass, see supportMarkers.ts), over
+  // the *entire* event history every call (claim status can only be
+  // determined with full context) -- so this tracks which seq_nos have
+  // already produced a lingering entry itself, same backlog-on-mount
+  // concern as the enrichment effect above, same fix.
+  const shownUnilateralSeqNosRef = useRef<Set<number>>(new Set());
+  const unilateralInitializedRef = useRef(false);
+  useEffect(() => {
+    const unilateral = findUnilateralSwaps(events, view.pools);
+    if (!unilateralInitializedRef.current) {
+      unilateralInitializedRef.current = true;
+      for (const u of unilateral) shownUnilateralSeqNosRef.current.add(u.seqNo);
+      return;
+    }
+    for (const u of unilateral) {
+      if (shownUnilateralSeqNosRef.current.has(u.seqNo)) continue;
+      shownUnilateralSeqNosRef.current.add(u.seqNo);
+      const risingEntityId = u.positionA < u.positionB ? u.entityA : u.entityB;
+      addLingeringDeal(`unilateral:${u.seqNo}`, "unilateral_swap", {
+        unilateralEntityA: u.entityA,
+        unilateralEntityB: u.entityB,
+        unilateralActorLabel: playerLabel(u.actorId, view),
+      });
+      visualizeProposal([[u.entityA, u.entityB, risingEntityId]]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- view.pools/view.you read fresh each run; `events` (growing every poll) is the real driver.
   }, [events]);
 
   // Ownership is projected directly onto the scale (a bold border, plus a
@@ -892,6 +958,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         view={view}
         onChanged={onChanged}
         onVisualize={visualizeProposal}
+        onClearVisualize={clearVisualizeHighlight}
         onStartPool={startPooling}
         lingeringDeals={lingeringDeals}
         onSelfWithdrawProposal={markSelfWithdrawnProposal}
@@ -1284,6 +1351,7 @@ function OpenProposals({
   view,
   onChanged,
   onVisualize,
+  onClearVisualize,
   onStartPool,
   lingeringDeals,
   onSelfWithdrawProposal,
@@ -1292,6 +1360,7 @@ function OpenProposals({
   view: GameView;
   onChanged: () => void;
   onVisualize: (pairs: [string, string, string][]) => void;
+  onClearVisualize: () => void;
   onStartPool: (proposalId: string) => void;
   lingeringDeals: LingeringDeal[];
   onSelfWithdrawProposal: (proposalId: string) => void;
@@ -1358,6 +1427,11 @@ function OpenProposals({
   // reconstruct a position view.proposals no longer has any record of.
   const visibleProposals = view.proposals.filter((p) => p.status === "open" || lingeringById.has(p.proposal_id));
   const passLingeringEntries = [...passLingering.values()];
+  // Unilateral swaps have no proposal/pool object to filter view.proposals/
+  // view.pools by -- they're rendered as their own standalone rows,
+  // sourced straight from lingeringDeals, same "no live row to preserve
+  // the position of" reasoning as passLingeringEntries above.
+  const unilateralEntries = lingeringDeals.filter((d) => d.kind === "unilateral_swap");
 
   async function runCommand(id: string, type: string, payload: Record<string, unknown>, fallback: string) {
     setError(null);
@@ -1368,12 +1442,27 @@ function OpenProposals({
     return result;
   }
 
-  if (visibleProposals.length === 0 && passLingeringEntries.length === 0) return null;
+  if (visibleProposals.length === 0 && passLingeringEntries.length === 0 && unilateralEntries.length === 0) return null;
 
   return (
     <div>
       <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({openCount})</h2>
       <ul className="flex flex-col gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
+        {unilateralEntries.map((entry) => (
+          <li
+            key={entry.key}
+            className="relative flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 last:border-0 last:pb-0"
+          >
+            <span>
+              {entityLabel(entry.unilateralEntityA!, view)} ↔ {entityLabel(entry.unilateralEntityB!, view)}
+            </span>
+            <RowOverlay
+              text={`${entry.unilateralActorLabel} just swapped ${entityLabel(entry.unilateralEntityA!, view)} for ${entityLabel(entry.unilateralEntityB!, view)}`}
+              tone="blue"
+              fading={entry.fading}
+            />
+          </li>
+        ))}
         {passLingeringEntries.map((passEntry) => (
           <li
             key={passEntry.proposalId}
@@ -1408,6 +1497,7 @@ function OpenProposals({
               // on the text itself. Not wired up at all once resolved --
               // nothing left to evaluate.
               onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+              onMouseLeave={lingering ? undefined : onClearVisualize}
               onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
               title={lingering ? undefined : "Hover or tap to visualize"}
               className={`relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0 ${
@@ -1425,7 +1515,11 @@ function OpenProposals({
                   )}
                 </span>
                 {!lingering && (
-                  <span className="flex flex-shrink-0 gap-1">
+                  // stopPropagation -- these buttons sit inside the row's own
+                  // onClick (visualize-on-tap, see above); without this every
+                  // button click also fired an unrelated market highlight
+                  // +scroll as a side effect.
+                  <span className="flex flex-shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
                     {!isMine && !myOpenPoolOnThis && (
                       <button
                         type="button"
@@ -1502,6 +1596,7 @@ function OpenProposals({
                       <li
                         key={pool.pool_id}
                         onMouseEnter={visualizePoolLeg}
+                        onMouseLeave={visualizePoolLeg ? onClearVisualize : undefined}
                         onClick={visualizePoolLeg}
                         title={visualizePoolLeg ? "Hover or tap to visualize" : undefined}
                         className={`relative flex items-center justify-between gap-2 text-xs text-zinc-700 ${visualizePoolLeg ? "cursor-pointer hover:bg-zinc-50" : ""}`}
@@ -1511,7 +1606,9 @@ function OpenProposals({
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
                         {!poolLingering && (
-                          <span className="flex flex-shrink-0 gap-1">
+                          // stopPropagation -- see the identical note on the
+                          // outer proposal row's own button span above.
+                          <span className="flex flex-shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
                             {isPoolMine && (
                               <>
                                 {pool.visibility === "private" && (
@@ -1583,17 +1680,28 @@ const _ROW_OVERLAY_TONE_CLASSES = {
   yellow: "bg-amber-400/30 text-amber-900",
   red: "bg-red-500/25 text-red-900",
   gray: "bg-zinc-500/25 text-zinc-700",
+  blue: "bg-blue-500/25 text-blue-900",
 } as const;
 
 /** "accepted" renders "Accepted" (no name) until the enriching event
  * arrives and fills in accepterLabel -- see MarketView's enrichment
- * effect. Usually only visible for a single poll cycle or two. */
+ * effect. Usually only visible for a single poll cycle or two.
+ * "unilateral_swap" is never actually passed through here -- it's rendered
+ * as its own standalone row (see OpenProposals' unilateralEntries), never
+ * looked up via lingeringById.get(a proposal/pool id) the way the other
+ * three kinds are -- included only so this stays exhaustive/type-safe. */
 function lingeringOverlayProps(lingering: LingeringDeal): { text: string; tone: keyof typeof _ROW_OVERLAY_TONE_CLASSES } {
   if (lingering.kind === "accepted") {
     return { text: lingering.accepterLabel ? `Accepted by ${lingering.accepterLabel}` : "Accepted", tone: "green" };
   }
   if (lingering.kind === "everyone_passed") {
     return { text: "Everyone Passed", tone: "red" };
+  }
+  if (lingering.kind === "unilateral_swap") {
+    return {
+      text: `${lingering.unilateralActorLabel} just swapped ${lingering.unilateralEntityA} for ${lingering.unilateralEntityB}`,
+      tone: "blue",
+    };
   }
   return { text: "Withdrawn", tone: "gray" };
 }
