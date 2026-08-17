@@ -1679,7 +1679,10 @@ const _ROW_OVERLAY_TONE_CLASSES = {
   green: "bg-emerald-500/25 text-emerald-900",
   yellow: "bg-amber-400/30 text-amber-900",
   red: "bg-red-500/25 text-red-900",
-  gray: "bg-zinc-500/25 text-zinc-700",
+  // Deliberately much higher-contrast than the other tones -- zinc-on-white
+  // at the same light opacity those use all but disappeared against a row
+  // whose surrounding text/borders are already various shades of zinc.
+  gray: "bg-zinc-700/80 text-white",
   blue: "bg-blue-500/25 text-blue-900",
 } as const;
 
