@@ -234,6 +234,7 @@ class PostgresGameRepository:
                                            status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
                         values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
+                            visibility = excluded.visibility,
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
                             resolution_reason = excluded.resolution_reason
