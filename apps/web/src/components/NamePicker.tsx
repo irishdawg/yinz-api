@@ -69,7 +69,7 @@ export function NamePicker({ joinCode, onNameChange }: { joinCode?: string; onNa
         maxLength={_MAX_TYPED_NAME_LENGTH}
         placeholder="Type your name"
         data-testid="assigned-name"
-        className="rounded border border-zinc-300 bg-white px-3 py-2 text-zinc-900 placeholder:text-zinc-400"
+        className="rounded border border-zinc-300 bg-white px-3 py-2 uppercase text-zinc-900 placeholder:text-zinc-400 placeholder:normal-case"
       />
       <button type="button" onClick={() => setMode("random")} className="self-start text-xs font-medium text-zinc-500 underline">
         Use a random name instead

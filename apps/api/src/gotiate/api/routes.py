@@ -43,19 +43,23 @@ def _now() -> datetime:
 
 
 async def _resolve_submitted_name(name_repo: PlayerNameRepository, raw_name: str) -> tuple[str, bool]:
-    """Returns (display_name, is_catalog_name). A catalog name passes through
-    unchanged, still eligible for the golden-name roll (see roll_golden_name's
-    docstring). Anything else is a typed name: trimmed, structurally checked
-    (non-empty, length-capped), and *never* golden-eligible -- overwriting a
-    real person's typed name with a random catalog string on a golden hit
-    would defeat the entire point of typing it. Raises the same 422 either
-    way so the client doesn't need to distinguish the two failure modes."""
+    """Returns (display_name, is_catalog_name), uppercased either way --
+    name case is standardized to upper across the board, catalog and typed
+    alike (see player_names.py's own module docstring for how the catalog
+    -matching methods stay case-insensitive under this). A catalog name is
+    still eligible for the golden-name roll (see roll_golden_name's
+    docstring). Anything else is a typed name: trimmed, structurally
+    checked (non-empty, length-capped), and *never* golden-eligible --
+    overwriting a real person's typed name with a random catalog string on
+    a golden hit would defeat the entire point of typing it. Raises the
+    same 422 either way so the client doesn't need to distinguish the two
+    failure modes."""
     if await name_repo.is_valid_name(raw_name):
-        return raw_name, True
+        return raw_name.upper(), True
     typed_name = raw_name.strip()
     if not typed_name or len(typed_name) > _MAX_TYPED_NAME_LENGTH:
         raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
-    return typed_name, False
+    return typed_name.upper(), False
 
 
 @router.post("", response_model=GameSummary)

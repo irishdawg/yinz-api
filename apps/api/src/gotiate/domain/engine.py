@@ -469,16 +469,6 @@ def _liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> 
     return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
 
 
-def _has_open_authored_negotiation(game: Game, player_id: str) -> bool:
-    """True if player_id currently authors any open Proposal or Pool --
-    used to block reserve/hole-card actions, which would otherwise let a
-    player change the portfolio basis of a liability they've already
-    locked in (see PICK_UP_RESERVE/BURN_RESERVE_FOR_SWAP)."""
-    return any(p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == player_id for p in game.proposals.values()) or any(
-        p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == player_id for p in game.pools.values()
-    )
-
-
 # --------------------------------------------------------------------------
 # The Agency Principle, written once (§01, §04)
 # --------------------------------------------------------------------------
@@ -620,6 +610,17 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
         p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == actor_game_player_id for p in game.proposals.values()
     ):
         raise IllegalCommandError("you already have an open proposal")
+    # Cross-player, not just your own -- two open proposals about the exact
+    # same pair is confusing to watch (real playtest feedback), not useful:
+    # accepting either one already voids the other via the ordinary
+    # crossing-invalidation scan the instant the first swap lands, so a
+    # second proposal for the same pair never actually offered a
+    # meaningfully different outcome, just a redundant, easy-to-misread
+    # duplicate entry in the open-proposals list.
+    if any(
+        p.status == ResolutionStatus.OPEN and {p.swap.entity_a, p.swap.entity_b} == {entity_a, entity_b} for p in game.proposals.values()
+    ):
+        raise IllegalCommandError("a proposal for this pair is already open")
 
     player = game.player_by_id(actor_game_player_id)
     # A 0-liability proposal (advocating movement that doesn't benefit your
@@ -912,8 +913,6 @@ def _handle_pick_up_reserve(game: Game, *, payload: dict, actor_game_player_id: 
 
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
-    if _has_open_authored_negotiation(game, actor_game_player_id):
-        raise IllegalCommandError("finish your open proposal or Pool before picking up a reserve")
     player = game.player_by_id(actor_game_player_id)
     holding = game.holdings.get(payload["reserve_holding_id"])
     if holding is None or holding.owner_player_id != actor_game_player_id or holding.zone != HoldingZone.RESERVE_UNREVEALED:
@@ -1030,8 +1029,6 @@ def _handle_decline_pickup(game: Game, *, payload: dict, actor_game_player_id: s
 def _handle_burn_reserve_for_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     _require_no_pending_pickup(game, actor_game_player_id)
-    if _has_open_authored_negotiation(game, actor_game_player_id):
-        raise IllegalCommandError("finish your open proposal or Pool before burning a reserve")
     if not can_burn_reserve_for_swap(game, now):
         raise IllegalCommandError("unilateral window has closed")
 

@@ -1,8 +1,18 @@
 """PlayerNameRepository — the global pool of curated display-name
-placeholders (player_name_seeds). No open text entry anywhere in the
-product; every create_game/join_game display_name gets validated against
-this before the domain engine ever sees it (routes.py), so there's no
-content-moderation surface to build at all.
+placeholders (player_name_seeds). Every create_game/join_game display_name
+that matches a catalog entry gets validated against this before the domain
+engine ever sees it (routes.py); anything else is accepted as a typed name
+instead (see routes.py's _resolve_submitted_name and CURRENT_WORK.md for
+that split).
+
+Display name case is standardized to upper everywhere -- offer_name/
+roll_golden_name both return the catalog's own name uppercased (a typed
+name is separately uppercased in routes.py), so every method here that
+matches a name *against* the catalog (is_valid_name, mark_name_used, and
+exclude handling in offer_name/roll_golden_name) does so
+case-insensitively -- the catalog itself stays stored in its original
+curated case (player_name_seeds/theme_data-style fixtures), only what
+this module hands back and matches against gets folded to upper.
 
 Two distinct "already taken" concerns, both handled via `exclude`, not two
 separate mechanisms: the name currently shown on screen (reroll only, so
@@ -77,24 +87,31 @@ class InMemoryPlayerNameRepository:
         self.usage: dict[str, int] = {}
 
     async def is_valid_name(self, name: str) -> bool:
-        return self._names is None or name in self._names
+        return self._names is None or name.upper() in {n.upper() for n in self._names}
 
     async def mark_name_used(self, name: str) -> None:
-        self.usage[name] = self.usage.get(name, 0) + 1
+        # Case-insensitive key -- name arrives uppercased (this
+        # repository's own offer_name/roll_golden_name always return
+        # upper), matching against whatever case self._names/golden_names
+        # actually hold.
+        canonical = next((n for n in (self._names or set()) | self._golden_names if n.upper() == name.upper()), name)
+        self.usage[canonical] = self.usage.get(canonical, 0) + 1
 
     async def offer_name(self, *, exclude: set[str] = frozenset()) -> str:
-        pool = (self._names or set()) - self._golden_names - exclude
+        exclude_upper = {e.upper() for e in exclude}
+        pool = [n for n in (self._names or set()) - self._golden_names if n.upper() not in exclude_upper]
         if not pool:
             raise NoAvailableNameError("no eligible names left to offer")
-        return sorted(pool)[0]
+        return sorted(pool)[0].upper()
 
     async def roll_golden_name(self, *, exclude: set[str] = frozenset()) -> str | None:
         if self._rng.random() >= _GOLDEN_ODDS:
             return None
-        golden_pool = self._golden_names - exclude
+        exclude_upper = {e.upper() for e in exclude}
+        golden_pool = [n for n in self._golden_names if n.upper() not in exclude_upper]
         if not golden_pool:
             return None
-        return sorted(golden_pool)[0]
+        return sorted(golden_pool)[0].upper()
 
 
 class PostgresPlayerNameRepository:
@@ -105,7 +122,7 @@ class PostgresPlayerNameRepository:
     async def is_valid_name(self, name: str) -> bool:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("select 1 from player_name_seeds where name = %s", (name,))
+                await cur.execute("select 1 from player_name_seeds where upper(name) = upper(%s)", (name,))
                 return await cur.fetchone() is not None
 
     async def mark_name_used(self, name: str) -> None:
@@ -117,18 +134,19 @@ class PostgresPlayerNameRepository:
         # it never leaves a game/player row orphaned or missing.
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("update player_name_seeds set usage_count = usage_count + 1 where name = %s", (name,))
+                await cur.execute("update player_name_seeds set usage_count = usage_count + 1 where upper(name) = upper(%s)", (name,))
 
     async def offer_name(self, *, exclude: set[str] = frozenset()) -> str:
         name = await self._draw(is_golden=False, exclude=exclude)
         if name is None:
             raise NoAvailableNameError("no eligible names left to offer")
-        return name
+        return name.upper()
 
     async def roll_golden_name(self, *, exclude: set[str] = frozenset()) -> str | None:
         if self._rng.random() >= _GOLDEN_ODDS:
             return None
-        return await self._draw(is_golden=True, exclude=exclude)
+        name = await self._draw(is_golden=True, exclude=exclude)
+        return name.upper() if name is not None else None
 
     async def _draw(self, *, is_golden: bool, exclude: set[str]) -> str | None:
         # is_active = true -- deliberately not checked in is_valid_name(),
@@ -140,20 +158,24 @@ class PostgresPlayerNameRepository:
         # names ordered by usage_count (random tiebreak among equal
         # counts), then pick uniformly at random from just that narrowed
         # set -- biases toward under-used names without making the pick
-        # deterministic.
+        # deterministic. upper(name) = any(%s) against an already
+        # -uppercased exclude list -- exclude is built from live
+        # display_names (already-standardized upper) mixed with a reroll's
+        # own already-offered (also upper) name, so the catalog's own
+        # original-case names need the same fold to actually match.
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
                     with candidates as (
                         select name from player_name_seeds
-                        where is_golden = %s and is_active = true and not (name = any(%s))
+                        where is_golden = %s and is_active = true and not (upper(name) = any(%s))
                         order by usage_count asc, random()
                         limit %s
                     )
                     select name from candidates order by random() limit 1
                     """,
-                    (is_golden, list(exclude), _LEAST_USED_POOL_SIZE),
+                    (is_golden, [e.upper() for e in exclude], _LEAST_USED_POOL_SIZE),
                 )
                 row = await cur.fetchone()
                 return row[0] if row else None

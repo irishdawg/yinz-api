@@ -1488,23 +1488,28 @@ function OpenProposals({
             (pool) => pool.base_proposal_id === p.proposal_id && (pool.status === "open" || lingeringById.has(pool.pool_id)),
           );
           return (
-            <li
-              key={p.proposal_id}
-              // Visualize used to be a separate button players had to
-              // remember to press every time, then just hovering/tapping the
-              // swap text -- now the whole row triggers it, since a player's
-              // cursor lands anywhere on the row while reading it, not just
-              // on the text itself. Not wired up at all once resolved --
-              // nothing left to evaluate.
-              onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-              onMouseLeave={lingering ? undefined : onClearVisualize}
-              onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-              title={lingering ? undefined : "Hover or tap to visualize"}
-              className={`relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0 ${
-                lingering ? "" : "cursor-pointer hover:bg-zinc-50"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
+            <li key={p.proposal_id} className="relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
+              {/* Visualize used to be a separate button players had to
+                  remember to press every time, then hovering/tapping the whole
+                  row -- but mouseenter only fires once per continuous hover
+                  session, so once a pool exists (a *nested* <li>, further
+                  down, with its own mouseenter), landing on it and then
+                  moving back onto this header never re-fired this row's own
+                  visualize -- there was no way back to "just the base
+                  proposal" without leaving the card and re-entering exactly
+                  on this line. Wiring the handlers to this header div
+                  specifically (a sibling of the pools list below, not its
+                  ancestor) instead of the outer <li> gives each its own
+                  independent hover boundary, so moving between them always
+                  re-triggers the one you're actually on. Not wired up at all
+                  once resolved -- nothing left to evaluate. */}
+              <div
+                onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                onMouseLeave={lingering ? undefined : onClearVisualize}
+                onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                title={lingering ? undefined : "Hover or tap to visualize"}
+                className={`flex items-center justify-between gap-2 rounded ${lingering ? "" : "cursor-pointer hover:bg-zinc-50"}`}
+              >
                 <span>
                   {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
                   {/* Self-only, proposer-only, anonymous -- the proposer's one
@@ -2035,15 +2040,32 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
               // formula projected_value/the live market view already use.
               // Never a second source of truth: purely a display of a
               // deterministic formula over already-public position/wipe
-              // data, same principle as haircutRisk.ts.
+              // data, same principle as haircutRisk.ts. A doubled/anchor
+              // holding scores this *twice* (compute_final_scores sums one
+              // score per owned holding, and a double is two holdings of
+              // the same entity) -- the card shows the actual total scored,
+              // not just the per-slot value, with the ×N spelled out right
+              // there rather than requiring the reader to notice the
+              // separate ×N badge below and do the multiplication
+              // themselves (real playtest confusion: "2x means 16 points,
+              // not 8").
               const points = isWiped ? 0 : view.market.length - entity.position + 1;
+              const pointsScored = points * Math.max(ownedCount, 1);
               return (
                 <div
                   key={entity.entity_id}
                   className={`flex h-40 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
                 >
-                  <span className={`text-xs ${muted ? "text-zinc-300" : "text-zinc-400"}`}>
-                    #{entity.position} · {points}pt{points === 1 ? "" : "s"}
+                  <span className={`text-xs ${ownedCount > 1 ? "font-bold text-zinc-900" : muted ? "text-zinc-300" : "text-zinc-400"}`}>
+                    {ownedCount > 1 ? (
+                      <>
+                        #{entity.position} · {pointsScored}pts ({points}×{ownedCount})
+                      </>
+                    ) : (
+                      <>
+                        #{entity.position} · {points}pt{points === 1 ? "" : "s"}
+                      </>
+                    )}
                   </span>
                   <span className={`font-mono text-sm font-bold ${muted ? "text-zinc-300" : "text-zinc-900"}`}>{entity.ticker_symbol}</span>
                   <span className={`line-clamp-2 text-xs leading-tight ${muted ? "text-zinc-300" : "text-zinc-600"}`}>{entity.display_name}</span>

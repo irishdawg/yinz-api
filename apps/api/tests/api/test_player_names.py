@@ -5,6 +5,12 @@ see routes.py's _resolve_submitted_name. Uses an explicit `allowed_names`
 set via conftest.make_client() rather than the default permissive fake,
 since this is specifically what's under test here.
 
+Every returned/stored display_name is uppercased -- name case is
+standardized to upper across the board, catalog and typed alike -- so
+every assertion in this file expects the upper form even though the
+fixture data (`allowed_names`, `golden_names`) itself stays in mixed case
+matching a real curated catalog's own style.
+
 Golden names: rolled once, server-side, at the moment a real seat is
 created (create_game's host, join_game's joiner) -- never by the free
 -preview offer/reroll endpoints, and never for a typed name. See
@@ -44,7 +50,7 @@ def test_create_game_accepts_a_typed_name_outside_the_seed_pool():
     game_id = response.json()["game_id"]
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
-    assert view["players"][0]["display_name"] == "MyRealName"
+    assert view["players"][0]["display_name"] == "MYREALNAME"
     assert view["players"][0]["is_golden_name"] is False
 
 
@@ -69,7 +75,7 @@ def test_create_game_trims_whitespace_from_a_typed_name():
     game_id = response.json()["game_id"]
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
-    assert view["players"][0]["display_name"] == "Kimberly"
+    assert view["players"][0]["display_name"] == "KIMBERLY"
 
 
 def test_create_game_with_forced_golden_rng_never_overrides_a_typed_name():
@@ -82,7 +88,7 @@ def test_create_game_with_forced_golden_rng_never_overrides_a_typed_name():
     game_id = response.json()["game_id"]
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
-    assert view["players"][0]["display_name"] == "Jeremy"
+    assert view["players"][0]["display_name"] == "JEREMY"
     assert view["players"][0]["is_golden_name"] is False
 
 
@@ -102,7 +108,7 @@ def test_join_game_accepts_a_typed_name_outside_the_seed_pool():
 
     view = client.get(f"/games/{created.json()['game_id']}", headers=_auth("auth-tedy")).json()
     joiner = next(p for p in view["players"] if p["game_player_id"] == response.json()["game_player_id"])
-    assert joiner["display_name"] == "NotInThePool"
+    assert joiner["display_name"] == "NOTINTHEPOOL"
     assert joiner["is_golden_name"] is False
 
 
@@ -150,7 +156,7 @@ def test_join_game_with_forced_golden_rng_never_overrides_a_typed_name():
 
     view = client.get(f"/games/{created.json()['game_id']}", headers=_auth("auth-tedy")).json()
     joiner = next(p for p in view["players"] if p["game_player_id"] == response.json()["game_player_id"])
-    assert joiner["display_name"] == "Kimberly"
+    assert joiner["display_name"] == "KIMBERLY"
     assert joiner["is_golden_name"] is False
 
 
@@ -180,7 +186,7 @@ def test_existing_tests_arbitrary_names_still_work_with_default_permissive_pool(
 
 async def test_roll_golden_name_returns_golden_on_a_forced_hit():
     repo = InMemoryPlayerNameRepository({"Sly Fox", "Golden One"}, golden_names={"Golden One"}, rng=_ALWAYS_GOLDEN)
-    assert await repo.roll_golden_name() == "Golden One"
+    assert await repo.roll_golden_name() == "GOLDEN ONE"
 
 
 async def test_roll_golden_name_returns_none_on_a_forced_miss():
@@ -208,7 +214,7 @@ async def test_offer_name_is_never_golden_even_with_a_forced_hit_rng():
 async def test_offer_name_never_returns_an_excluded_name():
     repo = InMemoryPlayerNameRepository({"Sly Fox", "Clever Badger"})
     name = await repo.offer_name(exclude={"Sly Fox"})
-    assert name == "Clever Badger"
+    assert name == "CLEVER BADGER"
 
 
 async def test_offer_name_raises_when_pool_is_exhausted():
@@ -227,21 +233,33 @@ def test_offer_initial_name_endpoint_returns_a_name():
     client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
     response = client.get("/player-names/initial", headers=_auth("auth-tedy"))
     assert response.status_code == 200
-    assert response.json()["name"] in {"Sly Fox", "Clever Badger"}
+    assert response.json()["name"] in {"SLY FOX", "CLEVER BADGER"}
 
 
 def test_offer_initial_name_endpoint_is_never_golden_even_with_a_forced_hit_rng():
     client = make_client(allowed_names={"Sly Fox", "Golden One"}, golden_names={"Golden One"}, rng=_ALWAYS_GOLDEN)
     response = client.get("/player-names/initial", headers=_auth("auth-tedy"))
     assert response.status_code == 200
-    assert response.json() == {"name": "Sly Fox"}
+    assert response.json() == {"name": "SLY FOX"}
 
 
 def test_offer_reroll_endpoint_excludes_the_given_name():
+    # exclude sent in the same upper case a real frontend would echo back
+    # (whatever the previous offer already returned).
     client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
-    response = client.get("/player-names/reroll", params={"exclude": "Sly Fox"}, headers=_auth("auth-tedy"))
+    response = client.get("/player-names/reroll", params={"exclude": "SLY FOX"}, headers=_auth("auth-tedy"))
     assert response.status_code == 200
-    assert response.json() == {"name": "Clever Badger"}
+    assert response.json() == {"name": "CLEVER BADGER"}
+
+
+def test_offer_reroll_endpoint_excludes_case_insensitively():
+    # A reroll's own exclude param is matched against the catalog's
+    # original curated case -- must still exclude correctly regardless of
+    # what case it arrives in.
+    client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
+    response = client.get("/player-names/reroll", params={"exclude": "sly fox"}, headers=_auth("auth-tedy"))
+    assert response.status_code == 200
+    assert response.json() == {"name": "CLEVER BADGER"}
 
 
 def test_offer_endpoints_exclude_names_already_in_the_target_game():
@@ -251,9 +269,12 @@ def test_offer_endpoints_exclude_names_already_in_the_target_game():
 
     # A second player opening the join page: the initial offer must never
     # be the name the host already has, even without an explicit exclude.
+    # The host's own stored name is now "SLY FOX" (uppercased at
+    # create_game) -- this also proves the exclusion still matches it
+    # against the catalog's own "Sly Fox" row case-insensitively.
     response = client.get("/player-names/initial", params={"join_code": join_code}, headers=_auth("auth-mortia"))
     assert response.status_code == 200
-    assert response.json()["name"] == "Clever Badger"
+    assert response.json()["name"] == "CLEVER BADGER"
 
 
 # --- golden rolls at actual seating: through the API ---
@@ -267,7 +288,7 @@ def test_create_game_with_forced_golden_rng_seats_a_golden_host():
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
     host = view["players"][0]
-    assert host["display_name"] == "Dave"
+    assert host["display_name"] == "DAVE"
     assert host["is_golden_name"] is True
 
 
@@ -278,7 +299,7 @@ def test_create_game_with_forced_miss_rng_keeps_the_previewed_name():
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
     host = view["players"][0]
-    assert host["display_name"] == "Sly Fox"
+    assert host["display_name"] == "SLY FOX"
     assert host["is_golden_name"] is False
 
 
@@ -299,5 +320,5 @@ def test_join_game_with_forced_golden_rng_seats_a_golden_joiner():
 
     view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
     joiner = next(p for p in view["players"] if p["game_player_id"] == joined.json()["game_player_id"])
-    assert joiner["display_name"] == "Zara"
+    assert joiner["display_name"] == "ZARA"
     assert joiner["is_golden_name"] is True

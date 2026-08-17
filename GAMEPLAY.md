@@ -233,13 +233,26 @@ better position if swapped.
 - **One open bare proposal per player** (a hard cap — a second `PROPOSE_SWAP`
   while one is still `OPEN` is rejected). Pools are **not** further capped
   beyond the existing "one open pool per player per base proposal" rule.
-- **Reserve actions locked while an authored negotiation is open**:
-  `PICK_UP_RESERVE` and `BURN_RESERVE_FOR_SWAP` both reject if the actor
-  currently authors any `OPEN` proposal or pool (`_has_open_authored_negotiation`)
-  — protects a locked liability from being invalidated by a holdings change
-  mid-negotiation. Merely *accepting* someone else's proposal/pool does
-  **not** block reserve actions afterward (that liability already settled
-  synchronously).
+- **No two open bare proposals for the same pair, across players**:
+  `PROPOSE_SWAP` also rejects if *any* player already has an `OPEN`
+  proposal naming the same two entities (order-independent), not just a
+  check against the actor's own proposals. Accepting either one would
+  already void the other via the ordinary crossing-invalidation scan the
+  instant the first swap lands (§6), so a duplicate never offered a
+  meaningfully different outcome — just a confusing, easy-to-misread
+  second entry in the open-proposals list. This check is pair-scoped only;
+  Pools and `BURN_RESERVE_FOR_SWAP` are unaffected — targeting a pair that
+  already has an open bare proposal is still legal for those.
+- **Reserve actions are not blocked by an open proposal/pool of your own.**
+  `PICK_UP_RESERVE` and `BURN_RESERVE_FOR_SWAP` are both legal even while
+  you currently author an `OPEN` proposal or pool — a locked liability is
+  immune to a later holdings change by construction (it's computed once,
+  at authoring time, and never recomputed), and a later swap crossing your
+  own open negotiation's locked direction already voids it loudly via the
+  ordinary crossing-invalidation scan (§6) regardless of who caused the
+  crossing. An earlier version of this game blocked reserve actions in
+  this state defensively; removed once both of those existing mechanisms
+  were confirmed to already cover the actual risk independently.
 - A self-only, server-authoritative preview is available at
   `GET /games/{id}/propose-cost?entity_a=&entity_b=` — the frontend never
   reimplements this rule.

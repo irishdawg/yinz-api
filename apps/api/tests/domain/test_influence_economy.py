@@ -40,6 +40,33 @@ def test_one_open_bare_proposal_per_player():
         _propose(game, tedy, other[0], other[1])
 
 
+def test_a_second_proposal_for_the_same_pair_from_another_player_is_rejected():
+    game = make_started_game(2)
+    tedy, mortia = [p.game_player_id for p in game.players]
+    a, b = find_swap_pair(game, tedy, owned_should_rise=False)
+    _propose(game, tedy, a, b)
+
+    with pytest.raises(IllegalCommandError):
+        _propose(game, mortia, a, b)
+    # Order-independent -- the same pair named the other way round is still a duplicate.
+    with pytest.raises(IllegalCommandError):
+        _propose(game, mortia, b, a)
+
+
+def test_a_second_proposal_for_the_same_pair_is_legal_once_the_first_resolves():
+    game = make_started_game(2)
+    tedy, mortia = [p.game_player_id for p in game.players]
+    a, b = find_swap_pair(game, tedy, owned_should_rise=False)
+    _propose(game, tedy, a, b)
+    proposal_id = next(iter(game.proposals))
+    engine.handle_command(
+        game, command_type="WITHDRAW_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )
+
+    _propose(game, mortia, a, b)  # must not raise
+    assert len(game.proposals) == 2
+
+
 def test_a_second_proposal_is_legal_once_the_first_resolves():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id
@@ -91,24 +118,32 @@ def test_withdraw_pool_refunds_committed_liability():
 
 
 # --------------------------------------------------------------------------
-# Reserve actions locked while an authored negotiation is open
+# Reserve actions are never blocked by an open proposal/pool of your own --
+# a locked liability is immune to a later holdings change by construction
+# (computed once at authoring time, never recomputed), and a later swap
+# crossing your own open negotiation's locked direction already voids it
+# loudly via the ordinary crossing-invalidation scan regardless of who
+# caused the crossing. An earlier version of this game blocked reserve
+# actions in this state defensively (see GAMEPLAY.md); removed once both
+# of those existing mechanisms were confirmed to already cover the actual
+# risk independently -- these tests now lock in the *relaxed* behavior.
 # --------------------------------------------------------------------------
 
 
-def test_pick_up_reserve_blocked_while_an_authored_proposal_is_open():
+def test_pick_up_reserve_allowed_while_an_authored_proposal_is_open():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id
     a, b = find_swap_pair(game, tedy, owned_should_rise=False)
     _propose(game, tedy, a, b)
 
     reserve = _reserve_of(game, tedy)
-    with pytest.raises(IllegalCommandError):
-        engine.handle_command(
-            game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
-        )
+    engine.handle_command(
+        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    )  # must not raise
+    assert game.player_by_id(tedy).pending_pickup is not None
 
 
-def test_burn_reserve_blocked_while_an_authored_pool_is_open():
+def test_burn_reserve_allowed_while_an_authored_pool_is_open():
     game = make_started_game(2)
     tedy, mortia = [p.game_player_id for p in game.players]
     base_a, base_b = find_swap_pair(game, tedy, owned_should_rise=False)
@@ -125,32 +160,15 @@ def test_burn_reserve_blocked_while_an_authored_pool_is_open():
     )
 
     reserve = _reserve_of(game, mortia)
-    with pytest.raises(IllegalCommandError):
-        engine.handle_command(
-            game,
-            command_type="BURN_RESERVE_FOR_SWAP",
-            payload={"reserve_holding_id": reserve.holding_id, "entity_a": base_a, "entity_b": base_b},
-            actor_game_player_id=mortia,
-            expected_version=None,
-            now=now(),
-        )
-
-
-def test_reserve_actions_allowed_again_once_the_authored_negotiation_resolves():
-    game = make_started_game(2)
-    tedy = game.players[0].game_player_id
-    a, b = find_swap_pair(game, tedy, owned_should_rise=False)
-    _propose(game, tedy, a, b)
-    proposal_id = next(iter(game.proposals))
-    engine.handle_command(
-        game, command_type="WITHDRAW_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=tedy, expected_version=None, now=now()
-    )
-
-    reserve = _reserve_of(game, tedy)
-    engine.handle_command(
-        game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=tedy, expected_version=None, now=now()
+    events = engine.handle_command(
+        game,
+        command_type="BURN_RESERVE_FOR_SWAP",
+        payload={"reserve_holding_id": reserve.holding_id, "entity_a": base_a, "entity_b": base_b},
+        actor_game_player_id=mortia,
+        expected_version=None,
+        now=now(),
     )  # must not raise
-    assert game.player_by_id(tedy).pending_pickup is not None
+    assert any(e.type.value == "SWAP_EXECUTED" for e in events)
 
 
 def test_accepting_someone_elses_proposal_does_not_block_reserve_actions():
@@ -167,7 +185,7 @@ def test_accepting_someone_elses_proposal_does_not_block_reserve_actions():
     reserve = _reserve_of(game, mortia)
     engine.handle_command(
         game, command_type="PICK_UP_RESERVE", payload={"reserve_holding_id": reserve.holding_id}, actor_game_player_id=mortia, expected_version=None, now=now()
-    )  # must not raise -- accepting settles synchronously, nothing left locked open
+    )  # must not raise
 
 
 # --------------------------------------------------------------------------
