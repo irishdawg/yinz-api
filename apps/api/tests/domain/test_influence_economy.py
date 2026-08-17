@@ -56,6 +56,41 @@ def test_a_second_proposal_is_legal_once_the_first_resolves():
 
 
 # --------------------------------------------------------------------------
+# WITHDRAW_POOL settlement -- must refund like WITHDRAW_PROPOSAL, not spend
+# (a self-withdrawn pool was previously charged instead of refunded; no
+# non-execution resolution reason elsewhere in the engine spends).
+# --------------------------------------------------------------------------
+
+
+def test_withdraw_pool_refunds_committed_liability():
+    game = make_started_game(2)
+    tedy, mortia = [p.game_player_id for p in game.players]
+    base_a, base_b = find_swap_pair(game, tedy, owned_should_rise=False)
+    _propose(game, tedy, base_a, base_b)
+    proposal_id = next(iter(game.proposals))
+    pool_c, pool_d = find_swap_pair(game, mortia, owned_should_rise=True, exclude=frozenset({base_a, base_b}))
+    before = game.player_by_id(mortia).influence_available
+    engine.handle_command(
+        game,
+        command_type="CREATE_POOL",
+        payload={"proposal_id": proposal_id, "entity_c": pool_c, "entity_d": pool_d, "visibility": "private"},
+        actor_game_player_id=mortia,
+        expected_version=None,
+        now=now(),
+    )
+    pool_id = next(iter(game.pools))
+    assert game.player_by_id(mortia).influence_committed == 1
+
+    engine.handle_command(game, command_type="WITHDRAW_POOL", payload={"pool_id": pool_id}, actor_game_player_id=mortia, expected_version=None, now=now())
+
+    mortia_player = game.player_by_id(mortia)
+    assert mortia_player.influence_spent == 0
+    assert mortia_player.influence_committed == 0
+    assert mortia_player.influence_available == before
+    assert game.pools[pool_id].resolution_reason.value == "withdrawn_by_initiator"
+
+
+# --------------------------------------------------------------------------
 # Reserve actions locked while an authored negotiation is open
 # --------------------------------------------------------------------------
 

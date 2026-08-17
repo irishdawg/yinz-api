@@ -827,7 +827,7 @@ def _handle_withdraw_pool(game: Game, *, payload: dict, actor_game_player_id: st
     pool = _require_open_pool(game, payload["pool_id"])
     if pool.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the pool's initiator can withdraw it")
-    return [_resolve_pool(game, pool, PoolResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now, spend=True)]
+    return [_resolve_pool(game, pool, PoolResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now, spend=False)]
 
 
 def _handle_make_pool_public(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:

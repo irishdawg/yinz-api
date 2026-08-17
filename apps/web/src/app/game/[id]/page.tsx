@@ -278,6 +278,23 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const basePoolingProposal = poolingProposalId ? view.proposals.find((p) => p.proposal_id === poolingProposalId) : undefined;
   const poolGuardrailEntities = new Set(basePoolingProposal ? [basePoolingProposal.entity_a, basePoolingProposal.entity_b] : []);
 
+  // The base proposal can resolve (someone else accepts/withdraws it, or it
+  // voids on a market swing) at any moment while a player is still mid-Pool
+  // composition against it -- their own poll picks that up on the very next
+  // tick. Without this, the composer stays open against a proposal that no
+  // longer exists, and CREATE_POOL just fails server-side with a generic
+  // error instead of the UI recognizing its own reason for being is gone.
+  useEffect(() => {
+    if (poolingProposalId && (!basePoolingProposal || basePoolingProposal.status !== "open")) {
+      // Syncing local composer state with the external system (the
+      // server's polled game state), not deriving it from props -- same
+      // carve-out/precedent as ShareLinkButton's effect below.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelected([]);
+      setPoolingProposalId(null);
+    }
+  }, [poolingProposalId, basePoolingProposal]);
+
   function toggleSelect(entityId: string) {
     if (poolGuardrailEntities.has(entityId)) return;
     setProposeError(null);
@@ -1202,7 +1219,11 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     const proposal = view.proposals.find((p) => p.proposal_id === event.payload.proposal_id);
     const swap = proposal ? `${entityLabel(proposal.entity_a, view)} ↔ ${entityLabel(proposal.entity_b, view)}` : "A proposal";
     const reason = event.payload.reason as string;
-    if (reason === "executed") return { text: `${swap} — accepted`, tone: "success" };
+    if (reason === "executed") {
+      const proposer = playerLabel(proposal?.proposer_id ?? null, view);
+      const accepter = playerLabel(event.actor_game_player_id, view);
+      return { text: `${swap} — ${proposer} proposed, ${accepter} accepted`, tone: "success" };
+    }
     if (reason === "withdrawn_by_initiator") return { text: `${swap} — withdrawn`, tone: "muted" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
     // Deliberately loud, never masked (the opposite of Pass) -- the
@@ -1223,7 +1244,11 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     const pool = view.pools.find((p) => p.pool_id === event.payload.pool_id);
     const swap = pool?.entity_c && pool?.entity_d ? `${entityLabel(pool.entity_c, view)} ↔ ${entityLabel(pool.entity_d, view)}` : "A pool";
     const reason = event.payload.reason as string;
-    if (reason === "executed") return { text: `${swap} — pool executed`, tone: "success" };
+    if (reason === "executed") {
+      const initiator = playerLabel(pool?.initiator_id ?? null, view);
+      const accepter = playerLabel(event.actor_game_player_id, view);
+      return { text: `${swap} — ${initiator} pooled, ${accepter} accepted`, tone: "success" };
+    }
     if (reason === "withdrawn_by_initiator") return { text: `${swap} — pool withdrawn`, tone: "muted" };
     if (reason === "declined_by_target") return { text: `${swap} — pool declined`, tone: "muted" };
     if (reason === "base_proposal_withdrawn") return { text: `${swap} — base proposal was withdrawn`, tone: "muted" };

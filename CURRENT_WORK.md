@@ -13,28 +13,6 @@ don't let this file accumulate stale "already done" entries.
 
 ---
 
-## Flagged as an inconsistency during this documentation pass — needs a decision
-
-**`WITHDRAW_POOL` charges Influence; `WITHDRAW_PROPOSAL` refunds it.**
-Verified by direct code reading (twice, independently), not assumed:
-- `engine._handle_withdraw_proposal` → `_resolve_proposal(..., WITHDRAWN_BY_INITIATOR, ...)`. `_resolve_proposal`'s settlement rule refunds `committed → available` for *any* reason other than `EXECUTED` — so a proposer withdrawing their own bare proposal always gets their committed Influence back.
-- `engine._handle_withdraw_pool` → `_resolve_pool(..., WITHDRAWN_BY_INITIATOR, ..., spend=True)`. Unlike `_resolve_proposal`, `_resolve_pool` takes an explicit `spend: bool` rather than deriving it from the reason — and `WITHDRAW_POOL`'s call site passes `spend=True`, meaning a pool initiator withdrawing their own pool has committed Influence converted to **spent**, not refunded.
-
-Every other genuinely asymmetric rule in this codebase (Pass's masking,
-elite vs. basement scoring weight, `VOIDED_MARKET_SWUNG` being loud where
-`EXPIRED_ALL_PASSED` is masked, etc.) has an explicit comment justifying
-the asymmetry. This one doesn't, and no test locks in `WITHDRAW_POOL`'s
-Influence outcome specifically (checked `test_influence.py`,
-`test_influence_economy.py` — neither asserts on `influence_spent`/
-`influence_available` after a self-withdrawn pool). This reads more like
-an accidental inconsistency than a deliberate design choice, but it's
-current, shipped behavior — don't silently "fix" it without asking. If
-it's confirmed unintentional, the likely fix is changing that one
-`spend=True` to `spend=False` in `_handle_withdraw_pool` (`engine.py`) plus
-a regression test.
-
----
-
 ## Explicitly deferred / undecided in code comments (not this session's finding — pre-existing)
 
 - **`CloseReason.OPTIONALITY_EXHAUSTED`** — a third close-reason value is

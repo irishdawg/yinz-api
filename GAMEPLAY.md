@@ -303,18 +303,12 @@ At most one open pool per player per base proposal.
 - **`DECLINE_POOL`**: private pools only, base-proposer-only. Resolves
   `DECLINED_BY_TARGET`.
 - **`WITHDRAW_POOL`**: the pool's own initiator only. Resolves
-  `WITHDRAWN_BY_INITIATOR`. **Note the Influence asymmetry with
-  `WITHDRAW_PROPOSAL`**: a proposer withdrawing their own bare proposal
-  always refunds committed Influence to available (`_resolve_proposal`
-  refunds on any non-`EXECUTED` reason). A pool initiator withdrawing their
-  own pool is charged instead (`_resolve_pool(..., WITHDRAWN_BY_INITIATOR,
-  ..., spend=True)`) — committed Influence converts to *spent*, not
-  refunded. This is current, verified behavior (two independent direct
-  reads of `_handle_withdraw_pool`), not a guess — but it has no
-  explanatory comment and no test locking it in, unlike nearly every other
-  deliberate asymmetry in this codebase. See `CURRENT_WORK.md`: flagged as
-  possibly unintentional, needs a human decision on whether it's
-  intentional design or a bug.
+  `WITHDRAWN_BY_INITIATOR`, refunding committed Influence to available —
+  same rule as `WITHDRAW_PROPOSAL` (`_resolve_pool(...,
+  WITHDRAWN_BY_INITIATOR, ..., spend=False)`). An earlier version of this
+  charged the withdrawer instead (`spend=True`); confirmed unintentional
+  and fixed — see `test_withdraw_pool_refunds_committed_liability` in
+  `test_influence_economy.py`.
 - **`MAKE_POOL_PUBLIC`**: the pool's own initiator only, private → public,
   one-way.
 - **Private-pool-reveal-on-execution**: a private pool's contents
