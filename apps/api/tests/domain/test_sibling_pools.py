@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from gotiate.domain import engine
 from gotiate.domain.entities import HoldingZone
-from tests.conftest import find_swap_pair, make_started_game, now
+from tests.conftest import find_swap_pair, later, make_started_game, now
 
 
 def _owns(game, player_id, entity_id):
@@ -74,7 +74,7 @@ def test_sibling_pool_preempted_by_other_player_is_refunded():
 
     # Josiah accepts Hanky's public pool — Mortia had no say in it.
     engine.handle_command(
-        game, command_type="ACCEPT_POOL", payload={"pool_id": hanky_pool_id}, actor_game_player_id=josiah, expected_version=None, now=now()
+        game, command_type="ACCEPT_POOL", payload={"pool_id": hanky_pool_id}, actor_game_player_id=josiah, expected_version=None, now=later()
     )
 
     mortia_pool = next(p for p in game.pools.values() if p.swap.initiator_player_id == mortia)
@@ -99,7 +99,7 @@ def test_sibling_pool_invalidated_by_own_initiator_action_is_spent():
     # Mortia herself accepts Hanky's competing public pool — her own choice
     # abandons her own pool, which is economically a self-withdrawal.
     engine.handle_command(
-        game, command_type="ACCEPT_POOL", payload={"pool_id": hanky_pool_id}, actor_game_player_id=mortia, expected_version=None, now=now()
+        game, command_type="ACCEPT_POOL", payload={"pool_id": hanky_pool_id}, actor_game_player_id=mortia, expected_version=None, now=later()
     )
 
     mortia_pool = next(p for p in game.pools.values() if p.swap.initiator_player_id == mortia)
@@ -120,7 +120,7 @@ def test_accepting_base_proposal_directly_preempts_sibling_pools():
 
     # Josiah just accepts Tedy's bare proposal, bypassing both pools entirely.
     engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=josiah, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=josiah, expected_version=None, now=later()
     )
 
     for player_id in (mortia, hanky):

@@ -6,6 +6,7 @@ caller (api/routes.py) derives it from the verified JWT and game.phase."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from typing import Iterable
 
@@ -262,6 +263,9 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.GAME_SCORED: EventVisibility.PUBLIC,
     EventType.GAME_ENDED: EventVisibility.PUBLIC,
     EventType.GAME_CANCELLED: EventVisibility.PUBLIC,
+    # Applies identically to every player -- nothing per-player to redact,
+    # same reasoning as MARKET_CLOSED.
+    EventType.INFLUENCE_TOPPED_UP: EventVisibility.PUBLIC,
 }
 
 _POOL_CONTENT_KEYS = frozenset({"entity_c", "entity_d"})
@@ -470,6 +474,13 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         "proposer_id": proposal.swap.initiator_player_id,
         "status": proposal.status.value,
         "resolution_reason": _public_resolution_reason(proposal.resolution_reason, audience),
+        # Raw timestamp, not a precomputed countdown -- same pattern as
+        # haircut_reveal_at/decision_deadline_at, the client derives its own
+        # display. Public and unconditional: every viewer needs it to know
+        # whether Accept is still locked, not just the proposer. Also what
+        # a public pool's own accept-lock is gated to -- see
+        # engine._require_accept_unlocked.
+        "accept_locked_until": proposal.created_at + timedelta(seconds=game.config.accept_lock_seconds),
     }
     if isinstance(audience, PlayerAudience):
         if audience.game_player_id == proposal.swap.initiator_player_id:

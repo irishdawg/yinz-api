@@ -166,6 +166,17 @@ def handle_command(
     if new_events:
         game.version += 1
     events += new_events
+
+    # Checked after every command, not just Influence-spending ones -- cheap
+    # (a plain scan of the roster) and this is the one chokepoint every
+    # command already passes through. Only spending can ever newly zero
+    # everyone out, so this is a no-op the vast majority of the time.
+    if game.phase == GamePhase.NEGOTIATION:
+        topup_events = _maybe_topup_zero_influence(game, now)
+        if topup_events:
+            game.version += 1
+        events += topup_events
+
     return events
 
 
@@ -469,6 +480,36 @@ def _liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> 
     return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
 
 
+def _maybe_topup_zero_influence(game: Game, now: datetime) -> list[GameEvent]:
+    """Flat +zero_influence_topup_amount to every seated player's
+    influence_available, the instant all of them hit 0 at once -- without
+    this, a fully-spent table has no way to originate a new proposal/pool
+    ever again (accepting stays free regardless, see
+    _handle_accept_proposal/_handle_accept_pool), which stalls the
+    negotiation dead rather than just slowing it down. Fires again the next
+    time everyone's back at 0 -- no cooldown, no cap; going fully broke as a
+    table is meant to be a recurring texture of a long game, not a one-time
+    event."""
+    if not game.players or any(p.influence_available > 0 for p in game.players):
+        return []
+    amount = game.config.zero_influence_topup_amount
+    for player in game.players:
+        player.influence_available += amount
+    return [_emit(game, now, EventType.INFLUENCE_TOPPED_UP, actor=None, payload={"amount": amount})]
+
+
+def _require_accept_unlocked(game: Game, base_proposal: Proposal, now: datetime) -> None:
+    """Blocks only ACCEPT_PROPOSAL and ACCEPT_POOL-on-a-public-pool, for
+    accept_lock_seconds after the *base proposal's* own PROPOSAL_CREATED --
+    gives the room a moment to read a new proposal before it's snap
+    -accepted. Nothing else this proposal touches is gated by it (create
+    -pool, withdraw, pass, private-pool-accept all still work immediately);
+    see _handle_accept_pool's own private-pool exemption at the call site."""
+    unlocked_at = base_proposal.created_at + timedelta(seconds=game.config.accept_lock_seconds)
+    if now < unlocked_at:
+        raise IllegalCommandError("give the room a moment to read this before accepting")
+
+
 # --------------------------------------------------------------------------
 # The Agency Principle, written once (§01, §04)
 # --------------------------------------------------------------------------
@@ -606,10 +647,16 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
     if entity_a == entity_b:
         raise IllegalCommandError("a proposal must name two different entities")
     _require_entities_exist(game, entity_a, entity_b)
-    if any(
-        p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == actor_game_player_id for p in game.proposals.values()
-    ):
-        raise IllegalCommandError("you already have an open proposal")
+    # Auto-withdraw, not block -- proposing a new one is a clear enough
+    # signal of intent that forcing an explicit Withdraw first was just
+    # friction (real playtest feedback). Found here but not yet acted on:
+    # every check below must pass first, so a rejected new proposal never
+    # costs the player their still-open old one. Excluded from the
+    # duplicate-pair scan below since it's about to stop existing.
+    existing = next(
+        (p for p in game.proposals.values() if p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == actor_game_player_id),
+        None,
+    )
     # Cross-player, not just your own -- two open proposals about the exact
     # same pair is confusing to watch (real playtest feedback), not useful:
     # accepting either one already voids the other via the ordinary
@@ -618,7 +665,10 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
     # meaningfully different outcome, just a redundant, easy-to-misread
     # duplicate entry in the open-proposals list.
     if any(
-        p.status == ResolutionStatus.OPEN and {p.swap.entity_a, p.swap.entity_b} == {entity_a, entity_b} for p in game.proposals.values()
+        p.status == ResolutionStatus.OPEN
+        and p.proposal_id != (existing.proposal_id if existing else None)
+        and {p.swap.entity_a, p.swap.entity_b} == {entity_a, entity_b}
+        for p in game.proposals.values()
     ):
         raise IllegalCommandError("a proposal for this pair is already open")
 
@@ -635,6 +685,19 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
         player.influence_available -= 1
         player.influence_committed += 1
 
+    # Every check above has passed -- now safe to actually withdraw the old
+    # proposal (same cascade WITHDRAW_PROPOSAL itself triggers: any of the
+    # player's own open Pools on it resolve alongside it) and create the new
+    # one, with nothing left that could raise partway through.
+    events: list[GameEvent] = []
+    if existing is not None:
+        events.append(_resolve_proposal(game, existing, ProposalResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now))
+        for pool in list(game.pools.values()):
+            if pool.base_proposal_id == existing.proposal_id and pool.status == ResolutionStatus.OPEN:
+                events.append(
+                    _resolve_pool(game, pool, PoolResolutionReason.BASE_PROPOSAL_WITHDRAWN, actor_game_player_id, now, spend=False)
+                )
+
     proposal = Proposal(
         proposal_id=new_id(),
         swap=SwapIntent(
@@ -644,9 +707,10 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
             rising_entity_id=_rising_entity(game, entity_a, entity_b),
         ),
         initiator_influence_liability=liability,
+        created_at=now,
     )
     game.proposals[proposal.proposal_id] = proposal
-    return [
+    events.append(
         _emit(
             game,
             now,
@@ -654,7 +718,8 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
             actor=actor_game_player_id,
             payload={"proposal_id": proposal.proposal_id, "entity_a": entity_a, "entity_b": entity_b},
         )
-    ]
+    )
+    return events
 
 
 def _handle_withdraw_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -721,15 +786,17 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
         raise IllegalCommandError("cannot accept your own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
         raise IllegalCommandError("you passed this proposal and can no longer accept it")
+    _require_accept_unlocked(game, proposal, now)
 
     # The accepter's liability is fresh, evaluated right now against their
     # current holdings, and charged straight away -- no commit interval,
     # since accepting executes synchronously. Entirely independent of the
     # proposer's own already-locked liability, settled separately below.
+    # Zero available Influence never blocks accepting (only originating a
+    # proposal/pool does, above) -- a broke player can still say yes to
+    # someone else's deal, just for free; there's nothing left to charge.
     accepter = game.player_by_id(actor_game_player_id)
-    if _liability_for(game, actor_game_player_id, proposal.swap.entity_a, proposal.swap.entity_b) == 1:
-        if accepter.influence_available < 1:
-            raise IllegalCommandError("no Influence available")
+    if _liability_for(game, actor_game_player_id, proposal.swap.entity_a, proposal.swap.entity_b) == 1 and accepter.influence_available >= 1:
         accepter.influence_available -= 1
         accepter.influence_spent += 1
 
@@ -867,6 +934,13 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         raise IllegalCommandError("only the base proposer may accept a private pool")
     if actor_game_player_id in base.passed_player_ids:
         raise IllegalCommandError("you passed this proposal and can no longer accept a Pool on it")
+    # Private pools are exempt entirely -- the only person who can ever
+    # accept one is the base proposer themselves, already the one person
+    # who's read it by construction, so there's no snap-accept risk to
+    # guard against. A public pool can't go live before the base proposal
+    # it hangs off of does.
+    if pool.visibility is PoolVisibility.PUBLIC:
+        _require_accept_unlocked(game, base, now)
 
     # Accepting a pool affirms BOTH legs at once -- the accepter's total
     # liability is the OR of a base-leg bit and a pool-leg bit, capped at 1
@@ -884,12 +958,13 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     )
     pool_leg_liability = _liability_for(game, actor_game_player_id, pool.swap.entity_a, pool.swap.entity_b)
     already_committed = is_base_author and base.initiator_influence_liability == 1
+    # Same waiver as _handle_accept_proposal: zero available Influence never
+    # blocks accepting, it just means this accept is free.
     if not already_committed and (base_leg_liability == 1 or pool_leg_liability == 1):
         accepter = game.player_by_id(actor_game_player_id)
-        if accepter.influence_available < 1:
-            raise IllegalCommandError("no Influence available")
-        accepter.influence_available -= 1
-        accepter.influence_spent += 1
+        if accepter.influence_available >= 1:
+            accepter.influence_available -= 1
+            accepter.influence_spent += 1
 
     # Same ordering rule as _handle_accept_proposal -- resolve any pending
     # correction as MARKET_RESUMED *before* either leg's _execute_swap

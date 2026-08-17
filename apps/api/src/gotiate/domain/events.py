@@ -52,6 +52,11 @@ class EventType(StrEnum):
     # PROPOSAL_RESOLVED's EXPIRED_ALL_PASSED masking already uses.
     MARKET_CORRECTION_OFFERED = "MARKET_CORRECTION_OFFERED"
     MARKET_CORRECTION_RESOLVED = "MARKET_CORRECTION_RESOLVED"
+    # Fired the instant every seated player's influence_available hits 0 at
+    # once -- see engine._maybe_topup_zero_influence. Payload carries only
+    # {amount}, applied identically to every player; nothing per-player to
+    # redact.
+    INFLUENCE_TOPPED_UP = "INFLUENCE_TOPPED_UP"
 
     # Close & scoring
     UNILATERAL_WINDOW_CLOSED = "UNILATERAL_WINDOW_CLOSED"

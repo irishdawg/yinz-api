@@ -10,7 +10,7 @@ import pytest
 
 from gotiate.domain import engine
 from gotiate.domain.errors import IllegalCommandError
-from tests.conftest import find_swap_pair, make_started_game, now
+from tests.conftest import find_swap_pair, later, make_started_game, now
 
 
 def _reserve_of(game, player_id):
@@ -28,16 +28,65 @@ def _propose(game, actor, a, b):
 # --------------------------------------------------------------------------
 
 
-def test_one_open_bare_proposal_per_player():
+def test_a_second_bare_proposal_auto_withdraws_the_first():
     game = make_started_game(2)
     tedy = game.players[0].game_player_id
     a1, b1 = find_swap_pair(game, tedy, owned_should_rise=False)
     _propose(game, tedy, a1, b1)
+    first_id = next(iter(game.proposals))
 
     # Any other pair -- this test is about the cap, not liability.
     other = [e for e in game.market if e not in (a1, b1)]
+    _propose(game, tedy, other[0], other[1])
+
+    assert game.proposals[first_id].status.value == "resolved"
+    assert game.proposals[first_id].resolution_reason.value == "withdrawn_by_initiator"
+    open_proposals = [p for p in game.proposals.values() if p.status.value == "open"]
+    assert len(open_proposals) == 1
+    assert {open_proposals[0].swap.entity_a, open_proposals[0].swap.entity_b} == {other[0], other[1]}
+
+
+def test_a_second_bare_proposal_auto_withdraws_the_first_and_its_open_pools():
+    game = make_started_game(3)
+    tedy, mortia, _hanky = [p.game_player_id for p in game.players]
+    a1, b1 = find_swap_pair(game, tedy, owned_should_rise=False)
+    _propose(game, tedy, a1, b1)
+    first_id = next(iter(game.proposals))
+    pool_c, pool_d = find_swap_pair(game, mortia, owned_should_rise=False, exclude=frozenset({a1, b1}))
+    engine.handle_command(
+        game,
+        command_type="CREATE_POOL",
+        payload={"proposal_id": first_id, "entity_c": pool_c, "entity_d": pool_d, "visibility": "private"},
+        actor_game_player_id=mortia,
+        expected_version=None,
+        now=now(),
+    )
+    pool_id = next(iter(game.pools))
+
+    other = [e for e in game.market if e not in (a1, b1)]
+    _propose(game, tedy, other[0], other[1])
+
+    assert game.pools[pool_id].status.value == "resolved"
+    assert game.pools[pool_id].resolution_reason.value == "base_proposal_withdrawn"
+
+
+def test_a_new_bare_proposal_rejected_for_other_reasons_leaves_the_old_one_open():
+    game = make_started_game(2)
+    tedy, mortia = [p.game_player_id for p in game.players]
+    a1, b1 = find_swap_pair(game, tedy, owned_should_rise=False)
+    _propose(game, tedy, a1, b1)
+    first_id = next(iter(game.proposals))
+
+    # A different pair, but already open for someone else -- the duplicate
+    # -pair check must still see this proposed pair as taken, and reject
+    # *before* ever touching Tedy's still-open first proposal.
+    a2, b2 = find_swap_pair(game, mortia, owned_should_rise=False, exclude=frozenset({a1, b1}))
+    _propose(game, mortia, a2, b2)
+
     with pytest.raises(IllegalCommandError):
-        _propose(game, tedy, other[0], other[1])
+        _propose(game, tedy, a2, b2)
+
+    assert game.proposals[first_id].status.value == "open"
 
 
 def test_a_second_proposal_for_the_same_pair_from_another_player_is_rejected():
@@ -179,7 +228,7 @@ def test_accepting_someone_elses_proposal_does_not_block_reserve_actions():
     proposal_id = next(iter(game.proposals))
 
     engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=mortia, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=mortia, expected_version=None, now=later()
     )
 
     reserve = _reserve_of(game, mortia)
@@ -303,7 +352,7 @@ def test_public_pool_third_party_accept_owns_neither_is_free():
     before = game.player_by_id(josiah).influence_available
     pool_id = _setup_public_pool_third_party(game, tedy, mortia, josiah, josiah_owns_base=False, josiah_owns_pool=False)
 
-    engine.handle_command(game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=josiah, expected_version=None, now=now())
+    engine.handle_command(game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=josiah, expected_version=None, now=later())
 
     josiah_player = game.player_by_id(josiah)
     assert josiah_player.influence_spent == 0
@@ -317,7 +366,7 @@ def test_public_pool_third_party_accept_owning_either_or_both_caps_at_one(owns_b
     before = game.player_by_id(josiah).influence_available
     pool_id = _setup_public_pool_third_party(game, tedy, mortia, josiah, josiah_owns_base=owns_base, josiah_owns_pool=owns_pool)
 
-    engine.handle_command(game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=josiah, expected_version=None, now=now())
+    engine.handle_command(game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=josiah, expected_version=None, now=later())
 
     josiah_player = game.player_by_id(josiah)
     assert josiah_player.influence_spent == 1

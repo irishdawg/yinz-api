@@ -218,7 +218,12 @@ better position if swapped.
 - **Accepting** (`ACCEPT_PROPOSAL`): the accepter's liability is computed
   fresh, right now, against their *own* current holdings, and charged
   straight `available → spent` — no commit interval, since accepting
-  executes synchronously.
+  executes synchronously. **Zero available Influence never blocks
+  accepting** — only originating (`PROPOSE_SWAP`/`CREATE_POOL`) requires
+  affordability. If the fresh liability is 1 and `available` is already 0,
+  the accept still goes through, just for free (nothing is charged, nothing
+  goes negative). A broke player can always say yes to someone else's deal;
+  there's simply nothing left to charge them.
 - **Accepting a Pool** (`ACCEPT_POOL`) — the one genuinely tricky case: the
   accepter's total liability is the OR of two bits, capped at 1:
   - **base-leg bit**: the base proposal's own *locked* value, but only if
@@ -230,9 +235,37 @@ better position if swapped.
   - If the base-leg liability was *already* committed at propose time, no
     *new* Influence is required even if the pool-leg bit is also 1 — the
     package's max-1 charge is already reserved.
-- **One open bare proposal per player** (a hard cap — a second `PROPOSE_SWAP`
-  while one is still `OPEN` is rejected). Pools are **not** further capped
-  beyond the existing "one open pool per player per base proposal" rule.
+  - Same zero-Influence waiver as a bare proposal: if the combined charge
+    would be 1 and `available` is 0, the accept still executes, free.
+- **One open bare proposal per player, auto-withdrawing** — not a hard cap.
+  A second `PROPOSE_SWAP` while one is still `OPEN` silently withdraws the
+  old one first (`WITHDRAWN_BY_INITIATOR`, same cascade to attached open
+  Pools as an explicit `WITHDRAW_PROPOSAL`) before creating the new one, as
+  long as the new proposal itself is otherwise legal — an illegal new
+  proposal (duplicate pair, unaffordable) leaves the old one untouched, no
+  partial effect. Pools are **not** further capped beyond the existing "one
+  open pool per player per base proposal" rule.
+- **Accept-lock grace period** (`accept_lock_seconds`, default 4s): blocks
+  only `ACCEPT_PROPOSAL`, and `ACCEPT_POOL` on a **public** pool, for this
+  long after the *base proposal's* own `PROPOSAL_CREATED` — gives the room
+  a moment to actually read a new proposal before someone already at the
+  keyboard snap-accepts it. `Proposal.created_at` is what's checked; a
+  public pool created well after its base proposal simply inherits
+  whatever's left of the base's own lock (often already elapsed). Nothing
+  else is gated by it — `WITHDRAW_PROPOSAL`, `PASS_PROPOSAL`, `CREATE_POOL`,
+  and accepting a **private** pool (always the base proposer, the one
+  person structurally guaranteed to have already read it) all work
+  immediately regardless. The unlock timestamp
+  (`Proposal.accept_locked_until` in the projected view) is public and
+  unconditional so every viewer can render the same countdown.
+- **All-zero Influence top-up**: the instant every seated player's
+  `available` hits 0 at the same time, the whole table gets a flat
+  `+zero_influence_topup_amount` (default 2), publicly (`INFLUENCE_TOPPED_UP`,
+  same amount for everyone, nothing per-player to redact). Checked once
+  after every command (`engine._maybe_topup_zero_influence`), not just
+  Influence-spending ones — cheap, and only spending can ever newly zero
+  everyone out. No cooldown, no cap: firing again the next time the table
+  goes fully broke is intended, not a bug.
 - **No two open bare proposals for the same pair, across players**:
   `PROPOSE_SWAP` also rejects if *any* player already has an `OPEN`
   proposal naming the same two entities (order-independent), not just a
@@ -270,12 +303,13 @@ always visible to everyone.
 
 ### ACCEPT_PROPOSAL
 Executes the swap (§6), settles both the proposer's locked liability and
-the accepter's fresh one, resolves the proposal `EXECUTED`, cascades any
-still-`OPEN` pools attached to it (`resolve_sibling_pools` — the pool's own
-author gets `INVALIDATED_BY_INITIATOR_ACTION` if they're the one who just
-accepted directly, everyone else's sibling pool gets
-`PREEMPTED_BY_OTHER_ACTION`). Cannot accept your own proposal, or one you've
-`PASS`'d.
+the accepter's fresh one (free if the accepter is at 0 available — see §4),
+resolves the proposal `EXECUTED`, cascades any still-`OPEN` pools attached
+to it (`resolve_sibling_pools` — the pool's own author gets
+`INVALIDATED_BY_INITIATOR_ACTION` if they're the one who just accepted
+directly, everyone else's sibling pool gets `PREEMPTED_BY_OTHER_ACTION`).
+Cannot accept your own proposal, or one you've `PASS`'d, or one still
+inside its accept-lock grace period (§4).
 
 ### WITHDRAW_PROPOSAL
 Proposer-only. Resolves `WITHDRAWN_BY_INITIATOR` (refunds committed

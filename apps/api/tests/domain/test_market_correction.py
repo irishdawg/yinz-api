@@ -26,7 +26,7 @@ from gotiate.domain import engine
 from gotiate.domain.entities import Holding, HoldingZone, MarketCorrectionResolutionReason, ResolutionStatus
 from gotiate.domain.events import EventType
 from gotiate.domain.projections import PlayerAudience, PublicAudience, ReplayAudience, project, project_events
-from tests.conftest import make_started_game, now
+from tests.conftest import later, make_started_game, now
 
 
 def _set_portfolio(game, player_id: str, entity_ids: list[str]) -> None:
@@ -60,7 +60,7 @@ def _propose(game, actor, entity_a, entity_b):
 
 def _accept_proposal(game, proposal_id, actor):
     return engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=actor, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=actor, expected_version=None, now=later()
     )
 
 

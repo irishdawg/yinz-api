@@ -8,7 +8,7 @@ from __future__ import annotations
 from gotiate.domain import engine
 from gotiate.domain.events import EventType
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project, project_events
-from tests.conftest import make_started_game, now
+from tests.conftest import later, make_started_game, now
 
 
 def _propose_and_pool(game, proposer, pooler, *, visibility="private"):
@@ -83,7 +83,7 @@ def test_preempted_sibling_pool_never_reveals_contents():
 
     # Josiah just accepts the bare base proposal, preempting Mortia's pool.
     engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=josiah, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=josiah, expected_version=None, now=later()
     )
 
     mortia_pool = next(p for p in game.pools.values() if p.pool_id == mortia_pool_id)

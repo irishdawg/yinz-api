@@ -15,7 +15,7 @@ import pytest
 from gotiate.domain import engine
 from gotiate.domain.entities import PoolResolutionReason, ProposalResolutionReason, ResolutionStatus
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
-from tests.conftest import make_started_game, now
+from tests.conftest import later, make_started_game, now
 
 
 def _force_order(game, *entity_ids: str) -> None:
@@ -50,13 +50,13 @@ def _pool(game, actor, proposal_id, entity_c, entity_d, visibility="public"):
 
 def _accept_proposal(game, proposal_id, actor):
     return engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=actor, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=actor, expected_version=None, now=later()
     )
 
 
 def _accept_pool(game, pool_id, actor):
     return engine.handle_command(
-        game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=actor, expected_version=None, now=now()
+        game, command_type="ACCEPT_POOL", payload={"pool_id": pool_id}, actor_game_player_id=actor, expected_version=None, now=later()
     )
 
 

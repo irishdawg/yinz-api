@@ -192,9 +192,9 @@ class PostgresGameRepository:
                     await cur.execute(
                         """
                         insert into proposals (id, game_id, entity_a, entity_b, rising_entity_id, initiator_player_id,
-                                                initiator_influence_liability,
+                                                initiator_influence_liability, created_at,
                                                 status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
@@ -208,6 +208,7 @@ class PostgresGameRepository:
                             proposal.swap.rising_entity_id,
                             proposal.swap.initiator_player_id,
                             proposal.initiator_influence_liability,
+                            proposal.created_at,
                             proposal.status.value,
                             proposal.resolved_at_seq_no,
                             proposal.resolved_by_player_id,
@@ -586,6 +587,7 @@ def _to_game(
                 rising_entity_id=pr["rising_entity_id"],
             ),
             initiator_influence_liability=pr["initiator_influence_liability"],
+            created_at=pr["created_at"],
             status=ResolutionStatus(pr["status"]),
             resolved_at_seq_no=pr["resolved_at_seq_no"],
             resolved_by_player_id=str(pr["resolved_by_player_id"]) if pr["resolved_by_player_id"] else None,

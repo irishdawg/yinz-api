@@ -88,6 +88,10 @@ function isPastDeadline(deadlineMs: number): boolean {
   return Date.now() >= deadlineMs;
 }
 
+function remainingSeconds(deadlineMs: number): number {
+  return Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
+}
+
 function entityLabel(entityId: string, view: GameView): string {
   return view.market.find((m) => m.entity_id === entityId)?.display_name ?? entityId;
 }
@@ -584,6 +588,30 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view.pools/view.you read fresh each run; `events` (growing every poll) is the real driver.
   }, [events]);
 
+  // Table-wide, system-triggered, no proposal/pool row to anchor to --
+  // same shape as the unilateral-swap detection right above (event log is
+  // the only source, same backlog-on-mount guard), but its own top-of
+  // -page banner rather than a lingering row.
+  const [topupNotice, setTopupNotice] = useState<{ amount: number; fading: boolean } | null>(null);
+  const shownTopupSeqNosRef = useRef<Set<number>>(new Set());
+  const topupInitializedRef = useRef(false);
+  useEffect(() => {
+    const topups = events.filter((e) => e.type === "INFLUENCE_TOPPED_UP");
+    if (!topupInitializedRef.current) {
+      topupInitializedRef.current = true;
+      for (const e of topups) shownTopupSeqNosRef.current.add(e.seq_no);
+      return;
+    }
+    for (const e of topups) {
+      if (shownTopupSeqNosRef.current.has(e.seq_no)) continue;
+      shownTopupSeqNosRef.current.add(e.seq_no);
+      const amount = e.payload.amount as number;
+      setTopupNotice({ amount, fading: false });
+      setTimeout(() => setTopupNotice((prev) => (prev ? { ...prev, fading: true } : prev)), 4000);
+      setTimeout(() => setTopupNotice((prev) => (prev && prev.amount === amount ? null : prev)), 4700);
+    }
+  }, [events]);
+
   // Ownership is projected directly onto the scale (a bold border, plus a
   // xN badge for duplicates) rather than shown as a separate portfolio
   // list -- the scale *is* the board. Only "portfolio" zone counts as
@@ -768,6 +796,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
       <MarketCorrectionBanner gameId={gameId} view={view} onChanged={onChanged} />
 
+      {topupNotice && (
+        <div
+          className={`rounded border border-teal-200 bg-teal-50 px-3 py-2 text-center text-sm font-medium text-teal-800 transition-opacity duration-700 ${topupNotice.fading ? "opacity-0" : "opacity-100"}`}
+        >
+          Everyone was out of Influence — the table just topped up +{topupNotice.amount}
+        </div>
+      )}
+
       <div>
         <div className="flex items-baseline justify-between text-xs font-medium text-zinc-500">
           <span>Position — points if it survives</span>
@@ -830,12 +866,12 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                     } ${highlightRingClass(highlight)}`}
                   >
                     {entity.logo_url ? (
-                      <Image src={entity.logo_url} alt="" width={24} height={24} unoptimized className="h-6 w-6 flex-shrink-0 rounded-sm object-cover" />
+                      <Image src={entity.logo_url} alt="" width={28} height={28} unoptimized className="h-7 w-7 flex-shrink-0 rounded-sm object-cover" />
                     ) : (
                       // No logo_url configured for this entity (true for every entity
                       // today -- theme_data doesn't populate it yet) -- a same-size
                       // blank square keeps every card the same height either way.
-                      <span aria-hidden className="block h-6 w-6 flex-shrink-0 rounded-sm bg-zinc-100" />
+                      <span aria-hidden className="block h-7 w-7 flex-shrink-0 rounded-sm bg-zinc-100" />
                     )}
                     <span className="flex-shrink-0 font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
                     {/* Fixed card height (h-36 above) is what actually keeps
@@ -949,6 +985,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               )}
             </div>
           </div>
+          {!poolingProposalId &&
+            !burningReserveId &&
+            view.proposals.some((p) => p.proposer_id === view.you && p.status === "open") && (
+              <p className="text-xs text-blue-700">This will withdraw your existing proposal.</p>
+            )}
         </div>
       )}
       {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
@@ -1308,28 +1349,33 @@ function ReserveControls({
   );
 }
 
-/** Cost-aware Accept button, shared between a bare proposal's Accept and a
- * Pool's Accept -- same shape, same affordability rule (disabled only
- * when the server says this specific accept would cost 1 and self can't
- * cover it). */
+/** Shared between a bare proposal's Accept and a Pool's Accept. Zero
+ * available Influence never disables it -- accepting is free when you
+ * can't afford the liability, see engine._handle_accept_proposal /
+ * _handle_accept_pool -- so the only thing that can still disable it is
+ * the accept-lock grace period (`lockedUntil`, omitted entirely for a
+ * private pool, which is never locked -- see the call sites). */
 function AcceptButton({
   liability,
-  available,
+  lockedUntil,
   busy,
   onAccept,
 }: {
   liability: 0 | 1 | undefined;
-  available: number;
+  lockedUntil?: string;
   busy: boolean;
   onAccept: () => void;
 }) {
-  const unaffordable = liability === 1 && available < 1;
-  const label = `Accept${liability === undefined ? "" : ` (${liability})`}`;
+  const lockDeadlineMs = lockedUntil ? new Date(lockedUntil).getTime() : null;
+  const locked = lockDeadlineMs !== null && !isPastDeadline(lockDeadlineMs);
+  const costSuffix = liability === undefined ? "" : ` (${liability})`;
+  const label = locked ? `Accept in ${remainingSeconds(lockDeadlineMs!)}s` : `Accept${costSuffix}`;
   return (
     <button
       type="button"
       onClick={onAccept}
-      disabled={busy || unaffordable}
+      disabled={busy || locked}
+      title={locked ? "Give the room a moment to read this" : undefined}
       className="rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
     >
       {busy ? "…" : label}
@@ -1371,8 +1417,6 @@ function OpenProposals({
   // same as lingeringById below.
   const [passLingering, setPassLingering] = useState<Map<string, PassLingeringEntry>>(new Map());
   const openCount = view.proposals.filter((p) => p.status === "open").length;
-  const self = view.players.find((p) => p.game_player_id === view.you);
-  const available = self?.influence?.available ?? 0;
   // Keyed by proposal_id/pool_id -- a resolved-but-still-lingering row is
   // found and overlaid in place below, never rendered as a second, freshly
   // -positioned entry (that used to make an accepted deal visually jump to
@@ -1574,7 +1618,7 @@ function OpenProposals({
                     ) : (
                       <AcceptButton
                         liability={p.my_accept_liability}
-                        available={available}
+                        lockedUntil={p.accept_locked_until}
                         busy={busyId === p.proposal_id}
                         onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
                       />
@@ -1649,7 +1693,12 @@ function OpenProposals({
                             {!isPoolMine && (pool.visibility === "public" || isMine) && (
                               <AcceptButton
                                 liability={pool.my_accept_liability}
-                                available={available}
+                                // Private-pool accept (always isMine, the
+                                // base proposer) is never locked -- only a
+                                // public pool waits on the base proposal's
+                                // own accept-lock. See
+                                // engine._require_accept_unlocked.
+                                lockedUntil={pool.visibility === "public" ? p.accept_locked_until : undefined}
                                 busy={busyId === pool.pool_id}
                                 onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
                               />
@@ -1751,6 +1800,9 @@ const _ACTIVITY_EVENT_TYPES = new Set([
   // See the Market Correction design writeup.
   "MARKET_CORRECTION_OFFERED",
   "MARKET_CORRECTION_RESOLVED",
+  // System-triggered, table-wide -- narrative/informational like the
+  // lifecycle/correction events above, so only surfaced under "All".
+  "INFLUENCE_TOPPED_UP",
 ]);
 const _TONE_CLASSES: Record<string, string> = {
   open: "text-blue-700",
@@ -1762,6 +1814,9 @@ const _TONE_CLASSES: Record<string, string> = {
   // unmistakably not a player-authored proposal, pool, or burn. See the
   // Market Correction design writeup.
   correction: "text-indigo-700",
+  // Distinct from "success" (an accepted deal) -- a system-wide top-up is
+  // good news but not a negotiated outcome.
+  boost: "text-teal-700",
 };
 
 /** Was this pool's base proposal ultimately won by a *different* pool, or
@@ -1866,6 +1921,10 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     if (reason === "invalidated") return { text: "Market Correction cancelled — the market moved", tone: "correction" };
     if (reason === "market_resumed") return { text: "Market Correction cancelled — trading resumed", tone: "correction" };
     return { text: "Market Correction resolved", tone: "correction" };
+  }
+  if (event.type === "INFLUENCE_TOPPED_UP") {
+    const amount = event.payload.amount as number;
+    return { text: `Everyone was out of Influence — the table just topped up +${amount}`, tone: "boost" };
   }
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
@@ -2056,7 +2115,7 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
                   key={entity.entity_id}
                   className={`flex h-40 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
                 >
-                  <span className={`text-xs ${ownedCount > 1 ? "font-bold text-zinc-900" : muted ? "text-zinc-300" : "text-zinc-400"}`}>
+                  <span className={`text-xs ${ownedCount > 0 && !isWiped ? "font-bold text-zinc-900" : muted ? "text-zinc-300" : "text-zinc-400"}`}>
                     {ownedCount > 1 ? (
                       <>
                         #{entity.position} · {pointsScored}pts ({points}×{ownedCount})

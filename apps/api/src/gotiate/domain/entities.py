@@ -292,6 +292,18 @@ class GameConfig(BaseModel):
     # playtest feedback. See the Stage 5 Reserve UX overhaul design writeup.
     pickup_decision_seconds: float = 12.0
     pickup_transport_grace_ms: int = 500
+    # Blocks ACCEPT_PROPOSAL (and ACCEPT_POOL on a public pool, gated to
+    # the base proposal's own lock) for this long after PROPOSAL_CREATED --
+    # gives the room a moment to actually read a new proposal before
+    # someone already at the keyboard snap-accepts it. Nothing else is
+    # blocked -- withdraw/pass/pool/private-pool-accept all still work
+    # immediately, see engine._handle_accept_proposal / _handle_accept_pool.
+    accept_lock_seconds: float = 4.0
+    # Applied once, flat, the instant every seated player's
+    # influence_available hits 0 at the same time -- see
+    # engine._maybe_topup_zero_influence. Keeps the negotiation from
+    # stalling out entirely once Influence is fully spent everywhere.
+    zero_influence_topup_amount: int = 2
     allow_public_pools: bool = True
     allow_private_pools: bool = True
     ready_to_close_revealed_in_replay: bool = False
@@ -423,6 +435,11 @@ class SwapIntent(BaseModel):
 class Proposal(BaseModel):
     proposal_id: str
     swap: SwapIntent
+    # PROPOSAL_CREATED's own timestamp, duplicated onto the proposal itself
+    # -- project() only ever sees the current Game snapshot, never the
+    # event ledger, so the accept-lock (GameConfig.accept_lock_seconds)
+    # needs this stored here to be checkable/displayable at all.
+    created_at: datetime
     # Locked once, at PROPOSE_SWAP time, from the proposer's holdings at
     # that moment -- 1 iff they own the swap's rising entity. Never
     # recomputed later, even if their holdings or the market change before

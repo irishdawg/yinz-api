@@ -48,6 +48,12 @@ export interface ProposalView {
   proposer_id: string;
   status: "open" | "resolved";
   resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | "voided_market_swung" | null;
+  // Public, unconditional -- ACCEPT_PROPOSAL (and ACCEPT_POOL on a public
+  // pool hanging off this proposal) is rejected server-side until now()
+  // passes this. Raw timestamp, same client-derives-its-own-display
+  // pattern as haircut_reveal_at/decision_deadline_at. See
+  // engine._require_accept_unlocked.
+  accept_locked_until: string;
   // Self-only, mutually exclusive: present on your own authored proposal
   // (the liability locked at PROPOSE_SWAP time -- never changes) or, while
   // open, a live preview of what accepting would cost you right now.

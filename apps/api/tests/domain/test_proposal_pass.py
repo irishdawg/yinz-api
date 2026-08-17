@@ -11,7 +11,7 @@ from gotiate.domain import engine
 from gotiate.domain.entities import GamePhase, ProposalResolutionReason, ResolutionStatus
 from gotiate.domain.errors import IllegalCommandError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, ReplayAudience, project, project_events
-from tests.conftest import find_swap_pair, make_started_game, now
+from tests.conftest import find_swap_pair, later, make_started_game, now
 
 
 def _pass(game, proposal_id, actor):
@@ -299,7 +299,7 @@ def test_passer_still_sees_the_proposal_execute_in_their_own_event_log():
     _pass(game, proposal_id, mortia)  # mortia is out
 
     accept_events = engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=hanky, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=hanky, expected_version=None, now=later()
     )
     assert any(e.type.value == "SWAP_EXECUTED" for e in accept_events)
 

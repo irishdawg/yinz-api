@@ -6,7 +6,7 @@ design writeup."""
 from __future__ import annotations
 
 from gotiate.domain import engine
-from tests.conftest import find_swap_pair, make_started_game, now
+from tests.conftest import find_swap_pair, later, make_started_game, now
 
 
 def _propose(game, actor, a, b):
@@ -111,7 +111,7 @@ def test_accept_charges_the_accepter_fresh_and_settles_the_proposer():
     mortia_before = game.player_by_id(mortia).influence_available
 
     engine.handle_command(
-        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=mortia, expected_version=None, now=now()
+        game, command_type="ACCEPT_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=mortia, expected_version=None, now=later()
     )
 
     tedy_player = game.player_by_id(tedy)

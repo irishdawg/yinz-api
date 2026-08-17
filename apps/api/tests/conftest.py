@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from gotiate.domain import engine
-from gotiate.domain.entities import Game, HoldingZone
+from gotiate.domain.entities import Game, GameConfig, HoldingZone
 
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def make_started_game(player_count: int = 4) -> Game:
-    game, _ = engine.create_game(actor_auth_user_id="auth-0", display_name="Host", now=now())
+def later(seconds: float = 5) -> datetime:
+    """now() pushed past GameConfig.accept_lock_seconds's default (4s) --
+    pass as `now` to an ACCEPT_PROPOSAL/ACCEPT_POOL call in a test that
+    proposes and accepts back-to-back, so the accept-lock grace period
+    (engine._require_accept_unlocked) doesn't reject it."""
+    return now() + timedelta(seconds=seconds)
+
+
+def make_started_game(player_count: int = 4, *, config: GameConfig | None = None) -> Game:
+    game, _ = engine.create_game(actor_auth_user_id="auth-0", display_name="Host", now=now(), config=config)
     for i in range(1, player_count):
         engine.join_game(game, actor_auth_user_id=f"auth-{i}", display_name=f"Player {i}", now=now())
     engine.handle_command(
