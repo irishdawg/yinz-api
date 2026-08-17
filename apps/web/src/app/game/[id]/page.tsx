@@ -113,15 +113,30 @@ function playerInitial(playerId: string, view: GameView): string {
  * rendering a separate entry elsewhere (which used to make an accepted
  * deal visually jump to a different position in the list).
  *
+ * Detected from view.proposals/view.pools' own open->resolved transitions
+ * (see MarketView's prevResolutionStatusRef), not from the event log --
+ * driving this from the *same* poll that also decides row visibility is
+ * what makes it race-free (an events-poll-driven version of this raced
+ * against the view poll: whichever landed first decided whether the row
+ * survived long enough to ever get tagged, so the overlay would silently
+ * no-show for an arbitrary subset of players/deals depending on network
+ * timing -- a real bug found via live playtesting, not hypothetical).
+ * The events log is still consulted, but only to *enrich* an
+ * already-created "accepted" entry with the accepter's name once that
+ * event arrives (view.proposals/view.pools have no such field) -- never to
+ * create the entry or decide whether the row is still shown.
+ *
  * "everyone_passed" exists because EXPIRED_ALL_PASSED is masked to the
  * identical withdrawn_by_initiator reason as a genuine self-withdraw for
- * every live audience, proposer included (see the Pass design writeup) --
- * MarketView disambiguates the two client-side via myExplicitWithdrawalsRef
- * before ever calling addLingeringDeal with this kind. */
+ * every live audience, proposer included (see the Pass design writeup).
+ * Only the proposer's own client can even attempt to tell the two apart
+ * (via myExplicitWithdrawalsRef, tracking their own Withdraw clicks) --
+ * every other player just sees "withdrawn", which is also the correct
+ * default for the proposer's own client when it can't prove otherwise. */
 interface LingeringDeal {
   key: string;
-  kind: "accepted" | "everyone_passed";
-  accepterLabel?: string; // only ever set for kind "accepted"
+  kind: "accepted" | "everyone_passed" | "withdrawn";
+  accepterLabel?: string; // only ever set for kind "accepted", and only once the enriching event arrives
   fading: boolean;
 }
 
@@ -382,18 +397,13 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     container.scrollTo({ left: (minLeft + maxRight) / 2 - container.clientWidth / 2, behavior: "smooth" });
   }
 
-  // A just-executed proposal/pool used to just vanish from the open list
+  // A just-resolved proposal/pool used to just vanish from the open list
   // the instant it resolved -- easy to miss who did what. Instead its own
   // row (still in its original list position -- see OpenProposals, which
-  // looks this map up per-proposal/pool-id rather than rendering a
-  // separately-positioned ghost entry) freezes under a translucent "Accepted
-  // by X" overlay for a beat, then fades. Sourced from the event log (not a
-  // poll diff of view.proposals) since the event carries the accepter's
-  // identity (actor_game_player_id) that a bare status flip on the resolved
-  // proposal itself doesn't.
+  // looks this map up per-proposal/pool-id and renders straight from
+  // view.proposals/view.pools rather than any separately-positioned ghost
+  // entry) freezes under a translucent overlay for a beat, then fades.
   const [lingeringDeals, setLingeringDeals] = useState<LingeringDeal[]>([]);
-  const processedSeqRef = useRef(0);
-  const lingeringInitializedRef = useRef(false);
   // Populated the instant *this* player clicks Withdraw on their own
   // proposal (see OpenProposals' onSelfWithdrawProposal) -- the only way to
   // tell "I withdrew this" apart from "everyone passed and it auto
@@ -401,7 +411,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const myExplicitWithdrawalsRef = useRef<Set<string>>(new Set());
 
   function addLingeringDeal(key: string, kind: LingeringDeal["kind"], accepterLabel?: string) {
-    setLingeringDeals((prev) => [...prev, { key, kind, accepterLabel, fading: false }]);
+    setLingeringDeals((prev) => (prev.some((d) => d.key === key) ? prev : [...prev, { key, kind, accepterLabel, fading: false }]));
     setTimeout(() => setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, fading: true } : d))), 2200);
     setTimeout(() => setLingeringDeals((prev) => prev.filter((d) => d.key !== key)), 2900);
   }
@@ -410,12 +420,85 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     myExplicitWithdrawalsRef.current.add(proposalId);
   }
 
+  // Detection lives on view.proposals/view.pools' own open->resolved
+  // transitions -- the *same* poll that also decides whether a row is still
+  // "open" -- specifically so there is no window where a row is neither
+  // open nor yet tagged lingering. An earlier version drove this off the
+  // event log (a *separate* poll, on its own independent ~1s cycle); a
+  // proposal/pool resolving between the two polls landing was a real race
+  // -- whichever poll updated first decided whether the row got dropped
+  // before it was ever tagged, so the overlay silently no-showed for an
+  // arbitrary subset of players and deals depending on network timing (a
+  // bug found via live playtesting, not hypothetical). The event log is
+  // still consulted below, but only to enrich an already-created "accepted"
+  // entry with the accepter's name -- view.proposals/view.pools have no
+  // such field -- never to decide whether the row survives.
+  const prevProposalStatusRef = useRef<Map<string, string> | null>(null);
+  const prevPoolStatusRef = useRef<Map<string, string> | null>(null);
+  useEffect(() => {
+    const currentProposalStatus = new Map(view.proposals.map((p) => [p.proposal_id, p.status]));
+    const prevProposalStatus = prevProposalStatusRef.current;
+    prevProposalStatusRef.current = currentProposalStatus;
+    // First observation (mount, or a passer's proposal appearing for the
+    // first time) is a baseline only -- nothing "just now" resolved.
+    // Syncing local lingering state with the external system (server's
+    // resolved-proposal/pool set) -- same carve-out/precedent as
+    // ShareLinkButton's effect further down. addLingeringDeal wraps
+    // setLingeringDeals internally; every call below is covered.
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (prevProposalStatus) {
+      for (const p of view.proposals) {
+        if (p.status !== "resolved" || prevProposalStatus.get(p.proposal_id) !== "open") continue;
+        if (p.resolution_reason === "executed") {
+          addLingeringDeal(p.proposal_id, "accepted");
+          visualizeProposal([[p.entity_a, p.entity_b, p.rising_entity_id]]);
+        } else if (p.resolution_reason === "withdrawn_by_initiator") {
+          const isMasked = p.proposer_id === view.you && !myExplicitWithdrawalsRef.current.has(p.proposal_id);
+          addLingeringDeal(p.proposal_id, isMasked ? "everyone_passed" : "withdrawn");
+        }
+        // market_closed / voided_market_swung: no lingering treatment, same as before.
+      }
+    }
+
+    const currentPoolStatus = new Map(view.pools.map((pool) => [pool.pool_id, pool.status]));
+    const prevPoolStatus = prevPoolStatusRef.current;
+    prevPoolStatusRef.current = currentPoolStatus;
+    if (prevPoolStatus) {
+      for (const pool of view.pools) {
+        if (pool.status !== "resolved" || prevPoolStatus.get(pool.pool_id) !== "open") continue;
+        if (pool.resolution_reason === "executed") {
+          addLingeringDeal(pool.pool_id, "accepted");
+          if (pool.entity_c && pool.entity_d && pool.rising_entity_id) {
+            const base = view.proposals.find((p) => p.proposal_id === pool.base_proposal_id);
+            const pairs: [string, string, string][] = [[pool.entity_c, pool.entity_d, pool.rising_entity_id]];
+            if (base) pairs.unshift([base.entity_a, base.entity_b, base.rising_entity_id]);
+            visualizeProposal(pairs);
+          }
+        } else if (pool.resolution_reason === "withdrawn_by_initiator") {
+          // Never masked for pools -- Pass doesn't apply to them, so this is
+          // always a genuine self-withdraw, no proposer-only disambiguation needed.
+          addLingeringDeal(pool.pool_id, "withdrawn");
+        }
+        // Every other pool reason (declined/preempted/invalidated/base
+        // -proposal-withdrawn-or-voided) -- no lingering treatment, same as before.
+      }
+    }
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [view.proposals, view.pools, view.you]);
+
+  // Enrichment only: fills in *who* accepted, once the event carrying that
+  // identity (view.proposals/view.pools have no such field) arrives --
+  // never creates a lingering entry and never decides whether a row is
+  // shown, see the detection effect above.
+  const processedSeqRef = useRef(0);
+  const enrichmentInitializedRef = useRef(false);
   useEffect(() => {
     // useGameEvents fetches the *entire* backlog on mount (since_seq=1) --
-    // a mid-game page reload must not replay every earlier swap in this
-    // game as if it just happened. First run only marks the backlog seen.
-    if (!lingeringInitializedRef.current) {
-      lingeringInitializedRef.current = true;
+    // a mid-game page reload must not re-enrich (or, worse, re-lookup a
+    // long-gone) entry as if it just happened. First run only marks the
+    // backlog seen.
+    if (!enrichmentInitializedRef.current) {
+      enrichmentInitializedRef.current = true;
       processedSeqRef.current = events.length > 0 ? Math.max(...events.map((e) => e.seq_no)) : 0;
       return;
     }
@@ -425,26 +508,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
     for (const e of freshEvents) {
       if (e.type === "PROPOSAL_RESOLVED" && e.payload.reason === "executed") {
-        const proposal = view.proposals.find((p) => p.proposal_id === e.payload.proposal_id);
-        if (!proposal) continue; // omitted from this player's own view (e.g. they'd passed it) -- nothing to render
-        addLingeringDeal(proposal.proposal_id, "accepted", playerLabel(e.actor_game_player_id, view));
-        visualizeProposal([[proposal.entity_a, proposal.entity_b, proposal.rising_entity_id]]);
+        const key = e.payload.proposal_id as string;
+        setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, accepterLabel: playerLabel(e.actor_game_player_id, view) } : d)));
       } else if (e.type === "POOL_RESOLVED" && e.payload.reason === "executed") {
-        const pool = view.pools.find((p) => p.pool_id === e.payload.pool_id);
-        if (!pool || !pool.entity_c || !pool.entity_d || !pool.rising_entity_id) continue;
-        addLingeringDeal(pool.pool_id, "accepted", playerLabel(e.actor_game_player_id, view));
-        visualizeProposal([[pool.entity_c, pool.entity_d, pool.rising_entity_id]]);
-      } else if (e.type === "PROPOSAL_RESOLVED" && e.payload.reason === "withdrawn_by_initiator") {
-        const proposal = view.proposals.find((p) => p.proposal_id === e.payload.proposal_id);
-        // Only my own proposals are even relevant here -- and only when I
-        // didn't just click Withdraw myself, since that's the one other
-        // cause of this exact same masked reason.
-        if (!proposal || proposal.proposer_id !== view.you) continue;
-        if (myExplicitWithdrawalsRef.current.has(proposal.proposal_id)) continue;
-        addLingeringDeal(proposal.proposal_id, "everyone_passed");
+        const key = e.payload.pool_id as string;
+        setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, accepterLabel: playerLabel(e.actor_game_player_id, view) } : d)));
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- view.proposals/view.pools intentionally read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- view is read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
   }, [events]);
 
   // Ownership is projected directly onto the scale (a bold border, plus a
@@ -1258,29 +1329,35 @@ function OpenProposals({
     }, 2900);
   }
 
-  // Row order is otherwise exactly view.proposals' own stable dict
-  // -insertion order (see the lingeringById comment above) -- the one
-  // exception is a proposal I've just passed on, which is omitted from my
-  // own view.proposals *immediately* (unlike every other resolution), so
-  // there's nothing left there to anchor its position to. rowOrder instead
-  // remembers the last-known merged order and only ever appends genuinely
-  // new open proposals at the end, so a just-passed row keeps sitting
-  // exactly where it was instead of vanishing outright or jumping
-  // elsewhere once its lingering entry lands.
-  const [rowOrder, setRowOrder] = useState<string[]>(() => view.proposals.filter((p) => p.status === "open").map((p) => p.proposal_id));
-  useEffect(() => {
-    const openProposalIds = new Set(view.proposals.filter((p) => p.status === "open").map((p) => p.proposal_id));
-    // Syncing local row ordering with the external system (server's open
-    // -proposal set, plus the lingering maps) -- same carve-out/precedent
-    // as ShareLinkButton's effect further down.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRowOrder((prev) => {
-      const kept = prev.filter((id) => openProposalIds.has(id) || lingeringById.has(id) || passLingering.has(id));
-      const added = [...openProposalIds].filter((id) => !kept.includes(id));
-      return added.length === 0 && kept.length === prev.length ? prev : [...kept, ...added];
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- lingeringById is just lingeringDeals (already a dep) reshaped fresh each render.
-  }, [view.proposals, lingeringDeals, passLingering]);
+  // Rows are a pure computation from current props/state every render --
+  // deliberately *not* persisted/reconciled in a separate effect. An
+  // earlier version kept a `rowOrder` state array reconciled via its own
+  // effect, which introduced a real bug: this component's effects run
+  // before its parent's (children-before-parent commit ordering), so on
+  // the very render a proposal resolved, this component's reconciliation
+  // effect always ran against the *previous* lingeringDeals (MarketView's
+  // own detection effect hadn't updated it yet) -- concluding the
+  // now-resolved proposal was neither open nor lingering, and dropping it
+  // from `rowOrder` for good. Once dropped, nothing ever re-added it (the
+  // reconciliation only ever appended from the *open* set), so the
+  // overlay silently never appeared even though lingeringDeals correctly
+  // grew a moment later. A pure per-render computation can't get stuck
+  // that way: the row simply isn't included on a render where neither
+  // condition holds yet, and *is* included the moment either becomes true,
+  // however many renders that takes.
+  //
+  // view.proposals itself already provides stable, never-reordered
+  // positions for every proposal (dict-insertion order, server-side) that
+  // remains present for this player -- so filtering it directly, in place,
+  // is what keeps an accepted/withdrawn/everyone-passed row from jumping
+  // elsewhere. The one proposal that's never present here to filter is one
+  // *this player themselves* just passed on -- Pass omits it from their own
+  // view.proposals immediately and permanently (see the Pass design
+  // writeup), unlike every other resolution -- so passLingering entries
+  // are rendered separately, prepended at the top rather than trying to
+  // reconstruct a position view.proposals no longer has any record of.
+  const visibleProposals = view.proposals.filter((p) => p.status === "open" || lingeringById.has(p.proposal_id));
+  const passLingeringEntries = [...passLingering.values()];
 
   async function runCommand(id: string, type: string, payload: Record<string, unknown>, fallback: string) {
     setError(null);
@@ -1291,33 +1368,24 @@ function OpenProposals({
     return result;
   }
 
-  if (rowOrder.length === 0) return null;
+  if (visibleProposals.length === 0 && passLingeringEntries.length === 0) return null;
 
   return (
     <div>
       <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({openCount})</h2>
       <ul className="flex flex-col gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
-        {rowOrder.map((id) => {
-          const p = view.proposals.find((proposal) => proposal.proposal_id === id);
-          if (!p) {
-            // Gone from view.proposals -- only ever true for my own just
-            // -passed proposal (see the rowOrder comment above); render the
-            // client-only snapshot instead, frozen, no actions.
-            const passEntry = passLingering.get(id);
-            if (!passEntry) return null;
-            return (
-              <li
-                key={id}
-                className="relative flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 last:border-0 last:pb-0"
-              >
-                <span>
-                  {playerLabel(passEntry.proposerId, view)}: {entityLabel(passEntry.entityA, view)} ↔ {entityLabel(passEntry.entityB, view)}
-                </span>
-                <RowOverlay text="You Passed" tone="yellow" fading={passEntry.fading} />
-              </li>
-            );
-          }
-
+        {passLingeringEntries.map((passEntry) => (
+          <li
+            key={passEntry.proposalId}
+            className="relative flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 last:border-0 last:pb-0"
+          >
+            <span>
+              {playerLabel(passEntry.proposerId, view)}: {entityLabel(passEntry.entityA, view)} ↔ {entityLabel(passEntry.entityB, view)}
+            </span>
+            <RowOverlay text="You Passed" tone="yellow" fading={passEntry.fading} />
+          </li>
+        ))}
+        {visibleProposals.map((p) => {
           const isMine = p.proposer_id === view.you;
           const lingering = lingeringById.get(p.proposal_id);
           // Mirrors the server's own rule (PASS/CREATE_POOL both reject
@@ -1486,24 +1554,21 @@ function OpenProposals({
                             )}
                           </span>
                         )}
-                        {/* No overlay rendered here even when poolLingering is set --
-                            accepting a pool always resolves its base proposal to
-                            executed in the same instant (see ACCEPT_POOL), so the
-                            outer <li>'s own overlay below already covers this row
-                            as part of the same group. A second overlay here would
-                            just double up the same "Accepted by X" text. */}
+                        {/* "accepted" only -- ACCEPT_POOL always resolves the base
+                            proposal to executed in the same instant, so the outer
+                            <li>'s own overlay below already covers this row as part
+                            of the same group; a second overlay here would just
+                            double up the same "Accepted by X" text. WITHDRAW_POOL
+                            is different: it only ever resolves the pool itself, never
+                            touching the base proposal, so a withdrawn pool needs its
+                            own overlay -- there's no outer one to rely on. */}
+                        {poolLingering?.kind === "withdrawn" && <RowOverlay {...lingeringOverlayProps(poolLingering)} fading={poolLingering.fading} />}
                       </li>
                     );
                   })}
                 </ul>
               )}
-              {lingering && (
-                <RowOverlay
-                  text={lingering.kind === "accepted" ? `Accepted by ${lingering.accepterLabel}` : "Everyone Passed"}
-                  tone={lingering.kind === "accepted" ? "green" : "red"}
-                  fading={lingering.fading}
-                />
-              )}
+              {lingering && <RowOverlay {...lingeringOverlayProps(lingering)} fading={lingering.fading} />}
             </li>
           );
         })}
@@ -1517,7 +1582,21 @@ const _ROW_OVERLAY_TONE_CLASSES = {
   green: "bg-emerald-500/25 text-emerald-900",
   yellow: "bg-amber-400/30 text-amber-900",
   red: "bg-red-500/25 text-red-900",
+  gray: "bg-zinc-500/25 text-zinc-700",
 } as const;
+
+/** "accepted" renders "Accepted" (no name) until the enriching event
+ * arrives and fills in accepterLabel -- see MarketView's enrichment
+ * effect. Usually only visible for a single poll cycle or two. */
+function lingeringOverlayProps(lingering: LingeringDeal): { text: string; tone: keyof typeof _ROW_OVERLAY_TONE_CLASSES } {
+  if (lingering.kind === "accepted") {
+    return { text: lingering.accepterLabel ? `Accepted by ${lingering.accepterLabel}` : "Accepted", tone: "green" };
+  }
+  if (lingering.kind === "everyone_passed") {
+    return { text: "Everyone Passed", tone: "red" };
+  }
+  return { text: "Withdrawn", tone: "gray" };
+}
 
 /** Translucent banner overlaid on a proposal/pool row's own, still-in-place
  * `<li>` (which must be `position: relative`) once it resolves in a way
@@ -1747,12 +1826,20 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const closeReasonText =
     view.close_reason === "TIME_EXPIRED" ? "Time ran out." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
 
-  // Default = the first winner in results order (ties keep whichever one
-  // sorted first, per compute_final_scores' own player-iteration order --
-  // stable sort preserves that). Falls back to the top-ranked player if
-  // winners is ever empty (defensive; shouldn't happen once scored).
+  // Default = your own row, not the winner's -- the screen should open on
+  // "how did I do", not congratulate whoever won regardless of who's
+  // looking (real playtest feedback: every player was seeing the winner
+  // highlighted by default). Falls back to the winner (ties keep whichever
+  // one sorted first, per compute_final_scores' own player-iteration order
+  // -- stable sort preserves that), then the top-ranked player, for a
+  // spectator with no seat (view.you is null) or if winners is ever empty
+  // (defensive; shouldn't happen once scored).
   const [selectedOverride, setSelectedOverride] = useState<string | null>(null);
-  const defaultSelectedId = sortedResults.find((r) => winners.has(r.game_player_id))?.game_player_id ?? sortedResults[0]?.game_player_id ?? null;
+  const defaultSelectedId =
+    sortedResults.find((r) => r.game_player_id === view.you)?.game_player_id ??
+    sortedResults.find((r) => winners.has(r.game_player_id))?.game_player_id ??
+    sortedResults[0]?.game_player_id ??
+    null;
   const selectedPlayerId = selectedOverride ?? defaultSelectedId;
   const selectedResult = results.find((r) => r.game_player_id === selectedPlayerId);
 
@@ -1832,21 +1919,39 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
               const ownedCount = portfolioCounts.get(entity.entity_id) ?? 0;
               const neverUsed = neverUsedByEntity.get(entity.entity_id) ?? [];
               const muted = ownedCount === 0 && neverUsed.length === 0 && !isWiped;
+              // The realized score for this position -- 0 if it fell within
+              // the wiped depth, otherwise the same public linear_rank_v1
+              // formula projected_value/the live market view already use.
+              // Never a second source of truth: purely a display of a
+              // deterministic formula over already-public position/wipe
+              // data, same principle as haircutRisk.ts.
+              const points = isWiped ? 0 : view.market.length - entity.position + 1;
               return (
                 <div
                   key={entity.entity_id}
                   className={`flex h-40 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
                 >
-                  <span className={`text-xs ${muted ? "text-zinc-300" : "text-zinc-400"}`}>{entity.position}</span>
+                  <span className={`text-xs ${muted ? "text-zinc-300" : "text-zinc-400"}`}>
+                    #{entity.position} · {points}pt{points === 1 ? "" : "s"}
+                  </span>
                   <span className={`font-mono text-sm font-bold ${muted ? "text-zinc-300" : "text-zinc-900"}`}>{entity.ticker_symbol}</span>
                   <span className={`line-clamp-2 text-xs leading-tight ${muted ? "text-zinc-300" : "text-zinc-600"}`}>{entity.display_name}</span>
                   {ownedCount > 1 && <span className="text-xs font-bold text-zinc-900">×{ownedCount}</span>}
                   {isWiped && <span className="text-[10px] font-bold text-red-600">WIPED</span>}
-                  {neverUsed.map((h, i) => (
-                    <span key={i} className="text-[9px] font-medium leading-tight text-zinc-500">
-                      {neverUsedLabel(h.zone)}
-                    </span>
-                  ))}
+                  {/* mt-auto -- bottom-justified within the card's fixed
+                      height (not wherever the flow of shorter content above
+                      happens to end), so these notes (discarded/never
+                      -picked-up/burned-unseen -- the "what could have been"
+                      reveals) don't get lost floating mid-card. */}
+                  {neverUsed.length > 0 && (
+                    <div className="mt-auto flex flex-col items-center gap-0.5">
+                      {neverUsed.map((h, i) => (
+                        <span key={i} className="text-[9px] font-medium leading-tight text-zinc-500">
+                          {neverUsedLabel(h.zone)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
