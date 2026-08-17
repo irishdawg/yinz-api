@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useMemo, useRef, useState } from "react";
+import { use, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -105,6 +105,52 @@ function playerInitial(playerId: string, view: GameView): string {
   return playerLabel(playerId, view).charAt(0).toUpperCase();
 }
 
+/** A just-resolved (executed) proposal/pool, held onto client-side just long
+ * enough to render a frozen "ACCEPTED" row before it fades -- see
+ * MarketView's lingeringDeals state. */
+interface LingeringDeal {
+  key: string;
+  entityA: string;
+  entityB: string;
+  proposerLabel: string;
+  accepterLabel: string;
+  fading: boolean;
+}
+
+/** Influence as a glanceable fuel gauge, not just a number -- the exact
+ * count still renders alongside it (transaction costs matter), but the bar
+ * is what you read at a glance mid-negotiation. `total` (the gauge's max)
+ * is derived, not fetched: available + committed + spent is exactly
+ * starting_influence, since nothing ever creates or destroys Influence
+ * mid-game, only moves it between those three buckets. */
+function InfluenceGauge({ influence }: { influence: { available: number; committed: number; spent: number } | undefined }) {
+  if (!influence) {
+    return (
+      <div>
+        <div className="text-xs font-medium text-zinc-500">Influence</div>
+        <div className="tabular-nums text-zinc-900">—</div>
+      </div>
+    );
+  }
+  const total = influence.available + influence.committed + influence.spent;
+  const pct = total > 0 ? Math.round((influence.available / total) * 100) : 0;
+  const barColor = pct > 50 ? "bg-emerald-500" : pct > 20 ? "bg-amber-500" : "bg-red-500";
+  return (
+    <div>
+      <div className="text-xs font-medium text-zinc-500">Influence</div>
+      <div className="flex items-center gap-1.5">
+        <div className="h-2 w-14 overflow-hidden rounded-full bg-zinc-200">
+          <div className={`h-full rounded-full transition-[width] duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className="tabular-nums text-zinc-900">
+          {influence.available}
+          {influence.committed > 0 ? ` (+${influence.committed}c)` : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /** Visualize's ring treatment: green (rising) / red (falling), and for a
  * Pool's 4-card Visualize, a solid ring for the base pair (pairIndex 0)
  * vs. a dashed outline for the pool leg (pairIndex 1) -- two different CSS
@@ -180,7 +226,9 @@ function useValueDelta(value: number | undefined): number | null {
     if (value === undefined) return;
     if (prevRef.current !== undefined && prevRef.current !== value) {
       setDelta(value - prevRef.current);
-      const timeout = setTimeout(() => setDelta(null), 2500);
+      // 5s, not the original 2.5s -- playtesting found the badge vanished
+      // before anyone could actually read it.
+      const timeout = setTimeout(() => setDelta(null), 5000);
       prevRef.current = value;
       return () => clearTimeout(timeout);
     }
@@ -188,6 +236,59 @@ function useValueDelta(value: number | undefined): number | null {
   }, [value]);
 
   return delta;
+}
+
+// w-28 (112px) + gap-2 (8px) -- the market card row's fixed per-item
+// horizontal step, both set by Tailwind classes on the row below.
+const _MARKET_CARD_STEP_PX = 120;
+
+/** Manual FLIP (First-Last-Invert-Play) reorder animation for the market
+ * card row -- so the eye can follow an entity sliding from one position to
+ * another instead of the whole row jumping instantly. No animation library:
+ * cards are keyed by stable entity_id and the row's per-item width/gap are
+ * fixed, so the horizontal delta between two polls is plain index
+ * arithmetic, not a DOM measurement. Returns a per-entity style getter; a
+ * card with no pending delta gets `{}` (no inline transform at all, so it
+ * never fights the Visualize-highlight scale/ring classes applied to the
+ * same button element). */
+function useMarketReorderFlip(entityIds: string[]): (entityId: string) => CSSProperties {
+  const prevIndexRef = useRef<Map<string, number>>(new Map(entityIds.map((id, i) => [id, i])));
+  const [deltas, setDeltas] = useState<Map<string, number>>(new Map());
+  const [settled, setSettled] = useState(true);
+  const key = entityIds.join(",");
+
+  useLayoutEffect(() => {
+    const prev = prevIndexRef.current;
+    const nextIndex = new Map<string, number>();
+    const nextDeltas = new Map<string, number>();
+    entityIds.forEach((id, i) => {
+      nextIndex.set(id, i);
+      const prevI = prev.get(id);
+      if (prevI !== undefined && prevI !== i) nextDeltas.set(id, (prevI - i) * _MARKET_CARD_STEP_PX);
+    });
+    prevIndexRef.current = nextIndex;
+    if (nextDeltas.size === 0) return;
+
+    setDeltas(nextDeltas);
+    setSettled(false);
+    const raf = requestAnimationFrame(() => setSettled(true)); // next frame: "play" -- animate back to the natural position
+    const timeout = setTimeout(() => setDeltas(new Map()), 650); // past the transition's own duration -- stop paying for inline styles once it's done
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(timeout);
+    };
+    // `key` is entityIds' real dependency -- the array itself gets a new identity every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return (entityId: string) => {
+    const delta = deltas.get(entityId);
+    if (delta === undefined) return {};
+    return {
+      transform: settled ? "translateX(0)" : `translateX(${delta}px)`,
+      transition: settled ? "transform 500ms ease" : "none",
+    };
+  };
 }
 
 function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
@@ -198,7 +299,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // reuses `selected` for card-picking, but the confirm bar's action and
   // labels branch on this instead of always submitting PROPOSE_SWAP.
   const [poolingProposalId, setPoolingProposalId] = useState<string | null>(null);
-  const [poolVisibility, setPoolVisibility] = useState<"private" | "public">("private");
   // Non-null while Stage 5's unilateral reserve-for-swap is picking its
   // two market entities -- same `selected` card-picking reuse as pooling,
   // a third confirm-bar branch below. Mutually exclusive with
@@ -208,6 +308,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
   const supportMarkers = useMemo(() => computeSupportMarkers(events, view.pools), [events, view.pools]);
+  const getFlipStyle = useMarketReorderFlip(view.market.map((e) => e.entity_id));
 
   // "Visualize" on an open proposal briefly emphasizes the two cards it
   // names, so a player doesn't have to mentally parse proposer + entity
@@ -256,6 +357,51 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     const maxRight = Math.max(...els.map((el) => el.offsetLeft + el.offsetWidth));
     container.scrollTo({ left: (minLeft + maxRight) / 2 - container.clientWidth / 2, behavior: "smooth" });
   }
+
+  // A just-executed proposal/pool used to just vanish from the open list
+  // the instant it resolved -- easy to miss who did what. Instead it
+  // lingers as a frozen, labeled "ACCEPTED" row for a beat, then fades.
+  // Sourced from the event log (not a poll diff of view.proposals) since
+  // the event carries the accepter's identity (actor_game_player_id) that
+  // a bare status flip on the resolved proposal itself doesn't.
+  const [lingeringDeals, setLingeringDeals] = useState<LingeringDeal[]>([]);
+  const processedSeqRef = useRef(0);
+  const lingeringInitializedRef = useRef(false);
+
+  function addLingeringDeal(key: string, entityA: string, entityB: string, proposerLabel: string, accepterLabel: string) {
+    setLingeringDeals((prev) => [...prev, { key, entityA, entityB, proposerLabel, accepterLabel, fading: false }]);
+    setTimeout(() => setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, fading: true } : d))), 2200);
+    setTimeout(() => setLingeringDeals((prev) => prev.filter((d) => d.key !== key)), 2900);
+  }
+
+  useEffect(() => {
+    // useGameEvents fetches the *entire* backlog on mount (since_seq=1) --
+    // a mid-game page reload must not replay every earlier swap in this
+    // game as if it just happened. First run only marks the backlog seen.
+    if (!lingeringInitializedRef.current) {
+      lingeringInitializedRef.current = true;
+      processedSeqRef.current = events.length > 0 ? Math.max(...events.map((e) => e.seq_no)) : 0;
+      return;
+    }
+    const freshEvents = events.filter((e) => e.seq_no > processedSeqRef.current);
+    if (freshEvents.length === 0) return;
+    processedSeqRef.current = Math.max(processedSeqRef.current, ...freshEvents.map((e) => e.seq_no));
+
+    for (const e of freshEvents) {
+      if (e.type === "PROPOSAL_RESOLVED" && e.payload.reason === "executed") {
+        const proposal = view.proposals.find((p) => p.proposal_id === e.payload.proposal_id);
+        if (!proposal) continue; // omitted from this player's own view (e.g. they'd passed it) -- nothing to render
+        addLingeringDeal(proposal.proposal_id, proposal.entity_a, proposal.entity_b, playerLabel(proposal.proposer_id, view), playerLabel(e.actor_game_player_id, view));
+        visualizeProposal([[proposal.entity_a, proposal.entity_b, proposal.rising_entity_id]]);
+      } else if (e.type === "POOL_RESOLVED" && e.payload.reason === "executed") {
+        const pool = view.pools.find((p) => p.pool_id === e.payload.pool_id);
+        if (!pool || !pool.entity_c || !pool.entity_d || !pool.rising_entity_id) continue;
+        addLingeringDeal(pool.pool_id, pool.entity_c, pool.entity_d, playerLabel(pool.initiator_id, view), playerLabel(e.actor_game_player_id, view));
+        visualizeProposal([[pool.entity_c, pool.entity_d, pool.rising_entity_id]]);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- view.proposals/view.pools intentionally read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
+  }, [events]);
 
   // Ownership is projected directly onto the scale (a bold border, plus a
   // xN badge for duplicates) rather than shown as a separate portfolio
@@ -309,7 +455,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setProposeError(null);
     setSelected([]);
     setPoolingProposalId(proposalId);
-    setPoolVisibility("private");
     setBurningReserveId(null);
   }
 
@@ -369,7 +514,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     return <PendingPickupDecisionView gameId={gameId} view={view} pending={view.pending_pickup} onChanged={onChanged} />;
   }
 
-  async function handleConfirm() {
+  // `poolVisibility` is only ever passed by the two explicit Pool
+  // Private/Pool Public buttons below -- there's no separate visibility
+  // toggle to read from anymore (see item 7: replaced radios with buttons
+  // that carry their own choice directly).
+  async function handleConfirm(poolVisibility?: "private" | "public") {
     if (selected.length !== 2) return;
     setProposeError(null);
     setProposing(true);
@@ -377,7 +526,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       ? await submitCommand(
           gameId,
           "CREATE_POOL",
-          { proposal_id: poolingProposalId, entity_c: selected[0], entity_d: selected[1], visibility: poolVisibility },
+          { proposal_id: poolingProposalId, entity_c: selected[0], entity_d: selected[1], visibility: poolVisibility ?? "private" },
           { expectedVersion: view.version, onSettled: onChanged },
         )
       : burningReserveId
@@ -432,21 +581,18 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               {view.haircut_profile ? (self.safe_value ?? "—") : formatCountdownTo(new Date(view.haircut_reveal_at ?? 0).getTime())}
             </div>
           </div>
-          <div>
-            <div className="text-xs font-medium text-zinc-500">Influence</div>
-            <div className="tabular-nums text-zinc-900">
-              {self.influence?.available ?? "—"}
-              {self.influence && self.influence.committed > 0 ? ` / ${self.influence.committed} committed` : ""}
-            </div>
-          </div>
+          <InfluenceGauge influence={self.influence} />
         </div>
       )}
 
       <MarketCorrectionBanner gameId={gameId} view={view} onChanged={onChanged} />
 
       <div>
-        <span className="text-xs font-medium text-zinc-500">Payout chance</span>
-        {/* Every row here -- position numbers, payout chance, the card grid
+        <div className="flex items-baseline justify-between text-xs font-medium text-zinc-500">
+          <span>Position — points if it survives</span>
+          <span>Payout chance</span>
+        </div>
+        {/* Every row here -- position/points, payout chance, the card grid
             -- is a plain, label-free flex row with identical per-item width
             and gap, all iterating view.market in the same position-sorted
             order. That's what guarantees column alignment; a leading label
@@ -456,14 +602,21 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             All three rows share one scroll container so they scroll
             together without any scroll-sync code. Payout chance is keyed
             by *position*, not by whichever entity happens to occupy it --
-            see projections.py's haircut_risk_band_depth. */}
+            see projections.py's haircut_risk_band_depth. Points-per-position
+            (market_size - position + 1) is the same public linear_rank_v1
+            formula projected_value already sums -- derived here purely for
+            display, same as haircutRisk.ts's certaintyAt, never a second
+            source of truth for an actual score. */}
         <div ref={marketScrollRef} className="-mx-4 overflow-x-auto px-4 pb-2">
-          <div className="mb-1 flex gap-2 text-center">
-            {view.market.map((entity) => (
-              <div key={entity.entity_id} className="w-28 flex-shrink-0 text-xs text-zinc-400">
-                {entity.position}
-              </div>
-            ))}
+          <div className="mb-2 flex gap-2 text-center">
+            {view.market.map((entity) => {
+              const points = view.market.length - entity.position + 1;
+              return (
+                <div key={entity.entity_id} className="w-28 flex-shrink-0 text-xs text-zinc-400">
+                  #{entity.position} · {points}pt{points === 1 ? "" : "s"}
+                </div>
+              );
+            })}
           </div>
           <div className="mb-2 flex gap-2 text-center">
             {view.market.map((entity) => {
@@ -483,46 +636,55 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               const highlight = highlighted?.get(entity.entity_id);
               const markers = supportMarkers.get(entity.entity_id);
               return (
-                <button
-                  key={entity.entity_id}
-                  type="button"
-                  data-entity-id={entity.entity_id}
-                  onClick={() => toggleSelect(entity.entity_id)}
-                  disabled={isDisabled}
-                  className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
-                    owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                  } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
-                    highlight ? "z-10 scale-110 shadow-lg" : ""
-                  } ${highlightRingClass(highlight)}`}
-                >
-                  <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
-                  <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
-                  {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
-                  {markers && markers.length > 0 && (
-                    <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
-                      <span>↑</span>
-                      {markers.map((m) => (
-                        <span
-                          key={m.playerId}
-                          title={`${playerLabel(m.playerId, view)}${m.unilateralCount > 0 ? " — unilateral move" : ""}`}
-                        >
-                          {playerInitial(m.playerId, view)}
-                          {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
-                          {/* Distinct from negotiated support: this player burned a
-                              reserve to force this rise themselves, not just agreed
-                              to it with someone. See the unilateral-marker design
-                              writeup -- deliberately not folded into the emerald
-                              count above. */}
-                          {m.unilateralCount > 0 && (
-                            <span className="text-purple-600" title="Unilateral reserve burn">
-                              ⚡
-                            </span>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </button>
+                <div key={entity.entity_id} className="flex-shrink-0" style={getFlipStyle(entity.entity_id)}>
+                  <button
+                    type="button"
+                    data-entity-id={entity.entity_id}
+                    onClick={() => toggleSelect(entity.entity_id)}
+                    disabled={isDisabled}
+                    className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
+                      owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
+                    } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
+                      highlight ? "z-10 scale-110 shadow-lg" : ""
+                    } ${highlightRingClass(highlight)}`}
+                  >
+                    {entity.logo_url ? (
+                      <Image src={entity.logo_url} alt="" width={24} height={24} unoptimized className="h-6 w-6 rounded-sm object-cover" />
+                    ) : (
+                      // No logo_url configured for this entity (true for every entity
+                      // today -- theme_data doesn't populate it yet) -- a same-size
+                      // blank square keeps every card the same height either way.
+                      <span aria-hidden className="block h-6 w-6 rounded-sm bg-zinc-100" />
+                    )}
+                    <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
+                    <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                    {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
+                    {markers && markers.length > 0 && (
+                      <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
+                        <span>↑</span>
+                        {markers.map((m) => (
+                          <span
+                            key={m.playerId}
+                            title={`${playerLabel(m.playerId, view)}${m.unilateralCount > 0 ? " — unilateral move" : ""}`}
+                          >
+                            {playerInitial(m.playerId, view)}
+                            {m.count > 1 && <sup>{formatSupportCount(m.count)}</sup>}
+                            {/* Distinct from negotiated support: this player burned a
+                                reserve to force this rise themselves, not just agreed
+                                to it with someone. See the unilateral-marker design
+                                writeup -- deliberately not folded into the emerald
+                                count above. */}
+                            {m.unilateralCount > 0 && (
+                              <span className="text-purple-600" title="Unilateral reserve burn">
+                                ⚡
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -565,38 +727,53 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               <button type="button" onClick={cancelSelection} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
                 Cancel
               </button>
-              <button
-                type="button"
-                onClick={handleConfirm}
-                disabled={proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null))}
-                className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
-              >
-                {proposing
-                  ? "…"
-                  : burningReserveId
-                    ? "Burn"
-                    : `${poolingProposalId ? "Pool" : "Propose"}${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
-              </button>
+              {poolingProposalId ? (
+                // Two direct-action buttons instead of a generic "Pool"
+                // button plus a separate visibility radio pair -- the
+                // radios were hard to see/use at the table; this makes the
+                // choice itself the tap.
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleConfirm("private")}
+                    disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
+                    className="rounded bg-purple-700 px-3 py-1 text-white disabled:opacity-50"
+                  >
+                    {proposing ? "…" : `Pool Private${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleConfirm("public")}
+                    disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
+                    className="rounded bg-purple-900 px-3 py-1 text-white disabled:opacity-50"
+                  >
+                    {proposing ? "…" : `Pool Public${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleConfirm()}
+                  disabled={proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null))}
+                  className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
+                >
+                  {proposing ? "…" : burningReserveId ? "Burn" : `Propose${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                </button>
+              )}
             </div>
           </div>
-          {poolingProposalId && (
-            <div className="flex items-center gap-3 text-xs text-blue-900">
-              <span className="font-medium">Visibility:</span>
-              <label className="flex items-center gap-1">
-                <input type="radio" checked={poolVisibility === "private"} onChange={() => setPoolVisibility("private")} />
-                Private
-              </label>
-              <label className="flex items-center gap-1">
-                <input type="radio" checked={poolVisibility === "public"} onChange={() => setPoolVisibility("public")} />
-                Public
-              </label>
-            </div>
-          )}
         </div>
       )}
       {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
 
-      <OpenProposals gameId={gameId} view={view} onChanged={onChanged} onVisualize={visualizeProposal} onStartPool={startPooling} />
+      <OpenProposals
+        gameId={gameId}
+        view={view}
+        onChanged={onChanged}
+        onVisualize={visualizeProposal}
+        onStartPool={startPooling}
+        lingeringDeals={lingeringDeals}
+      />
 
       <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
 
@@ -986,12 +1163,14 @@ function OpenProposals({
   onChanged,
   onVisualize,
   onStartPool,
+  lingeringDeals,
 }: {
   gameId: string;
   view: GameView;
   onChanged: () => void;
   onVisualize: (pairs: [string, string, string][]) => void;
   onStartPool: (proposalId: string) => void;
+  lingeringDeals: LingeringDeal[];
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1007,19 +1186,44 @@ function OpenProposals({
     if (!result.ok) setError(commandErrorMessage(result.data, fallback));
   }
 
-  if (open.length === 0) return null;
+  if (open.length === 0 && lingeringDeals.length === 0) return null;
 
   return (
     <div>
       <h2 className="mb-2 text-sm font-medium text-zinc-700">Open proposals ({open.length})</h2>
       <ul className="flex flex-col gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
+        {/* Frozen "ACCEPTED" ghosts of whatever just executed -- see
+            MarketView's lingeringDeals. No actions on these, just a beat to
+            register who did what before they fade. */}
+        {lingeringDeals.map((d) => (
+          <li
+            key={d.key}
+            className={`flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 transition-opacity duration-700 last:border-0 last:pb-0 ${
+              d.fading ? "opacity-0" : "opacity-100"
+            }`}
+          >
+            <span>
+              {d.proposerLabel} → {d.accepterLabel}: {entityLabel(d.entityA, view)} ↔ {entityLabel(d.entityB, view)}
+            </span>
+            <span className="flex-shrink-0 rounded bg-emerald-100 px-2 py-1 text-xs font-bold text-emerald-700">ACCEPTED</span>
+          </li>
+        ))}
         {open.map((p) => {
           const isMine = p.proposer_id === view.you;
           const pools = view.pools.filter((pool) => pool.base_proposal_id === p.proposal_id && pool.status === "open");
           return (
             <li key={p.proposal_id} className="flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
               <div className="flex items-center justify-between gap-2">
-                <span>
+                {/* Visualize used to be a separate button players had to
+                    remember to press every time -- now hovering (desktop)
+                    or tapping (touch) the swap itself highlights it, since
+                    you need this to evaluate almost any proposal anyway. */}
+                <span
+                  onMouseEnter={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                  onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                  className="cursor-pointer hover:underline"
+                  title="Hover or tap to visualize"
+                >
                   {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
                   {/* Self-only, proposer-only, anonymous -- the proposer's one
                       and only channel to Pass feedback. See the Pass design
@@ -1029,13 +1233,6 @@ function OpenProposals({
                   )}
                 </span>
                 <span className="flex flex-shrink-0 gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-                    className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700"
-                  >
-                    Visualize
-                  </button>
                   {!isMine && (
                     <button
                       type="button"
@@ -1087,25 +1284,32 @@ function OpenProposals({
                     const visible = Boolean(pool.entity_c && pool.entity_d);
                     return (
                       <li key={pool.pool_id} className="flex items-center justify-between gap-2 text-xs text-zinc-700">
-                        <span>
+                        <span
+                          onMouseEnter={
+                            visible
+                              ? () =>
+                                  onVisualize([
+                                    [p.entity_a, p.entity_b, p.rising_entity_id],
+                                    [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                                  ])
+                              : undefined
+                          }
+                          onClick={
+                            visible
+                              ? () =>
+                                  onVisualize([
+                                    [p.entity_a, p.entity_b, p.rising_entity_id],
+                                    [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                                  ])
+                              : undefined
+                          }
+                          className={visible ? "cursor-pointer hover:underline" : undefined}
+                          title={visible ? "Hover or tap to visualize" : undefined}
+                        >
                           {playerLabel(pool.initiator_id, view)} pooled {pool.visibility}
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
                         <span className="flex flex-shrink-0 gap-1">
-                          {visible && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onVisualize([
-                                  [p.entity_a, p.entity_b, p.rising_entity_id],
-                                  [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
-                                ])
-                              }
-                              className="rounded border border-zinc-300 px-2 py-0.5"
-                            >
-                              Visualize
-                            </button>
-                          )}
                           {isPoolMine && (
                             <>
                               {pool.visibility === "private" && (
