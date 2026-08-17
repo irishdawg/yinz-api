@@ -11,6 +11,12 @@ interface ThemeSetSummary {
   name: string;
 }
 
+// Named so the clearing effect below can recognize exactly these two
+// messages (and only these) without guessing at string equality against a
+// literal repeated in three places.
+const _ENTER_NAME_ERROR = "Enter your name first.";
+const _ENTER_NAME_JOIN_ERROR = "Enter your name above first.";
+
 export default function Home() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
@@ -24,6 +30,14 @@ export default function Home() {
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const nameSectionRef = useRef<HTMLDivElement>(null);
+  // A full code means "I'm here to join, not create" -- collapsing Create
+  // game's own controls (real playtest feedback: after being prompted to
+  // enter a name mid-join, muscle memory reaches for the big black button
+  // right below it, not the smaller Join game button further down) removes
+  // the wrong-button target entirely instead of just hoping it isn't
+  // pressed. Codes are always exactly 7 characters (join_code_lifetime's
+  // format, see the input's own maxLength).
+  const codeEntered = joinCodeInput.trim().length === 7;
 
   // Typing a name is no longer optional-but-prefilled (see NamePicker) --
   // nothing auto-populates it anymore, so a name-less submit needs to say
@@ -33,6 +47,22 @@ export default function Home() {
   // wasn't obvious).
   function scrollToNameSection() {
     nameSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  // Clears specifically the "go enter your name" nudge the instant a name
+  // actually appears -- once it's fixed, the red text pointing at the fix
+  // has nothing left to say. Deliberately narrow (checks the exact message,
+  // not "any error"): an unrelated error (network failure, name already
+  // taken) should still survive the player continuing to type. A plain
+  // callback wrapping setName, not a useEffect watching `name` -- NamePicker
+  // already calls onNameChange from its own effect, so reacting here too
+  // would just be syncing local state with local state.
+  function handleNameChange(newName: string | null) {
+    setName(newName);
+    if (newName) {
+      setError((e) => (e === _ENTER_NAME_ERROR ? null : e));
+      setJoinError((e) => (e === _ENTER_NAME_JOIN_ERROR ? null : e));
+    }
   }
 
   useEffect(() => {
@@ -70,7 +100,7 @@ export default function Home() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!name) {
-      setError("Enter your name first.");
+      setError(_ENTER_NAME_ERROR);
       scrollToNameSection();
       return;
     }
@@ -108,7 +138,7 @@ export default function Home() {
     const code = joinCodeInput.trim().toUpperCase();
     if (!code) return;
     if (!name) {
-      setJoinError("Enter your name above first.");
+      setJoinError(_ENTER_NAME_JOIN_ERROR);
       scrollToNameSection();
       return;
     }
@@ -146,41 +176,56 @@ export default function Home() {
         <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} className="mb-8" priority />
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div ref={nameSectionRef}>
-            <NamePicker onNameChange={setName} />
+            <NamePicker onNameChange={handleNameChange} />
           </div>
-          {themeSets.length > 0 && (
-            <label className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-zinc-700">Theme</span>
-              <select
-                value={themeSetId}
-                onChange={(event) => setThemeSetId(event.target.value)}
-                className="rounded border border-zinc-300 bg-white px-3 py-2 text-zinc-900"
-              >
-                {themeSets.map((t) => (
-                  <option key={t.theme_set_id} value={t.theme_set_id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {error && <p className="text-sm text-red-600">{error}</p>}
-          {existingGameId && (
-            <button
-              type="button"
-              onClick={() => router.push(`/game/${existingGameId}`)}
-              className="text-sm font-medium text-zinc-700 underline"
-            >
-              Go to your existing game
-            </button>
-          )}
-          <button
-            type="submit"
-            disabled={!ready || submitting}
-            className="rounded bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
+          {/* Animated height collapse (CSS grid-rows 1fr/0fr, not
+              display:none) -- a full join code means Create game's own
+              controls should get out of the way entirely, not just sit
+              there as a mis-clickable temptation. aria-hidden + disabling
+              the button match the visual collapse for keyboard/screen
+              -reader users, not just mouse users. */}
+          <div
+            aria-hidden={codeEntered}
+            className={`grid overflow-hidden transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+              codeEntered ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr] opacity-100"
+            }`}
           >
-            {ready ? (submitting ? "Creating…" : "Create game") : "Starting session…"}
-          </button>
+            <div className="flex min-h-0 flex-col gap-4">
+              {themeSets.length > 0 && (
+                <label className="flex flex-col gap-1">
+                  <span className="text-sm font-medium text-zinc-700">Theme</span>
+                  <select
+                    value={themeSetId}
+                    onChange={(event) => setThemeSetId(event.target.value)}
+                    className="rounded border border-zinc-300 bg-white px-3 py-2 text-zinc-900"
+                  >
+                    {themeSets.map((t) => (
+                      <option key={t.theme_set_id} value={t.theme_set_id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {error && <p className="text-sm text-red-600">{error}</p>}
+              {existingGameId && (
+                <button
+                  type="button"
+                  onClick={() => router.push(`/game/${existingGameId}`)}
+                  className="text-sm font-medium text-zinc-700 underline"
+                >
+                  Go to your existing game
+                </button>
+              )}
+              <button
+                type="submit"
+                disabled={!ready || submitting || codeEntered}
+                className="rounded bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
+              >
+                {ready ? (submitting ? "Creating…" : "Create game") : "Starting session…"}
+              </button>
+            </div>
+          </div>
         </form>
 
         <div className="mt-6 flex flex-col gap-2 border-t border-zinc-200 pt-6">

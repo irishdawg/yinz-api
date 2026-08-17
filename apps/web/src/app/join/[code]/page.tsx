@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
 import { NamePicker } from "@/components/NamePicker";
 
+const _ENTER_NAME_ERROR = "Enter your name first.";
+
 export default function JoinPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
   const router = useRouter();
@@ -20,10 +22,20 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       .catch(() => setError("Couldn't start a session. Refresh and try again."));
   }, []);
 
+  // Clears specifically the "go enter your name" nudge the instant a name
+  // actually appears -- an unrelated error (session-start failure, a
+  // rejected join) should still survive the player typing a name. A plain
+  // callback wrapping setName, not a useEffect watching `name` -- see
+  // page.tsx's identical handleNameChange for why.
+  function handleNameChange(newName: string | null) {
+    setName(newName);
+    if (newName) setError((e) => (e === _ENTER_NAME_ERROR ? null : e));
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!name) {
-      setError("Enter your name first.");
+      setError(_ENTER_NAME_ERROR);
       return;
     }
     setSubmitting(true);
@@ -53,7 +65,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
         <h1 className="mb-2 text-2xl font-semibold text-zinc-900">Join game</h1>
         <p className="mb-8 font-mono text-lg tracking-widest text-zinc-500">{code}</p>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <NamePicker joinCode={code} onNameChange={setName} />
+          <NamePicker joinCode={code} onNameChange={handleNameChange} />
           {error && <p className="text-sm text-red-600">{error}</p>}
           <button
             type="submit"
