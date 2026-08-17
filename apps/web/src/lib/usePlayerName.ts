@@ -8,9 +8,11 @@ interface PlayerNameState {
   error: string | null;
 }
 
-/** No free-text display names anywhere in the UI -- this is the only way
- * a component gets a name to show. `joinCode`, when set, makes every
- * request exclude names already held by players seated in that game (see
+/** The curated-catalog name path only -- fetches/rerolls a
+ * player_name_seeds placeholder. Used by NamePicker's fallback "random
+ * name" mode; a typed name never goes through this hook at all (see
+ * components/NamePicker.tsx). `joinCode`, when set, makes every request
+ * exclude names already held by players seated in that game (see
  * apps/web/src/app/api/player-names/route.ts). Never golden -- gold is
  * rolled server-side at actual create/join time, not at preview time, so
  * this hook has nothing golden to report; check a roster entry's

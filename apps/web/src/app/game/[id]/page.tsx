@@ -642,22 +642,28 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                     data-entity-id={entity.entity_id}
                     onClick={() => toggleSelect(entity.entity_id)}
                     disabled={isDisabled}
-                    className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center transition-transform duration-300 ${
+                    className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center transition-transform duration-300 ${
                       owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
                     } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
                       highlight ? "z-10 scale-110 shadow-lg" : ""
                     } ${highlightRingClass(highlight)}`}
                   >
                     {entity.logo_url ? (
-                      <Image src={entity.logo_url} alt="" width={24} height={24} unoptimized className="h-6 w-6 rounded-sm object-cover" />
+                      <Image src={entity.logo_url} alt="" width={24} height={24} unoptimized className="h-6 w-6 flex-shrink-0 rounded-sm object-cover" />
                     ) : (
                       // No logo_url configured for this entity (true for every entity
                       // today -- theme_data doesn't populate it yet) -- a same-size
                       // blank square keeps every card the same height either way.
-                      <span aria-hidden className="block h-6 w-6 rounded-sm bg-zinc-100" />
+                      <span aria-hidden className="block h-6 w-6 flex-shrink-0 rounded-sm bg-zinc-100" />
                     )}
-                    <span className="font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
-                    <span className="text-xs leading-tight text-zinc-600">{entity.display_name}</span>
+                    <span className="flex-shrink-0 font-mono text-sm font-bold text-zinc-900">{entity.ticker_symbol}</span>
+                    {/* Fixed card height (h-36 above) is what actually keeps
+                        every card the same size regardless of player count/
+                        badges -- line-clamp-2 here just stops a long
+                        display_name from pushing past its own reserved two
+                        lines and getting clipped by the card's own overflow
+                        -hidden mid-word. */}
+                    <span className="line-clamp-2 text-xs leading-tight text-zinc-600">{entity.display_name}</span>
                     {owned > 1 && <span className="text-xs font-bold text-zinc-900">×{owned}</span>}
                     {markers && markers.length > 0 && (
                       <div className="flex flex-wrap items-center justify-center gap-0.5 text-[10px] font-bold leading-none text-emerald-700">
@@ -1018,11 +1024,11 @@ function PendingPickupDecisionView({
                   data-entity-id={entity.entity_id}
                   onClick={() => tappable && handleDiscard(entity.entity_id)}
                   disabled={!tappable}
-                  className={`relative flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${pendingPickupCardClasses(owned.length, isNew)}`}
+                  className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${pendingPickupCardClasses(owned.length, isNew)}`}
                 >
                   <span className={`text-xs ${owned.length > 0 || isNew ? "text-zinc-400" : "text-zinc-300"}`}>{entity.position}</span>
                   <span className={`font-mono text-sm font-bold ${owned.length > 0 || isNew ? "text-zinc-900" : "text-zinc-300"}`}>{entity.ticker_symbol}</span>
-                  <span className={`text-xs leading-tight ${owned.length > 0 || isNew ? "text-zinc-600" : "text-zinc-300"}`}>{entity.display_name}</span>
+                  <span className={`line-clamp-2 text-xs leading-tight ${owned.length > 0 || isNew ? "text-zinc-600" : "text-zinc-300"}`}>{entity.display_name}</span>
                   {owned.length > 1 && <span className="text-xs font-bold text-zinc-900">×{owned.length}</span>}
                   {isNew && <span className="text-[10px] font-bold text-amber-600">NEW</span>}
                 </button>
@@ -1212,18 +1218,20 @@ function OpenProposals({
           const isMine = p.proposer_id === view.you;
           const pools = view.pools.filter((pool) => pool.base_proposal_id === p.proposal_id && pool.status === "open");
           return (
-            <li key={p.proposal_id} className="flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
+            <li
+              key={p.proposal_id}
+              // Visualize used to be a separate button players had to
+              // remember to press every time, then just hovering/tapping the
+              // swap text -- now the whole row triggers it, since a player's
+              // cursor lands anywhere on the row while reading it, not just
+              // on the text itself.
+              onMouseEnter={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+              onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+              title="Hover or tap to visualize"
+              className="flex cursor-pointer flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0 hover:bg-zinc-50"
+            >
               <div className="flex items-center justify-between gap-2">
-                {/* Visualize used to be a separate button players had to
-                    remember to press every time -- now hovering (desktop)
-                    or tapping (touch) the swap itself highlights it, since
-                    you need this to evaluate almost any proposal anyway. */}
-                <span
-                  onMouseEnter={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-                  onClick={() => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
-                  className="cursor-pointer hover:underline"
-                  title="Hover or tap to visualize"
-                >
+                <span>
                   {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
                   {/* Self-only, proposer-only, anonymous -- the proposer's one
                       and only channel to Pass feedback. See the Pass design
@@ -1282,30 +1290,22 @@ function OpenProposals({
                   {pools.map((pool) => {
                     const isPoolMine = pool.initiator_id === view.you;
                     const visible = Boolean(pool.entity_c && pool.entity_d);
+                    const visualizePoolLeg = visible
+                      ? () =>
+                          onVisualize([
+                            [p.entity_a, p.entity_b, p.rising_entity_id],
+                            [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                          ])
+                      : undefined;
                     return (
-                      <li key={pool.pool_id} className="flex items-center justify-between gap-2 text-xs text-zinc-700">
-                        <span
-                          onMouseEnter={
-                            visible
-                              ? () =>
-                                  onVisualize([
-                                    [p.entity_a, p.entity_b, p.rising_entity_id],
-                                    [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
-                                  ])
-                              : undefined
-                          }
-                          onClick={
-                            visible
-                              ? () =>
-                                  onVisualize([
-                                    [p.entity_a, p.entity_b, p.rising_entity_id],
-                                    [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
-                                  ])
-                              : undefined
-                          }
-                          className={visible ? "cursor-pointer hover:underline" : undefined}
-                          title={visible ? "Hover or tap to visualize" : undefined}
-                        >
+                      <li
+                        key={pool.pool_id}
+                        onMouseEnter={visualizePoolLeg}
+                        onClick={visualizePoolLeg}
+                        title={visible ? "Hover or tap to visualize" : undefined}
+                        className={`flex items-center justify-between gap-2 text-xs text-zinc-700 ${visible ? "cursor-pointer hover:bg-zinc-50" : ""}`}
+                      >
+                        <span>
                           {playerLabel(pool.initiator_id, view)} pooled {pool.visibility}
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
@@ -1664,11 +1664,11 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
               return (
                 <div
                   key={entity.entity_id}
-                  className={`flex w-28 flex-shrink-0 flex-col items-center gap-1 rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
+                  className={`flex h-40 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${resultsCardClasses(isWiped, ownedCount, neverUsed.length > 0)}`}
                 >
                   <span className={`text-xs ${muted ? "text-zinc-300" : "text-zinc-400"}`}>{entity.position}</span>
                   <span className={`font-mono text-sm font-bold ${muted ? "text-zinc-300" : "text-zinc-900"}`}>{entity.ticker_symbol}</span>
-                  <span className={`text-xs leading-tight ${muted ? "text-zinc-300" : "text-zinc-600"}`}>{entity.display_name}</span>
+                  <span className={`line-clamp-2 text-xs leading-tight ${muted ? "text-zinc-300" : "text-zinc-600"}`}>{entity.display_name}</span>
                   {ownedCount > 1 && <span className="text-xs font-bold text-zinc-900">×{ownedCount}</span>}
                   {isWiped && <span className="text-[10px] font-bold text-red-600">WIPED</span>}
                   {neverUsed.map((h, i) => (

@@ -21,9 +21,17 @@ from gotiate.domain.projections import PlayerAudience, PublicAudience, liability
 from gotiate.persistence.player_names import NoAvailableNameError, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
-_INVALID_NAME_DETAIL = {"error_code": "invalid_display_name", "message": "choose a name from the provided list"}
+_INVALID_NAME_DETAIL = {"error_code": "invalid_display_name", "message": "enter a name (up to 24 characters) or choose one from the list"}
 _NO_NAMES_AVAILABLE_DETAIL = {"error_code": "no_names_available", "message": "try again in a moment"}
 _UNKNOWN_THEME_SET_DETAIL = {"error_code": "unknown_theme_set", "message": "choose one of the available theme sets"}
+
+# In-person play wants real/familiar names, not "wait, who's Mortia?" --
+# see the real-names design writeup. A submitted display_name that's a
+# recognized player_name_seeds entry still goes through the original
+# catalog path (golden-eligible, usage-tallied); anything else is now
+# accepted as a typed name, subject only to this structural check --
+# never a content filter, that's explicitly deferred (see CURRENT_WORK.md).
+_MAX_TYPED_NAME_LENGTH = 24
 
 router = APIRouter(prefix="/games", tags=["games"])
 player_names_router = APIRouter(prefix="/player-names", tags=["player-names"])
@@ -32,6 +40,22 @@ theme_sets_router = APIRouter(prefix="/theme-sets", tags=["theme-sets"])
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _resolve_submitted_name(name_repo: PlayerNameRepository, raw_name: str) -> tuple[str, bool]:
+    """Returns (display_name, is_catalog_name). A catalog name passes through
+    unchanged, still eligible for the golden-name roll (see roll_golden_name's
+    docstring). Anything else is a typed name: trimmed, structurally checked
+    (non-empty, length-capped), and *never* golden-eligible -- overwriting a
+    real person's typed name with a random catalog string on a golden hit
+    would defeat the entire point of typing it. Raises the same 422 either
+    way so the client doesn't need to distinguish the two failure modes."""
+    if await name_repo.is_valid_name(raw_name):
+        return raw_name, True
+    typed_name = raw_name.strip()
+    if not typed_name or len(typed_name) > _MAX_TYPED_NAME_LENGTH:
+        raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
+    return typed_name, False
 
 
 @router.post("", response_model=GameSummary)
@@ -43,12 +67,7 @@ async def create_game(
     repo: GameRepository = Depends(get_repository),
     name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> GameSummary:
-    # No free-text display names, ever -- display_name must be one of the
-    # curated placeholders (player_name_seeds), never open text. This is
-    # the entire content-moderation story: nothing here needs a filter
-    # because nothing here was ever typed by a user.
-    if not await name_repo.is_valid_name(body.display_name):
-        raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
+    display_name, is_catalog_name = await _resolve_submitted_name(name_repo, body.display_name)
 
     # Validated here, eagerly, so a bad theme_set_id 422s immediately —
     # engine.create_game would otherwise happily store it and only fail
@@ -72,14 +91,16 @@ async def create_game(
 
     # Golden odds rolled here, once, at the moment a real seat is actually
     # created -- never on the free-preview offer endpoints (see
-    # player_names.roll_golden_name). Overrides the previewed display_name
+    # player_names.roll_golden_name), and never for a typed name (see
+    # _resolve_submitted_name). Overrides the previewed display_name
     # outright rather than just flagging it, so "golden" always means a
     # real golden name, not an arbitrary chosen one wearing a badge.
-    display_name = body.display_name
-    golden_name = await name_repo.roll_golden_name()
-    is_golden_name = golden_name is not None
-    if golden_name is not None:
-        display_name = golden_name
+    is_golden_name = False
+    if is_catalog_name:
+        golden_name = await name_repo.roll_golden_name()
+        is_golden_name = golden_name is not None
+        if golden_name is not None:
+            display_name = golden_name
 
     game, events = engine.create_game(
         actor_auth_user_id=auth_user_id,
@@ -95,7 +116,10 @@ async def create_game(
     async with repo.lock_for(game.id):
         await repo.create(game)
         await repo.append_events(events)
-    await name_repo.mark_name_used(display_name)
+    # usage_count is a tally over the curated pool specifically -- a typed
+    # name was never offered from it, so there's nothing to tally.
+    if is_catalog_name:
+        await name_repo.mark_name_used(display_name)
     assert game.host_player_id is not None
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=game.host_player_id)
 
@@ -109,8 +133,7 @@ async def join_game(
     repo: GameRepository = Depends(get_repository),
     name_repo: PlayerNameRepository = Depends(get_player_name_repository),
 ) -> GameSummary:
-    if not await name_repo.is_valid_name(body.display_name):
-        raise HTTPException(status_code=422, detail=_INVALID_NAME_DETAIL)
+    display_name, is_catalog_name = await _resolve_submitted_name(name_repo, body.display_name)
 
     game = await repo.get_by_join_code(body.join_code.upper())
     if game is None:
@@ -128,20 +151,23 @@ async def join_game(
         # Checked against this game's own already-loaded players, not
         # player_name_seeds -- that table only tracks the global pool, not
         # who's using what name in which game right now. Checked against
-        # what was actually submitted, before any golden override below.
+        # the resolved (trimmed) name, before any golden override below --
+        # source-agnostic, so two players typing the same name collide
+        # exactly like two players picking the same catalog name always did.
         existing_names = {p.display_name for p in game.players}
-        if body.display_name in existing_names:
+        if display_name in existing_names:
             raise HTTPException(status_code=409, detail={"error_code": "name_taken", "message": "that name is already taken in this game — pick another"})
 
         # Same seat-bound golden roll as create_game -- see the comment
-        # there. `existing_names` also keeps this game's own golden roll
-        # (if any) from colliding with a golden name someone else in this
-        # same lobby already landed.
-        display_name = body.display_name
-        golden_name = await name_repo.roll_golden_name(exclude=existing_names)
-        is_golden_name = golden_name is not None
-        if golden_name is not None:
-            display_name = golden_name
+        # there, including never rolling for a typed name. `existing_names`
+        # also keeps this game's own golden roll (if any) from colliding
+        # with a golden name someone else in this same lobby already landed.
+        is_golden_name = False
+        if is_catalog_name:
+            golden_name = await name_repo.roll_golden_name(exclude=existing_names)
+            is_golden_name = golden_name is not None
+            if golden_name is not None:
+                display_name = golden_name
 
         try:
             player, events = engine.join_game(game, actor_auth_user_id=auth_user_id, display_name=display_name, now=_now(), is_golden_name=is_golden_name)
@@ -149,7 +175,8 @@ async def join_game(
             raise HTTPException(status_code=409, detail={"error_code": exc.error_code, "message": str(exc)}) from exc
         await repo.save(game)
         await repo.append_events(events)
-    await name_repo.mark_name_used(display_name)
+    if is_catalog_name:
+        await name_repo.mark_name_used(display_name)
 
     return GameSummary(game_id=game.id, join_code=game.join_code, game_player_id=player.game_player_id)
 

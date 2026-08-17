@@ -13,6 +13,38 @@ don't let this file accumulate stale "already done" entries.
 
 ---
 
+## Two pre-existing tests are intermittently flaky in a full suite run
+
+Not caused by any specific feature — found while adding the real-names
+tests below simply made the suite slightly larger/slower. Both are 100%
+reliable run individually or in their own file, but each failed once in
+5 full-suite runs (never both in the same run, never a consistent
+repro): `tests/api/test_lobby_flow.py::test_extend_lobby_timer_pushes_the_deadline_out`
+and `tests/domain/test_market_correction.py::test_discard_holding_that_changes_source_ownership_resolves_invalidated`.
+Comparing against the baseline before this session's additions (5/5
+clean full-suite runs) suggests real wall-clock timing and/or shared
+unseeded `random` module state leaking across tests, not a logic bug —
+worth a closer look (seed/inject time and rng explicitly in both) before
+the suite gets meaningfully larger, but out of scope to chase down here.
+If you see either fail, rerun before treating it as a regression.
+
+---
+
+## Typed display names have no content moderation (deliberately deferred)
+
+`create_game`/`join_game` now accept a typed `display_name` (not just a
+`player_name_seeds` catalog pick) for in-person play — see `AGENTS.md`,
+`GAMEPLAY.md` §"Lobby", `api/routes.py`'s `_resolve_submitted_name`.
+Validation on a typed name is purely structural (non-empty after
+trimming, capped at 24 characters) — no profanity/abuse filter, by
+explicit product decision at the time this shipped, since the initial
+use case is players typing their own real names around a physical table.
+Worth revisiting before any anonymous-link/public-facing use of typed
+names becomes common — this is exactly the content-moderation surface
+the curated-catalog approach was originally built to avoid entirely.
+
+---
+
 ## Explicitly deferred / undecided in code comments (not this session's finding — pre-existing)
 
 - **`CloseReason.OPTIONALITY_EXHAUSTED`** — a third close-reason value is

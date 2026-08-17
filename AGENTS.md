@@ -137,9 +137,14 @@ feature (see `CURRENT_WORK.md`).
 - **Rate limits**: `POST /games` (create) 5/hour, `POST /games/join`
   10/5min, everything else 200/min default (`api/rate_limit.py`), keyed
   on the real client IP forwarded by the Next.js gateway, not per-session.
-- **No free-text anywhere.** Every `display_name` is validated against
-  the curated `player_name_seeds` catalog before the domain engine ever
-  sees it — this is the entire content-moderation story, deliberately.
+- **Display names**: a submitted `display_name` that matches the curated
+  `player_name_seeds` catalog goes through the original anonymous-play
+  path (golden-name eligible). Anything else is accepted as a typed name
+  (trimmed, capped at 24 chars, never golden-eligible) for in-person play
+  where players want to use real/familiar names — see
+  `routes._resolve_submitted_name`. Typed names have **no content
+  moderation** — a deliberate, temporary gap, not an oversight; see
+  `CURRENT_WORK.md`.
 
 ## Migration conventions (see `DATABASE.md` for the full current state)
 

@@ -4,7 +4,7 @@ import { use, useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { usePlayerName } from "@/lib/usePlayerName";
+import { NamePicker } from "@/components/NamePicker";
 
 export default function JoinPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
@@ -12,16 +12,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const { name, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName(code);
+  const [name, setName] = useState<string | null>(null);
 
   useEffect(() => {
     ensureAnonymousSession()
-      .then(() => {
-        setReady(true);
-        requestInitial();
-      })
+      .then(() => setReady(true))
       .catch(() => setError("Couldn't start a session. Refresh and try again."));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleSubmit(event: FormEvent) {
@@ -54,23 +50,8 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
         <h1 className="mb-2 text-2xl font-semibold text-zinc-900">Join game</h1>
         <p className="mb-8 font-mono text-lg tracking-widest text-zinc-500">{code}</p>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-zinc-700">Your name</span>
-            <div className="flex items-center justify-between rounded border border-zinc-300 bg-white px-3 py-2">
-              <span data-testid="assigned-name" className="font-medium text-zinc-900">
-                {nameLoading ? "…" : (name ?? "—")}
-              </span>
-              <button
-                type="button"
-                onClick={reroll}
-                disabled={!name || nameLoading}
-                className="text-sm font-medium text-zinc-600 underline disabled:opacity-50"
-              >
-                Change name
-              </button>
-            </div>
-          </div>
-          {(error || nameError) && <p className="text-sm text-red-600">{error ?? nameError}</p>}
+          <NamePicker joinCode={code} onNameChange={setName} />
+          {error && <p className="text-sm text-red-600">{error}</p>}
           <button
             type="submit"
             disabled={!ready || !name || submitting}

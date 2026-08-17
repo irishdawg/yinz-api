@@ -1,12 +1,14 @@
-"""No free-text display names, ever -- create_game/join_game must reject
-anything not in the curated seed pool. Uses an explicit `allowed_names` set
-via conftest.make_client() rather than the default permissive fake, since
-this is specifically what's under test here.
+"""A submitted display_name matching the curated seed pool goes through the
+original anonymous-play path (golden-eligible); anything else is now
+accepted as a typed name (trimmed, length-capped, never golden-eligible) --
+see routes.py's _resolve_submitted_name. Uses an explicit `allowed_names`
+set via conftest.make_client() rather than the default permissive fake,
+since this is specifically what's under test here.
 
 Golden names: rolled once, server-side, at the moment a real seat is
 created (create_game's host, join_game's joiner) -- never by the free
--preview offer/reroll endpoints. See player_names.py's module docstring
-for the reasoning."""
+-preview offer/reroll endpoints, and never for a typed name. See
+player_names.py's module docstring for the reasoning."""
 
 from __future__ import annotations
 
@@ -35,11 +37,53 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_create_game_rejects_a_name_outside_the_seed_pool():
+def test_create_game_accepts_a_typed_name_outside_the_seed_pool():
     client = make_client(allowed_names={"Sly Fox"})
     response = client.post("/games", json={"display_name": "MyRealName"}, headers=_auth("auth-tedy"))
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+
+    view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
+    assert view["players"][0]["display_name"] == "MyRealName"
+    assert view["players"][0]["is_golden_name"] is False
+
+
+def test_create_game_trims_and_rejects_a_blank_typed_name():
+    client = make_client(allowed_names={"Sly Fox"})
+    response = client.post("/games", json={"display_name": "   "}, headers=_auth("auth-tedy"))
     assert response.status_code == 422
     assert response.json()["detail"]["error_code"] == "invalid_display_name"
+
+
+def test_create_game_rejects_a_typed_name_over_the_length_cap():
+    client = make_client(allowed_names={"Sly Fox"})
+    response = client.post("/games", json={"display_name": "x" * 25}, headers=_auth("auth-tedy"))
+    assert response.status_code == 422
+    assert response.json()["detail"]["error_code"] == "invalid_display_name"
+
+
+def test_create_game_trims_whitespace_from_a_typed_name():
+    client = make_client(allowed_names={"Sly Fox"})
+    response = client.post("/games", json={"display_name": "  Kimberly  "}, headers=_auth("auth-tedy"))
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+
+    view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
+    assert view["players"][0]["display_name"] == "Kimberly"
+
+
+def test_create_game_with_forced_golden_rng_never_overrides_a_typed_name():
+    # A typed name (not in the pool) must never be swapped for a golden
+    # catalog name, even on a forced-hit rng -- overwriting a real person's
+    # typed name would defeat the entire point of typing it.
+    client = make_client(allowed_names={"Sly Fox", "Dave"}, golden_names={"Dave"}, rng=_ALWAYS_GOLDEN)
+    response = client.post("/games", json={"display_name": "Jeremy"}, headers=_auth("auth-tedy"))
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+
+    view = client.get(f"/games/{game_id}", headers=_auth("auth-tedy")).json()
+    assert view["players"][0]["display_name"] == "Jeremy"
+    assert view["players"][0]["is_golden_name"] is False
 
 
 def test_create_game_accepts_a_seeded_name():
@@ -48,12 +92,26 @@ def test_create_game_accepts_a_seeded_name():
     assert response.status_code == 200
 
 
-def test_join_game_rejects_a_name_outside_the_seed_pool():
+def test_join_game_accepts_a_typed_name_outside_the_seed_pool():
     client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
     created = client.post("/games", json={"display_name": "Sly Fox"}, headers=_auth("auth-tedy"))
     join_code = created.json()["join_code"]
 
     response = client.post("/games/join", json={"join_code": join_code, "display_name": "NotInThePool"}, headers=_auth("auth-mortia"))
+    assert response.status_code == 200
+
+    view = client.get(f"/games/{created.json()['game_id']}", headers=_auth("auth-tedy")).json()
+    joiner = next(p for p in view["players"] if p["game_player_id"] == response.json()["game_player_id"])
+    assert joiner["display_name"] == "NotInThePool"
+    assert joiner["is_golden_name"] is False
+
+
+def test_join_game_rejects_a_typed_name_over_the_length_cap():
+    client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
+    created = client.post("/games", json={"display_name": "Sly Fox"}, headers=_auth("auth-tedy"))
+    join_code = created.json()["join_code"]
+
+    response = client.post("/games/join", json={"join_code": join_code, "display_name": "x" * 25}, headers=_auth("auth-mortia"))
     assert response.status_code == 422
     assert response.json()["detail"]["error_code"] == "invalid_display_name"
 
@@ -67,6 +125,33 @@ def test_join_game_rejects_a_name_already_taken_in_this_game():
     response = client.post("/games/join", json={"join_code": join_code, "display_name": "Sly Fox"}, headers=_auth("auth-mortia"))
     assert response.status_code == 409
     assert response.json()["detail"]["error_code"] == "name_taken"
+
+
+def test_join_game_rejects_a_typed_name_already_taken_in_this_game():
+    client = make_client(allowed_names={"Sly Fox", "Clever Badger"})
+    created = client.post("/games", json={"display_name": "Jeremy"}, headers=_auth("auth-tedy"))
+    join_code = created.json()["join_code"]
+
+    # A different game_player trying to reuse the exact same typed name --
+    # the dup check is source-agnostic (checked against the trimmed name,
+    # not the raw submission).
+    response = client.post("/games/join", json={"join_code": join_code, "display_name": " Jeremy "}, headers=_auth("auth-mortia"))
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "name_taken"
+
+
+def test_join_game_with_forced_golden_rng_never_overrides_a_typed_name():
+    client = make_client(allowed_names={"Sly Fox", "Dave"}, golden_names={"Dave"}, rng=_ALWAYS_GOLDEN)
+    created = client.post("/games", json={"display_name": "Sly Fox"}, headers=_auth("auth-tedy"))
+    join_code = created.json()["join_code"]
+
+    response = client.post("/games/join", json={"join_code": join_code, "display_name": "Kimberly"}, headers=_auth("auth-mortia"))
+    assert response.status_code == 200
+
+    view = client.get(f"/games/{created.json()['game_id']}", headers=_auth("auth-tedy")).json()
+    joiner = next(p for p in view["players"] if p["game_player_id"] == response.json()["game_player_id"])
+    assert joiner["display_name"] == "Kimberly"
+    assert joiner["is_golden_name"] is False
 
 
 def test_join_game_accepts_a_different_seeded_name():

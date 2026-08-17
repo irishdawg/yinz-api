@@ -53,14 +53,18 @@ minimal "Closing the market…" message for it and nothing more.
 
 ### Lobby
 - A game is created by one host (`create_game`) and joined by up to 5 more
-  players (`join_game`), 2–6 total. Every `display_name` must be one of the
-  curated seed names in `player_name_seeds` (no free text anywhere in the
-  product); a display name already taken by another seated player in *this*
-  game is rejected.
+  players (`join_game`), 2–6 total. A `display_name` matching the curated
+  seed names in `player_name_seeds` goes through the anonymous-play path
+  (golden-eligible, see below); anything else is accepted as a typed name
+  (trimmed, capped at 24 characters, never golden-eligible) for in-person
+  play — see `api/routes.py`'s `_resolve_submitted_name`. Typed names get
+  no content-moderation filter, a deliberate gap (see `CURRENT_WORK.md`).
+  Either way, a display name already taken by another seated player in
+  *this* game is rejected (exact match, source-agnostic).
 - **Golden names**: a rare (1/500) draw, rolled independently at `create_game`
-  and each `join_game`, exactly once per real seat — never at the
-  free-preview/reroll endpoints. `GamePlayer.is_golden_name` is public
-  roster information.
+  and each `join_game`, exactly once per real seat, and only for a catalog
+  name — never at the free-preview/reroll endpoints, and never overriding a
+  typed name. `GamePlayer.is_golden_name` is public roster information.
 - `join_code` expires `join_code_lifetime_minutes` (default 30) after
   creation; joining with an expired code is rejected.
 - The **only** way `LOBBY → NEGOTIATION` happens is the host submitting

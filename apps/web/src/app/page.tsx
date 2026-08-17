@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { usePlayerName } from "@/lib/usePlayerName";
+import { NamePicker } from "@/components/NamePicker";
 
 interface ThemeSetSummary {
   theme_set_id: string;
@@ -17,7 +17,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [existingGameId, setExistingGameId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const { name, loading: nameLoading, error: nameError, requestInitial, reroll } = usePlayerName();
+  const [name, setName] = useState<string | null>(null);
   const [themeSets, setThemeSets] = useState<ThemeSetSummary[]>([]);
   const [themeSetId, setThemeSetId] = useState("");
   const [joinCodeInput, setJoinCodeInput] = useState("");
@@ -43,7 +43,6 @@ export default function Home() {
           // Non-fatal -- fall through to the normal create/join flow.
         }
         setReady(true);
-        requestInitial();
         fetch("/api/theme-sets")
           .then((response) => response.json())
           .then((data: ThemeSetSummary[]) => {
@@ -55,9 +54,7 @@ export default function Home() {
           });
       })
       .catch(() => setError("Couldn't start a session. Refresh and try again."));
-    // requestInitial is stable (no joinCode on this page) -- fine to omit re-runs on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [router]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -105,13 +102,13 @@ export default function Home() {
       });
       const data = await response.json();
       if (!response.ok) {
-        // The name shown here was drawn from the unscoped global pool, not
-        // excluding this specific game's roster (that only happens once a
-        // code is known) -- a collision is rare but real. Reroll and let
-        // them try again with one more click, instead of a dead-end error.
+        // A collision is more likely now than when every name came from
+        // the unscoped global pool -- two people typing "Tim" is a real
+        // scenario. NamePicker owns the actual name state either way, so
+        // there's nothing to auto-reroll here; just surface it and let
+        // them pick a different name (retype, or switch modes) themselves.
         if (data.detail?.error_code === "name_taken") {
-          await reroll();
-          throw new Error("That name's already taken in this game -- got you a new one, try again.");
+          throw new Error("That name's already taken in this game -- try a different one.");
         }
         throw new Error(typeof data.detail === "string" ? data.detail : (data.detail?.message ?? "Couldn't join that game."));
       }
@@ -128,22 +125,7 @@ export default function Home() {
       <main className="w-full max-w-sm">
         <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} className="mb-8" priority />
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-zinc-700">Your name</span>
-            <div className="flex items-center justify-between rounded border border-zinc-300 bg-white px-3 py-2">
-              <span data-testid="assigned-name" className="font-medium text-zinc-900">
-                {nameLoading ? "…" : (name ?? "—")}
-              </span>
-              <button
-                type="button"
-                onClick={reroll}
-                disabled={!name || nameLoading}
-                className="text-sm font-medium text-zinc-600 underline disabled:opacity-50"
-              >
-                Change name
-              </button>
-            </div>
-          </div>
+          <NamePicker onNameChange={setName} />
           {themeSets.length > 0 && (
             <label className="flex flex-col gap-1">
               <span className="text-sm font-medium text-zinc-700">Theme</span>
@@ -160,7 +142,7 @@ export default function Home() {
               </select>
             </label>
           )}
-          {(error || nameError) && <p className="text-sm text-red-600">{error ?? nameError}</p>}
+          {error && <p className="text-sm text-red-600">{error}</p>}
           {existingGameId && (
             <button
               type="button"
