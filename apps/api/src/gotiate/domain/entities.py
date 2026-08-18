@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # --------------------------------------------------------------------------
@@ -211,72 +211,24 @@ class GameConfig(BaseModel):
             6: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=True),
         }
     )
-    max_clock_seconds_by_players: dict[int, int] = Field(
-        default_factory=lambda: {2: 480, 3: 720, 4: 960, 5: 1200, 6: 1440}
-    )
+    # Flat 9 minutes regardless of player count -- was previously scaled
+    # per count (8/12/16/20/24 min), deliberately flattened; every other
+    # clock-relative pacing point (haircut_reveal_fraction,
+    # unilateral_cutoff_fraction, ...) stays a pure fraction of this, so
+    # larger games now get proportionally less time per trade, by design.
+    max_clock_seconds_by_players: dict[int, int] = Field(default_factory=lambda: {n: 540 for n in range(2, 7)})
     # Retires waterline_baseline_v1 entirely -- see the Haircut-risk design
-    # writeup. Several monotonic profiles per player count (not one
-    # universal curve) so players can't learn "position N is the real
-    # optimum"; every profile's max_depth must equal
-    # round(market_size_by_players[n] * risk_depth_fraction) for that same
-    # n, enforced by the model_validator below so config and profile data
-    # can never silently drift apart.
+    # writeup. A fresh profile is generated at random per game (see
+    # engine._generate_random_haircut_profile), not chosen from a fixed
+    # list of curated shapes -- an earlier version used 5 named curves per
+    # player count (Cliff/Deep burn/Brutal plateau/Moderate/Mild), retired
+    # once real playtesting confirmed players were starting to recognize
+    # and play around specific named shapes rather than treat the risk as
+    # genuinely unknown each game. The generator still targets the same
+    # structural depth (round(market_size_by_players[n] * risk_depth_fraction)
+    # for that n) and the same rough per-position bounds those curves
+    # embodied, just drawn fresh instead of picked.
     #
-    # Five named shapes per player count, spanning TWO independent axes,
-    # not just "how scary is #1" -- severity at the top AND how deep the
-    # danger zone cascades. Cliff/Deep burn/Brutal plateau are all "#1 is
-    # dangerous" but disagree sharply on whether #2/#3 recover quickly or
-    # stay dangerous too; Moderate/Mild are calmer at the top with their
-    # own distinct decay shapes. Deliberately NOT tuned so #2/#3 are
-    # reliably safe -- a deep, cascading danger zone is intended: it's
-    # what stops "push everything up" from being a context-free good
-    # move ("you can have #2, I don't want it"). See the playtest-driven
-    # Haircut-range design writeup for the worked cumulative-certainty
-    # curves these were derived from (Cliff/Deep burn/Brutal
-    # plateau/Moderate/Mild, by position: roughly 6/32/61/79/90,
-    # 6/15/31/54/73, 9/18/29/43/62, 25/43/61/76/87, 55/69/80/88/94 --
-    # truncated or extended per player count's own max_depth).
-    haircut_profiles_by_players: dict[int, list[HaircutProfile]] = Field(
-        default_factory=lambda: {
-            2: [  # identical to 3 -- both round to max_depth=4 now that n=2's
-                # market_size is 11, same existing precedent as 4/5 sharing
-                # profiles. See the Market-Correction market-size writeup.
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.21]),
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.46]),
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.57]),
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.24]),
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.12]),
-            ],
-            3: [
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.21]),
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.46]),
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.57]),
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.24]),
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.12]),
-            ],
-            4: [
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.10]),
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.27]),
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.38]),
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.13]),
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.06]),
-            ],
-            5: [  # identical to 4 -- both round to max_depth=5, same existing precedent
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.10]),
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.27]),
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.38]),
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.13]),
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.06]),
-            ],
-            6: [
-                HaircutProfile(depth_probabilities=[0.06, 0.26, 0.29, 0.18, 0.11, 0.06, 0.04]),
-                HaircutProfile(depth_probabilities=[0.06, 0.09, 0.16, 0.23, 0.19, 0.14, 0.13]),
-                HaircutProfile(depth_probabilities=[0.09, 0.09, 0.11, 0.14, 0.19, 0.16, 0.22]),
-                HaircutProfile(depth_probabilities=[0.25, 0.18, 0.18, 0.15, 0.11, 0.07, 0.06]),
-                HaircutProfile(depth_probabilities=[0.55, 0.14, 0.11, 0.08, 0.06, 0.03, 0.03]),
-            ],
-        }
-    )
     # The profile is chosen and locked at START_GAME but stays hidden until
     # this fraction of the negotiation clock has elapsed -- see
     # engine._handle_start_game / apply_due_time_transitions.
@@ -377,25 +329,19 @@ class GameConfig(BaseModel):
             return player_count
         return math.ceil(0.75 * player_count)
 
-    @model_validator(mode="after")
-    def _validate_haircut_profiles_match_risk_band(self) -> "GameConfig":
-        # Enforced invariant, not just convention -- see the Haircut-risk
-        # design writeup's config/profile-drift guard. Fails loudly at
-        # construction time (import time, for the module-level default
-        # GameConfig) rather than at game-start.
-        for n, profiles in self.haircut_profiles_by_players.items():
-            market_size = self.market_size_by_players.get(n)
-            if market_size is None:
-                continue
-            expected_depth = round(market_size * self.risk_depth_fraction)
-            for profile in profiles:
-                if profile.max_depth != expected_depth:
-                    raise ValueError(
-                        f"haircut_profiles_by_players[{n}] has a profile with max_depth="
-                        f"{profile.max_depth}, expected {expected_depth} "
-                        f"(round({market_size} * {self.risk_depth_fraction}))"
-                    )
-        return self
+    def accepters_required(self, player_count: int) -> int:
+        """How many *distinct* players (not counting the proposer/pool
+        initiator) must accept before a bare proposal or public pool
+        actually executes -- 1 (today's ordinary single-accept-executes
+        behavior) at 2-4 players, 2 at 5-6. A single 1:1 deal has an
+        outsized effect on a market meant to reflect 5-6 people's
+        collective read; requiring a second accepter makes deals need
+        real consensus rather than any two players being able to move it
+        alone. Private pools are exempt regardless of player count --
+        only the base proposer is ever eligible to accept one, so there's
+        structurally never a second distinct accepter to gather. See
+        engine._handle_accept_proposal / _handle_accept_pool."""
+        return 2 if player_count >= 5 else 1
 
 
 # --------------------------------------------------------------------------
@@ -455,6 +401,19 @@ class Proposal(BaseModel):
     # set never sees this proposal (or any Pool on it) in their own live
     # view again; see projections.project()'s omission filter.
     passed_player_ids: set[str] = Field(default_factory=set)
+    # player_id -> their own locked liability (0 or 1) for accepting THIS
+    # proposal, fresh at the moment they accepted -- populated once
+    # GameConfig.accepters_required(player_count) is more than 1 (5-6
+    # players). Below that threshold, the first (and only) accept settles
+    # and executes in the same instant, same as always, so this stays
+    # empty for its entire lifetime in a 2-4 player game. A liability of
+    # 1 here already moved available->committed; _resolve_proposal
+    # settles every entry here (committed->spent or committed->available)
+    # alongside the proposer's own bit, on whichever resolution reason
+    # this proposal eventually reaches -- so a pledge that never reaches
+    # threshold before the proposal is withdrawn/closed/voided is
+    # refunded, never spent. See engine._handle_accept_proposal.
+    pending_accepters: dict[str, int] = Field(default_factory=dict)
 
 
 class Pool(BaseModel):
@@ -470,6 +429,12 @@ class Pool(BaseModel):
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
     resolution_reason: PoolResolutionReason | None = None
+    # Same shape and settlement rule as Proposal.pending_accepters, but
+    # always empty for a PRIVATE pool -- only the base proposer is ever
+    # eligible to accept one, so GameConfig.accepters_required's >1
+    # threshold never applies to it regardless of player count. See
+    # engine._handle_accept_pool.
+    pending_accepters: dict[str, int] = Field(default_factory=dict)
 
 
 class PendingPickup(BaseModel):

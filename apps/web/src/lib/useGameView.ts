@@ -54,6 +54,13 @@ export interface ProposalView {
   // pattern as haircut_reveal_at/decision_deadline_at. See
   // engine._require_accept_unlocked.
   accept_locked_until: string;
+  // Public, unconditional -- accepting is already fully public everywhere
+  // else. Empty except at accepters_required > 1 (5-6 players); below
+  // that, the one accept that exists also always resolves the proposal
+  // in the same instant, so there's nothing here to ever observe live.
+  // See engine._handle_accept_proposal / GameConfig.accepters_required.
+  pending_accepter_ids: string[];
+  accepters_required: number;
   // Self-only, mutually exclusive: present on your own authored proposal
   // (the liability locked at PROPOSE_SWAP time -- never changes) or, while
   // open, a live preview of what accepting would cost you right now.
@@ -82,6 +89,10 @@ export interface PoolView {
     | "voided_market_swung"
     | "base_proposal_voided"
     | null;
+  // Same "who's pledged" transparency as ProposalView -- unconditional,
+  // never gated behind can_see_contents. Always [] / 1 for a private pool.
+  pending_accepter_ids: string[];
+  accepters_required: number;
   // Present only when this audience can see the pool's contents (public
   // pool, or an insider) -- see projections._project_pool. Direction is
   // content, gated the same as entity_c/entity_d.

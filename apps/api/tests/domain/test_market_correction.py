@@ -288,8 +288,15 @@ def test_eligible_exactly_at_the_stagnation_boundary():
     assert any(e.type is EventType.MARKET_CORRECTION_OFFERED for e in events)
 
 
-def test_expires_at_offer_seconds_and_pushes_the_cooldown():
+def test_expires_at_offer_seconds_and_does_not_push_the_cooldown():
+    """EXPIRED means nothing changed -- the market is exactly as stagnant
+    as when this was first offered, so cooldown is left untouched rather
+    than getting a fresh market_correction_cooldown_seconds tacked on.
+    Previously this pushed cooldown forward unconditionally, which is
+    what made the real trigger cadence drift away from a clean '90s since
+    the last deal' reading -- see _resolve_market_correction's docstring."""
     game, host, guest = _make_construction_succeeding_game()
+    cooldown_before = game.market_correction_cooldown_until
     offer_at = game.last_negotiated_execution_at + timedelta(seconds=game.config.market_correction_stagnation_seconds)
     engine.apply_due_time_transitions(game, offer_at)
     correction = game.pending_market_correction
@@ -300,32 +307,52 @@ def test_expires_at_offer_seconds_and_pushes_the_cooldown():
     assert game.pending_market_correction is None
     resolved = next(e for e in events if e.type is EventType.MARKET_CORRECTION_RESOLVED)
     assert resolved.payload["reason"] == MarketCorrectionResolutionReason.EXPIRED.value
-    assert game.market_correction_cooldown_until == expire_at + timedelta(seconds=game.config.market_correction_cooldown_seconds)
+    assert game.market_correction_cooldown_until == cooldown_before
 
 
-def test_cooldown_blocks_re_offering_immediately_after_a_resolution():
-    """Shared mechanism across every resolution reason (_resolve_market_correction
-    always pushes the cooldown) -- exercised here via EXPIRED, the
-    cheapest reason to force deterministically."""
+def test_expired_correction_re_offers_immediately_if_still_stagnant():
+    """The market is still just as stagnant right after an EXPIRED
+    resolution -- with cooldown untouched, the very next check (a
+    resolve-then-offer split across two ticks, same as one expiry
+    resolving and a fresh offer landing on the next ~1s poll in
+    production) re-offers, no extra delay tacked on."""
     game, _host, _guest = _make_construction_succeeding_game()
     offer_at = game.last_negotiated_execution_at + timedelta(seconds=game.config.market_correction_stagnation_seconds)
     engine.apply_due_time_transitions(game, offer_at)
     correction = game.pending_market_correction
     expire_at = correction.expires_at
-    engine.apply_due_time_transitions(game, expire_at)
-    cooldown_until = game.market_correction_cooldown_until
-    assert cooldown_until is not None
 
-    # Still well past the stagnation threshold (nothing negotiated since),
-    # so cooldown is the *only* thing that could still be blocking a new
-    # offer here.
-    just_before_cooldown_clears = cooldown_until - timedelta(seconds=1)
-    engine.apply_due_time_transitions(game, just_before_cooldown_clears)
+    engine.apply_due_time_transitions(game, expire_at)
     assert game.pending_market_correction is None
 
-    events = engine.apply_due_time_transitions(game, cooldown_until)
+    events = engine.apply_due_time_transitions(game, expire_at + timedelta(seconds=1))
     assert game.pending_market_correction is not None
     assert any(e.type is EventType.MARKET_CORRECTION_OFFERED for e in events)
+
+
+def test_triggered_and_market_resumed_do_push_the_cooldown():
+    """Unlike EXPIRED/INVALIDATED, both of these represent genuinely fresh
+    activity -- a correction actually firing, or a real negotiated deal
+    landing -- so the market does earn a real breather before the next
+    one can be offered."""
+    game, host, guest = _make_construction_succeeding_game()
+    offer_at = game.last_negotiated_execution_at + timedelta(seconds=game.config.market_correction_stagnation_seconds)
+    engine.apply_due_time_transitions(game, offer_at)
+    correction = game.pending_market_correction
+    assert correction is not None
+
+    trigger_at = offer_at + timedelta(seconds=1)
+    events = engine.handle_command(
+        game,
+        command_type="TRIGGER_MARKET_CORRECTION",
+        payload={"correction_id": correction.correction_id},
+        actor_game_player_id=host,
+        expected_version=None,
+        now=trigger_at,
+    )
+    resolved = next(e for e in events if e.type is EventType.MARKET_CORRECTION_RESOLVED)
+    assert resolved.payload["reason"] == MarketCorrectionResolutionReason.TRIGGERED.value
+    assert game.market_correction_cooldown_until == trigger_at + timedelta(seconds=game.config.market_correction_cooldown_seconds)
 
 
 def test_a_failed_construction_does_not_push_the_cooldown():

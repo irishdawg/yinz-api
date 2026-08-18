@@ -119,13 +119,16 @@ def test_scored_game_with_no_realized_haircut_depth_does_not_crash():
 
 def test_haircut_risk_band_depth_public_before_and_after_reveal():
     # Unlike haircut_profile itself, the risk band boundary is public from
-    # game start -- every profile configured for this player count shares
-    # the same max_depth (see GameConfig's model_validator), so this alone
-    # never reveals which profile was chosen or its shape.
+    # game start -- computed straight from config (round(market_size *
+    # risk_depth_fraction)), deliberately NOT game.haircut_profile.max_depth,
+    # since a randomly generated profile's own effective depth can land
+    # earlier than the structural slot count -- see
+    # engine._generate_random_haircut_profile's docstring.
     game = make_started_game(2)
     view_before = project(game, PublicAudience())
     assert view_before["haircut_profile"] is None
-    assert view_before["haircut_risk_band_depth"] == game.haircut_profile.max_depth
+    expected_depth = round(len(game.market) * game.config.risk_depth_fraction)
+    assert view_before["haircut_risk_band_depth"] == expected_depth
 
     game.haircut_profile_revealed_at = now()
     view_after = project(game, PublicAudience())

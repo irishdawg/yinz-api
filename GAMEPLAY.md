@@ -96,16 +96,20 @@ minimal "Closing the market…" message for it and nothing more.
    (not necessarily from the player's own portfolio). Emits `PORTFOLIO_DEALT`
    (payload carries the full setup-quality diagnostics, `SERVER_ONLY`) and
    `RESERVES_DEALT`.
-4. Sets `max_duration_s` (`max_clock_seconds_by_players[n]`), `started_at`,
-   `unilateral_cutoff_at` (`started_at + max_duration_s * (1 -
+4. Sets `max_duration_s` (`max_clock_seconds_by_players[n]` — flat 540s/9
+   minutes at every player count, deliberately not scaled by n; every
+   other clock-relative pacing point below stays a pure fraction of this,
+   so a larger game gets proportionally less time per trade, by design),
+   `started_at`, `unilateral_cutoff_at` (`started_at + max_duration_s * (1 -
    unilateral_cutoff_fraction)`), `close_threshold` (`close_threshold(n)`).
 5. (2-player games only) `last_negotiated_execution_at` and
    `market_correction_cooldown_until` both set to `started_at` — see §9.
-6. A `HaircutProfile` is drawn uniformly from `haircut_profiles_by_players[n]`
-   and locked onto the game; `haircut_reveal_at = started_at + max_duration_s
-   * haircut_reveal_fraction` (default 50% of the clock). Emits
-   `HAIRCUT_PROFILE_SELECTED` (`SERVER_ONLY` — nobody sees this live, not
-   even the reveal timing's contents).
+6. A `HaircutProfile` is generated fresh, at random (`_generate_random_haircut_profile`
+   — not chosen from a fixed list, see §8) and locked onto the game;
+   `haircut_reveal_at = started_at + max_duration_s * haircut_reveal_fraction`
+   (default 50% of the clock). Emits `HAIRCUT_PROFILE_SELECTED`
+   (`SERVER_ONLY` — nobody sees this live, not even the reveal timing's
+   contents).
 7. `phase = NEGOTIATION`. Emits `GAME_STARTED`.
 
 ### Negotiation
@@ -266,6 +270,37 @@ better position if swapped.
   Influence-spending ones — cheap, and only spending can ever newly zero
   everyone out. No cooldown, no cap: firing again the next time the table
   goes fully broke is intended, not a bug.
+- **Accept threshold at 5-6 players** (`GameConfig.accepters_required`):
+  a bare proposal, and a **public** pool, needs 2 distinct accepters (not
+  just 1) before it actually executes at 5 or 6 players — at 2-4, the
+  first accept still executes immediately, exactly as always. A single
+  1:1 deal has an outsized effect on a market meant to reflect 5-6
+  people's collective read; requiring a second accepter makes deals need
+  real consensus rather than any two players being able to move it alone.
+  **Private pools are exempt at every player count** — only the base
+  proposer is ever eligible to accept one, so there's structurally never
+  a second distinct accepter to gather.
+  - Below threshold, an accept registers as a *pledge*: the accepter's own
+    liability locks fresh (`available → committed`, exactly like an
+    author's own liability locks at authoring time — free if they can't
+    afford it, same zero-Influence waiver as above), `PROPOSAL_ACCEPT_PLEDGED`
+    / `POOL_ACCEPT_PLEDGED` fires (fully public, actor included — accepting
+    is already public everywhere else, unlike Pass), and the proposal/pool
+    stays `OPEN`. The same player can't pledge twice on the same object.
+  - Once the required count is reached, every pending accepter's locked
+    liability settles to `spent` and the swap executes exactly as the
+    single-accept case always has (`_resolve_proposal`/`_resolve_pool` now
+    settle every pending accepter alongside the author's own bit, on
+    whichever resolution reason the object eventually reaches).
+  - If the object resolves any other way first (withdrawn, market closed,
+    voided, preempted by a sibling pool, ...) before reaching threshold,
+    every pending accepter's locked liability refunds to `available` — a
+    pledge that never executes never costs anything, no matter how far it
+    got.
+  - `pending_accepter_ids`/`accepters_required` in the projected view are
+    public and unconditional (for a pool, even when the contents
+    themselves aren't) — "who's pledged" doesn't reveal anything the
+    Pass-anonymity model protects.
 - **No two open bare proposals for the same pair, across players**:
   `PROPOSE_SWAP` also rejects if *any* player already has an `OPEN`
   proposal naming the same two entities (order-independent), not just a
@@ -479,27 +514,45 @@ frontend section).
 ## 8. Haircut risk & final scoring
 
 At `START_GAME`, one `HaircutProfile` (`depth_probabilities: list[float]`,
-summing to 1.0) is drawn uniformly from `haircut_profiles_by_players[n]` and
-locked for the game. `depth_probabilities[d]` is the probability the
-realized wipe depth equals `d`; `certainty(p) = sum(depth_probabilities[0:p])`
-is the probability a position `p` (1-indexed) survives.
+summing to 1.0) is generated fresh, at random, and locked for the game.
+`depth_probabilities[d]` is the probability the realized wipe depth equals
+`d`; `certainty(p) = sum(depth_probabilities[0:p])` is the probability a
+position `p` (1-indexed) survives.
 
-- **Risk band**: every profile's `max_depth` (highest index with nonzero
-  probability) is enforced equal to `round(market_size * risk_depth_fraction)`
-  (`risk_depth_fraction = 0.35`) by a `GameConfig` validator — this makes
-  "the top K positions carry *some* risk" structural and publicly knowable
-  from game start (`haircut_risk_band_depth` in `project()`), even though
-  the profile's actual *shape* within that band stays hidden until reveal.
+- **Risk band**: `haircut_risk_band_depth` in `project()` — the number of
+  top positions that carry *some* risk, public and structural from game
+  start — is computed straight from config (`round(market_size *
+  risk_depth_fraction)`, `risk_depth_fraction = 0.35`), deliberately **not**
+  `HaircutProfile.max_depth` (the actual profile's own highest nonzero
+  index). The two used to always agree back when profiles came from a
+  curated list validated against this exact formula; a randomly generated
+  profile's own effective depth can land earlier (see below), and reading
+  it here would leak the profile's shape before reveal.
 - **Reveal**: hidden until `haircut_reveal_at` (50% of the clock by
   default) — `HAIRCUT_RISK_REVEALED` fires live at that instant. A game
   that closes via `READY_THRESHOLD` before the halfway mark never sees the
   live event, but `project()` unconditionally reveals the profile once
   `phase == SCORED` regardless.
-- **Five named shapes per player count** (Cliff / Deep burn / Brutal
-  plateau / Moderate / Mild), deliberately varying on two axes — how severe
-  position #1 is, *and* how deep the danger zone cascades into #2/#3 — not
-  just "how scary is the top." Not tuned so #2/#3 are reliably safe; that's
-  intended, not a gap.
+- **Generated fresh every game, not chosen from a list**
+  (`engine._generate_random_haircut_profile`) — an earlier version picked
+  one of 5 named curves per player count (Cliff / Deep burn / Brutal
+  plateau / Moderate / Mild); retired once real playtesting showed players
+  starting to recognize and play around specific shapes. The generator
+  works in the survival CDF (`certainty(p)` above, monotonic by
+  construction): position 1's survival lands in `[5%, 50%]`, position 2's
+  in `[11%, 61%]` (automatically greater than position 1's, since it's a
+  cumulative sum), and every deeper position keeps climbing by a fresh
+  random amount toward certainty — deliberately lumpy rather than a fixed
+  step, so some games jump to safety early and others creep up gradually.
+  The survival curve always reaches exactly 100% by the profile's last
+  structural slot (`round(market_size * risk_depth_fraction)` deep, same
+  as the risk band above) — sometimes earlier, leaving a genuinely
+  zero-probability tail ("a big jump from the last at-risk position
+  straight to certain safety" is an intended shape, not an edge case).
+  Still varies on the same two axes the old curated shapes did — how
+  severe position #1 is, and how deep the danger zone cascades into
+  #2/#3 — just drawn instead of picked, for real game-to-game variability
+  instead of a small family of curves.
 - **The one random draw**: `draw_haircut_depth` runs exactly once, at
   `close_market`, and persists its result immediately — everything
   downstream is pure/deterministic from that persisted value (§2).
@@ -538,10 +591,21 @@ a player must affirmatively trigger it.
   against whatever the board looks like by then, rather than sitting dark
   for a full cooldown period.
 - The offer lasts `market_correction_offer_seconds` (15.0s default); if
-  unclaimed, it resolves `EXPIRED` and pushes `market_correction_cooldown_until`
-  forward by `market_correction_cooldown_seconds` (90.0s default) — this
-  cooldown is what stops a permanently-stalled game from re-offering the
-  instant the last one lapses.
+  unclaimed, it resolves `EXPIRED`.
+- **Cooldown only pushes forward for `TRIGGERED`/`MARKET_RESUMED`** — both
+  represent genuinely fresh activity (a correction actually firing, or a
+  real negotiated deal landing) that earns the market a real breather.
+  `EXPIRED` and `INVALIDATED` deliberately leave `market_correction_cooldown_until`
+  untouched: nothing changed, the market is exactly as stagnant as when
+  the correction was first offered, so the very next tick re-offers
+  immediately if it's still genuinely stagnant. An earlier version pushed
+  the cooldown unconditionally on every resolution reason, which meant an
+  `EXPIRED`/`INVALIDATED` correction tacked a full extra
+  `market_correction_cooldown_seconds` of silence onto the stagnation that
+  was already there — real playtest feedback: the trigger felt like it
+  fired at "seemingly random times" rather than a clean 90s mark, because
+  the actual re-offer timing depended on how many times one had already
+  expired/invalidated, not on "90s since the last deal."
 
 ### Construction — hidden, fixed, built before anyone chooses
 `_construct_market_correction` builds exactly one downward move per player,
@@ -777,6 +841,17 @@ indefinitely — is what this specifically fixed).
 over an already-public, already-revealed `HaircutProfile`; nothing here is
 ever computed before the server has already made the underlying data
 public.
+
+**`useEntityNotes.ts`** — private per-player "who does this remind me of"
+notes: right-click (or long-press on touch) a market card for a list of
+seated players' names, pick one, it sticks on the card. Purely a personal
+memory aid, **not gameplay state at all** — `localStorage` only, scoped to
+this browser and this game, never sent to the server, never read by
+`project()`. While a card's note menu is open, the whole market grid
+(order, positions, points/payout numbers) freezes to a snapshot taken the
+instant it opened, so the menu's anchor point doesn't slide out from under
+a live reorder mid-interaction; it catches up to live state in one
+ordinary reorder transition once closed.
 
 None of the above ever computes a legality decision, a cost, or a score —
 those always come from the server (`project()`'s fields,

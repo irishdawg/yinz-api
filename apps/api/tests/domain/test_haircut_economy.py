@@ -44,76 +44,66 @@ def test_max_depth_is_the_highest_index_with_nonzero_probability():
     assert HaircutProfile(depth_probabilities=[1.0]).max_depth == 0
 
 
-def test_worked_example_certainty_curve_matches_the_design_writeup():
-    # The "Moderate" shape's worked cumulative-certainty curve from the
-    # playtest-driven Haircut-range design writeup: 25/43/61/76/87/100%
-    # at positions 1-6 for a 13-slot market (n=4). Not a dedicated
-    # server-side certainty() function (certainty is computed client-side
-    # from the public profile, by design), so this exercises the authored
-    # default profile data directly against the same
-    # sum(depth_probabilities[0:position]) formula the frontend uses.
-    profile = next(
-        p for p in GameConfig().haircut_profiles_by_players[4] if p.depth_probabilities == [0.25, 0.18, 0.18, 0.15, 0.11, 0.13]
-    )
-    expected = [0.25, 0.43, 0.61, 0.76, 0.87, 1.00]
-    cumulative = 0.0
-    for position, want in enumerate(expected, start=1):
-        cumulative = sum(profile.depth_probabilities[0:position])
-        assert cumulative == pytest.approx(want, abs=1e-9)
+def test_generated_profile_is_valid_across_every_configured_player_count():
+    # round(market_size * risk_depth_fraction) for n=2..6 -- see
+    # GameConfig.market_size_by_players / risk_depth_fraction.
+    structural_depths = [round(GameConfig().market_size_by_players[n] * GameConfig().risk_depth_fraction) for n in range(2, 7)]
+    rng = random.Random(7)
+    for depth in structural_depths:
+        for _ in range(200):
+            profile = engine._generate_random_haircut_profile(depth, rng)
+            assert len(profile.depth_probabilities) == depth
+            assert sum(profile.depth_probabilities) == pytest.approx(1.0, abs=1e-9)
+            assert all(p >= 0 for p in profile.depth_probabilities)
 
 
-def test_config_rejects_a_profile_whose_max_depth_drifts_from_the_risk_band():
-    # The enforced invariant from the design writeup: every profile's
-    # max_depth must equal round(market_size * risk_depth_fraction) for its
-    # player count, so config and profile data can never silently drift
-    # apart. This profile has max_depth=2, not the 11-entity market's
-    # expected round(11 * 0.35) = 4.
-    with pytest.raises(ValueError, match="max_depth"):
-        GameConfig(haircut_profiles_by_players={2: [HaircutProfile(depth_probabilities=[0.5, 0.3, 0.2])]})
+def test_generated_profile_respects_the_first_and_second_position_survival_ranges():
+    # sum(depth_probabilities[0:position]) is the survival CDF -- position
+    # 1's own survival is depth_probabilities[0] alone, position 2's is
+    # the first two summed. See _generate_random_haircut_profile's
+    # docstring for why this is the natural space to bound.
+    rng = random.Random(11)
+    for _ in range(2000):
+        profile = engine._generate_random_haircut_profile(5, rng)
+        first = profile.depth_probabilities[0]
+        second = first + profile.depth_probabilities[1]
+        assert 0.05 <= first <= 0.50
+        assert 0.11 <= second <= 0.61
+        assert second > first
 
 
-def test_default_config_profiles_satisfy_their_own_risk_band_invariant():
-    # Constructing the real default GameConfig must not raise -- this is
-    # the validator running against the actual authored profile sets, not
-    # a synthetic one.
-    GameConfig()
+def test_generated_profile_certainty_is_monotonic_and_reaches_100_percent_at_the_last_slot():
+    rng = random.Random(13)
+    for _ in range(500):
+        profile = engine._generate_random_haircut_profile(6, rng)
+        cumulative = 0.0
+        for p in profile.depth_probabilities:
+            new_cumulative = cumulative + p
+            assert new_cumulative >= cumulative - 1e-9  # monotonic non-decreasing
+            cumulative = new_cumulative
+        assert cumulative == pytest.approx(1.0, abs=1e-9)
 
 
-def test_certainty_is_monotonic_and_reaches_100_percent_at_the_risk_band_boundary():
-    # Automatic for any valid HaircutProfile (non-negative, sums to 1.0) --
-    # not a property specific to any one authored shape, so this checks
-    # every configured profile across every player count, not just one.
-    for profiles in GameConfig().haircut_profiles_by_players.values():
-        for profile in profiles:
-            cumulative = 0.0
-            for p in profile.depth_probabilities:
-                new_cumulative = cumulative + p
-                assert new_cumulative >= cumulative - 1e-9  # monotonic non-decreasing
-                cumulative = new_cumulative
-            assert cumulative == pytest.approx(1.0, abs=1e-9)
+def test_generated_profiles_show_real_game_to_game_variability():
+    # Not a family of curves a player could learn to recognize -- draws
+    # across many seeds should span close to the full stated first
+    # -position range, not cluster around one or two shapes.
+    rng = random.Random(17)
+    firsts = [engine._generate_random_haircut_profile(5, rng).depth_probabilities[0] for _ in range(500)]
+    assert min(firsts) < 0.12
+    assert max(firsts) > 0.43
+    assert max(firsts) - min(firsts) > 0.30
 
 
-def test_every_player_count_has_at_least_one_severe_profile():
-    # Playtest-driven correction: the original profile set never went
-    # below ~48% survival at position #1, which made the top of the
-    # market feel too safe. At least one configured profile per player
-    # count must put #1's own survival (depth_probabilities[0]) at or
-    # below 10% -- "radioactive," not just "a bit risky." See the
-    # Haircut-range design writeup.
-    for n, profiles in GameConfig().haircut_profiles_by_players.items():
-        assert any(p.depth_probabilities[0] <= 0.10 for p in profiles), f"player count {n} has no severe (<=10%) profile"
-
-
-def test_position_one_survival_spans_a_materially_broad_range_per_player_count():
-    # Regression guard against the configured range quietly re-clustering
-    # later -- not pinning the exact values (5/25/55 or any other specific
-    # anchors), just requiring the spread to stay real. Deliberately not
-    # constraining #2/#3 at all -- a deep, cascading danger zone is
-    # intended behavior, not something to tune toward safety.
-    for n, profiles in GameConfig().haircut_profiles_by_players.items():
-        top_survivals = [p.depth_probabilities[0] for p in profiles]
-        spread = max(top_survivals) - min(top_survivals)
-        assert spread >= 0.45, f"player count {n}'s #1-survival spread is only {spread:.2f}, expected >= 0.45"
+def test_generated_profile_can_reach_certainty_before_the_last_structural_slot():
+    # "A big jump between the last at-risk position and the first 100%
+    # spot" is an intended shape, not something to avoid -- over enough
+    # draws, at least some profiles should have a genuinely zero-
+    # probability trailing slot (HaircutProfile.max_depth landing earlier
+    # than the structural depth passed in).
+    rng = random.Random(19)
+    depth = 6
+    assert any(engine._generate_random_haircut_profile(depth, rng).max_depth < depth - 1 for _ in range(500))
 
 
 # --------------------------------------------------------------------------

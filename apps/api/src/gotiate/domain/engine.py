@@ -409,6 +409,62 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
     return events
 
 
+_HAIRCUT_FIRST_DEPTH_SURVIVAL_RANGE = (0.05, 0.50)
+_HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE = (0.11, 0.61)
+
+
+def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) -> HaircutProfile:
+    """A fresh Haircut profile, drawn at random every game rather than
+    picked from a fixed list -- see GameConfig.haircut_reveal_fraction's
+    docstring for why the old 5-curve-per-player-count list was retired.
+    Works entirely in the *survival* CDF (sum(depth_probabilities[0:p]) =
+    P(position p survives), per HaircutProfile's own docstring) since
+    that's the natural space to bound: monotonic by construction, so
+    "second always greater than first" falls out for free rather than
+    needing its own check.
+
+    `structural_depth` is round(market_size * risk_depth_fraction), same
+    formula the old model_validator enforced against the curated list --
+    still the number of slots in depth_probabilities, and still what
+    haircut_risk_band_depth reports pre-reveal (projections.project, kept
+    independent of any specific profile's shape -- see its own comment).
+    Deliberately NOT the same thing as this profile's own effective depth
+    (HaircutProfile.max_depth, highest nonzero index): the survival CDF
+    can reach 1.0 before using every slot, in which case every later slot
+    is legitimately 0 -- "a big jump from the last at-risk position
+    straight to certain safety" is an intended shape, not an edge case to
+    avoid, per real playtest direction. Deliberately lumpy rather than a
+    fixed step size between depths: each step is a fresh uniform draw
+    across all remaining room up to 100%, so some games jump hard early
+    and coast, others creep up gradually -- genuine game-to-game
+    variability, not a family of curves a player could learn to recognize
+    (the entire reason the curated list was retired)."""
+    if structural_depth <= 0:
+        return HaircutProfile(depth_probabilities=[1.0])
+
+    cumulative = [rng.uniform(*_HAIRCUT_FIRST_DEPTH_SURVIVAL_RANGE)]
+    if structural_depth >= 2:
+        low, high = _HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE
+        cumulative.append(rng.uniform(max(low, cumulative[0]), high))
+    for _ in range(2, structural_depth):
+        previous = cumulative[-1]
+        if previous >= 1.0 or rng.random() < 0.25:
+            # A genuine chance of reaching certainty early, not just
+            # asymptotically approaching it -- a pure continuous uniform
+            # draw only reaches exactly 1.0 in the mathematical limit
+            # (probability zero in practice), which would make "a big
+            # jump to the first 100% spot" theoretically possible but
+            # never actually observed. This is what makes it a real,
+            # regularly-occurring shape instead.
+            cumulative.append(1.0)
+        else:
+            cumulative.append(previous + rng.uniform(0.0, 1.0 - previous))
+    cumulative[-1] = 1.0  # the last structural slot is always where safety becomes certain
+
+    depth_probabilities = [cumulative[0]] + [cumulative[i] - cumulative[i - 1] for i in range(1, structural_depth)]
+    return HaircutProfile(depth_probabilities=depth_probabilities)
+
+
 def draw_haircut_depth(profile: HaircutProfile, rng: random.Random) -> int:
     """The sole random draw behind Haircut scoring -- one correlated pick
     of a wipe depth, never independent per-position rolls. Must only ever
@@ -628,11 +684,12 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     game.last_negotiated_execution_at = now
     game.market_correction_cooldown_until = now
 
-    # Chosen and locked now, hidden until haircut_reveal_at -- see the
-    # Haircut-risk design writeup. game.max_duration_s is already assigned
-    # above, so this can reference it directly rather than recomputing from
-    # config (both would agree, but this avoids the ordering dependency).
-    game.haircut_profile = rng.choice(game.config.haircut_profiles_by_players[n])
+    # Generated fresh and locked now, hidden until haircut_reveal_at -- see
+    # the Haircut-risk design writeup and _generate_random_haircut_profile.
+    # game.max_duration_s is already assigned above, so this can reference
+    # it directly rather than recomputing from config (both would agree,
+    # but this avoids the ordering dependency).
+    game.haircut_profile = _generate_random_haircut_profile(round(market_size * game.config.risk_depth_fraction), rng)
     game.haircut_reveal_at = now + timedelta(seconds=game.max_duration_s * game.config.haircut_reveal_fraction)
     events.append(_emit(game, now, EventType.HAIRCUT_PROFILE_SELECTED, actor=None, payload={}))
     game.phase = GamePhase.NEGOTIATION
@@ -786,19 +843,49 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
         raise IllegalCommandError("cannot accept your own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
         raise IllegalCommandError("you passed this proposal and can no longer accept it")
+    if actor_game_player_id in proposal.pending_accepters:
+        raise IllegalCommandError("you already accepted this proposal")
     _require_accept_unlocked(game, proposal, now)
 
     # The accepter's liability is fresh, evaluated right now against their
-    # current holdings, and charged straight away -- no commit interval,
-    # since accepting executes synchronously. Entirely independent of the
-    # proposer's own already-locked liability, settled separately below.
-    # Zero available Influence never blocks accepting (only originating a
-    # proposal/pool does, above) -- a broke player can still say yes to
-    # someone else's deal, just for free; there's nothing left to charge.
+    # current holdings, and locked the instant they accept -- exactly like
+    # an author's own liability locks at PROPOSE_SWAP time, never
+    # recomputed later. Entirely independent of the proposer's own
+    # already-locked liability. Zero available Influence never blocks
+    # accepting (only originating a proposal/pool does, above) -- a broke
+    # player can still say yes to someone else's deal, just for free;
+    # there's nothing left to lock.
     accepter = game.player_by_id(actor_game_player_id)
-    if _liability_for(game, actor_game_player_id, proposal.swap.entity_a, proposal.swap.entity_b) == 1 and accepter.influence_available >= 1:
+    fresh_liability = _liability_for(game, actor_game_player_id, proposal.swap.entity_a, proposal.swap.entity_b)
+    locked_liability = fresh_liability if fresh_liability == 1 and accepter.influence_available >= 1 else 0
+    if locked_liability == 1:
         accepter.influence_available -= 1
-        accepter.influence_spent += 1
+        accepter.influence_committed += 1
+    proposal.pending_accepters[actor_game_player_id] = locked_liability
+
+    # Below GameConfig.accepters_required (2-4 players, always 1), this is
+    # always true on the very first accept -- the exact same
+    # single-accept-executes behavior as before this feature existed. At
+    # 5-6 players it takes accepters_required distinct accepts before the
+    # deal actually executes; every accept before that is a real, locked
+    # commitment (see above) that's only settled to spent or refunded once
+    # this proposal actually resolves, one way or another -- see
+    # _resolve_proposal.
+    required = game.config.accepters_required(len(game.players))
+    if len(proposal.pending_accepters) < required:
+        return [
+            _emit(
+                game,
+                now,
+                EventType.PROPOSAL_ACCEPT_PLEDGED,
+                actor=actor_game_player_id,
+                payload={
+                    "proposal_id": proposal.proposal_id,
+                    "accepted_count": len(proposal.pending_accepters),
+                    "required_count": required,
+                },
+            )
+        ]
 
     # A negotiated deal executing is proof the market isn't frozen --
     # unconditional, resolved *before* this deal's own _execute_swap runs
@@ -934,11 +1021,14 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         raise IllegalCommandError("only the base proposer may accept a private pool")
     if actor_game_player_id in base.passed_player_ids:
         raise IllegalCommandError("you passed this proposal and can no longer accept a Pool on it")
+    if actor_game_player_id in pool.pending_accepters:
+        raise IllegalCommandError("you already accepted this pool")
     # Private pools are exempt entirely -- the only person who can ever
     # accept one is the base proposer themselves, already the one person
     # who's read it by construction, so there's no snap-accept risk to
-    # guard against. A public pool can't go live before the base proposal
-    # it hangs off of does.
+    # guard against, and no second distinct accepter to ever gather (see
+    # GameConfig.accepters_required). A public pool can't go live before
+    # the base proposal it hangs off of does.
     if pool.visibility is PoolVisibility.PUBLIC:
         _require_accept_unlocked(game, base, now)
 
@@ -958,13 +1048,33 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     )
     pool_leg_liability = _liability_for(game, actor_game_player_id, pool.swap.entity_a, pool.swap.entity_b)
     already_committed = is_base_author and base.initiator_influence_liability == 1
-    # Same waiver as _handle_accept_proposal: zero available Influence never
-    # blocks accepting, it just means this accept is free.
-    if not already_committed and (base_leg_liability == 1 or pool_leg_liability == 1):
-        accepter = game.player_by_id(actor_game_player_id)
-        if accepter.influence_available >= 1:
-            accepter.influence_available -= 1
-            accepter.influence_spent += 1
+    combined_liability = 0 if already_committed else (1 if base_leg_liability == 1 or pool_leg_liability == 1 else 0)
+
+    # Locked the instant they accept -- same rule as _handle_accept_proposal,
+    # settled (spent or refunded) once this pool actually resolves, see
+    # _resolve_pool. Same zero-Influence waiver: never blocks accepting.
+    accepter = game.player_by_id(actor_game_player_id)
+    locked_liability = combined_liability if combined_liability == 1 and accepter.influence_available >= 1 else 0
+    if locked_liability == 1:
+        accepter.influence_available -= 1
+        accepter.influence_committed += 1
+    pool.pending_accepters[actor_game_player_id] = locked_liability
+
+    # Private pools always require exactly 1 (see accepters_required's own
+    # docstring on why they're exempt); public pools use the same
+    # threshold as a bare proposal. Below that threshold this is always
+    # true on the first accept -- unchanged behavior for 2-4 players.
+    required = 1 if pool.visibility is PoolVisibility.PRIVATE else game.config.accepters_required(len(game.players))
+    if len(pool.pending_accepters) < required:
+        return [
+            _emit(
+                game,
+                now,
+                EventType.POOL_ACCEPT_PLEDGED,
+                actor=actor_game_player_id,
+                payload={"pool_id": pool.pool_id, "accepted_count": len(pool.pending_accepters), "required_count": required},
+            )
+        ]
 
     # Same ordering rule as _handle_accept_proposal -- resolve any pending
     # correction as MARKET_RESUMED *before* either leg's _execute_swap
@@ -1217,10 +1327,12 @@ def _emit(game: Game, now: datetime, type_: EventType, *, actor: str | None, pay
 
 
 def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolutionReason, resolved_by: str | None, now: datetime) -> GameEvent:
-    # Settles the PROPOSER's own locked liability (never the accepter's --
-    # that's charged separately, fresh, in _handle_accept_proposal). A
-    # liability of 0 never committed anything, so there's nothing to
-    # settle here at all.
+    # Settles the PROPOSER's own locked liability, plus every pending
+    # accepter's own locked liability (see Proposal.pending_accepters --
+    # empty except at accepters_required > 1, i.e. 5-6 players). Same
+    # settle-or-refund rule for both: EXECUTED spends it, anything else
+    # refunds it. A liability of 0 never committed anything, nothing to
+    # settle for that entry.
     if proposal.initiator_influence_liability == 1:
         initiator = game.player_by_id(proposal.swap.initiator_player_id)
         initiator.influence_committed -= 1
@@ -1228,6 +1340,14 @@ def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolution
             initiator.influence_spent += 1
         else:
             initiator.influence_available += 1
+    for accepter_id, locked_liability in proposal.pending_accepters.items():
+        if locked_liability == 1:
+            accepter = game.player_by_id(accepter_id)
+            accepter.influence_committed -= 1
+            if reason is ProposalResolutionReason.EXECUTED:
+                accepter.influence_spent += 1
+            else:
+                accepter.influence_available += 1
     proposal.status = ResolutionStatus.RESOLVED
     proposal.resolved_at_seq_no = game.next_seq_no
     proposal.resolved_by_player_id = resolved_by
@@ -1236,9 +1356,10 @@ def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolution
 
 
 def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved_by: str | None, now: datetime, *, spend: bool) -> GameEvent:
-    # Settles the pool INITIATOR's own locked liability -- entirely
-    # separate from whoever accepts it, who's charged fresh in
-    # _handle_accept_pool. A liability of 0 never committed anything.
+    # Settles the pool INITIATOR's own locked liability, plus every
+    # pending accepter's own locked liability (see Pool.pending_accepters
+    # -- empty for a private pool always, and for a public one except at
+    # accepters_required > 1). A liability of 0 never committed anything.
     if pool.initiator_influence_liability == 1:
         initiator = game.player_by_id(pool.swap.initiator_player_id)
         initiator.influence_committed -= 1
@@ -1246,6 +1367,14 @@ def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved
             initiator.influence_spent += 1
         else:
             initiator.influence_available += 1
+    for accepter_id, locked_liability in pool.pending_accepters.items():
+        if locked_liability == 1:
+            accepter = game.player_by_id(accepter_id)
+            accepter.influence_committed -= 1
+            if spend:
+                accepter.influence_spent += 1
+            else:
+                accepter.influence_available += 1
     pool.status = ResolutionStatus.RESOLVED
     pool.resolved_at_seq_no = game.next_seq_no
     pool.resolved_by_player_id = resolved_by
@@ -1376,13 +1505,32 @@ def _resolve_market_correction(
     correction's own swaps (see the self-invalidation fix in
     _handle_trigger_market_correction), so by the time this runs for the
     triggered case the field is already None. Idempotent either way:
-    always (re-)clears it and pushes the cooldown forward. The payload
-    always carries the full `moves` detail regardless of reason -- see
-    projections.project_events' bespoke redaction for MARKET_CORRECTION_RESOLVED,
-    which hides it live unless reason == "triggered" (or the audience is
-    Replay), so a future Replay build gets full transparency for free."""
+    always (re-)clears it. The payload always carries the full `moves`
+    detail regardless of reason -- see projections.project_events' bespoke
+    redaction for MARKET_CORRECTION_RESOLVED, which hides it live unless
+    reason == "triggered" (or the audience is Replay), so a future Replay
+    build gets full transparency for free.
+
+    Cooldown is pushed forward *only* for TRIGGERED/MARKET_RESUMED --
+    both represent genuinely fresh activity (a correction firing, or a
+    negotiated deal landing) that should buy the market a real breather
+    before the next one can be offered. EXPIRED and INVALIDATED are the
+    opposite: nothing changed, the market is exactly as stagnant as it
+    was when this was first offered. Previously this pushed cooldown
+    forward unconditionally, which meant an EXPIRED/INVALIDATED
+    correction added a full extra market_correction_cooldown_seconds of
+    silence on top of the stagnation that was already there -- so the
+    *next* correction's actual timing depended on how many times one had
+    already expired/invalidated, not on '90s since the last deal' the way
+    it's supposed to. Real playtest feedback: this made the trigger feel
+    like it fired at "seemingly random times" rather than a clean 90s
+    mark. Leaving cooldown untouched here means the very next tick
+    re-offers immediately if the market's still genuinely stagnant --
+    which is correct, not spammy: each re-offer is still a real,
+    actionable window, and only continued inaction keeps producing them."""
     game.pending_market_correction = None
-    game.market_correction_cooldown_until = now + timedelta(seconds=game.config.market_correction_cooldown_seconds)
+    if reason in (MarketCorrectionResolutionReason.TRIGGERED, MarketCorrectionResolutionReason.MARKET_RESUMED):
+        game.market_correction_cooldown_until = now + timedelta(seconds=game.config.market_correction_cooldown_seconds)
     payload = {
         "correction_id": correction.correction_id,
         "reason": reason.value,

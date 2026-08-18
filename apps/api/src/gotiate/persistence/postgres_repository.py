@@ -193,12 +193,14 @@ class PostgresGameRepository:
                         """
                         insert into proposals (id, game_id, entity_a, entity_b, rising_entity_id, initiator_player_id,
                                                 initiator_influence_liability, created_at,
-                                                status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                status, resolved_at_seq_no, resolved_by_player_id, resolution_reason,
+                                                pending_accepters)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
-                            resolution_reason = excluded.resolution_reason
+                            resolution_reason = excluded.resolution_reason,
+                            pending_accepters = excluded.pending_accepters
                         """,
                         (
                             proposal.proposal_id,
@@ -213,6 +215,7 @@ class PostgresGameRepository:
                             proposal.resolved_at_seq_no,
                             proposal.resolved_by_player_id,
                             proposal.resolution_reason.value if proposal.resolution_reason else None,
+                            Json(proposal.pending_accepters),
                         ),
                     )
                     # Add-only, never removed -- a plain insert-or-ignore per
@@ -232,13 +235,15 @@ class PostgresGameRepository:
                         """
                         insert into pools (id, game_id, base_proposal_id, initiator_player_id, visibility,
                                            initiator_influence_liability,
-                                           status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                           status, resolved_at_seq_no, resolved_by_player_id, resolution_reason,
+                                           pending_accepters)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             visibility = excluded.visibility,
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
-                            resolution_reason = excluded.resolution_reason
+                            resolution_reason = excluded.resolution_reason,
+                            pending_accepters = excluded.pending_accepters
                         """,
                         (
                             pool.pool_id,
@@ -251,6 +256,7 @@ class PostgresGameRepository:
                             pool.resolved_at_seq_no,
                             pool.resolved_by_player_id,
                             pool.resolution_reason.value if pool.resolution_reason else None,
+                            Json(pool.pending_accepters),
                         ),
                     )
                     await cur.execute(
@@ -593,6 +599,7 @@ def _to_game(
             resolved_by_player_id=str(pr["resolved_by_player_id"]) if pr["resolved_by_player_id"] else None,
             resolution_reason=ProposalResolutionReason(pr["resolution_reason"]) if pr["resolution_reason"] else None,
             passed_player_ids=passed_player_ids_by_proposal.get(pid, set()),
+            pending_accepters=pr["pending_accepters"],
         )
 
     pools: dict[str, Pool] = {}
@@ -614,6 +621,7 @@ def _to_game(
             resolved_at_seq_no=por["resolved_at_seq_no"],
             resolved_by_player_id=str(por["resolved_by_player_id"]) if por["resolved_by_player_id"] else None,
             resolution_reason=PoolResolutionReason(por["resolution_reason"]) if por["resolution_reason"] else None,
+            pending_accepters=por["pending_accepters"],
         )
 
     holdings: dict[str, Holding] = {}

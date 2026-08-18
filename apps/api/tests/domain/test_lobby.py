@@ -99,5 +99,6 @@ def test_start_game_sizes_market_and_deals_by_player_count():
         assert len(portfolio) == sum(game.config.portfolio_shape)
         assert len(reserves) == game.config.reserve_count
     assert game.haircut_profile is not None
-    assert game.haircut_profile in game.config.haircut_profiles_by_players[4]
+    expected_depth = round(game.config.market_size_by_players[4] * game.config.risk_depth_fraction)
+    assert len(game.haircut_profile.depth_probabilities) == expected_depth
     assert game.haircut_reveal_at == game.started_at + timedelta(seconds=game.max_duration_s * game.config.haircut_reveal_fraction)

@@ -11,6 +11,7 @@ import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 import { computeSupportMarkers, findUnilateralSwaps, formatSupportCount } from "@/lib/supportMarkers";
 import { certaintyAt } from "@/lib/haircutRisk";
+import { useEntityNotes } from "@/lib/useEntityNotes";
 
 export default function GamePage({ params }: { params: Promise<{ id: string }> }) {
   const { id: gameId } = use(params);
@@ -347,6 +348,73 @@ function useMarketReorderFlip(entityIds: string[]): (entityId: string) => CSSPro
   };
 }
 
+/** Right-click (or long-press on touch) a market card's private note --
+ * see MarketView's noteMenu state. `anchorRect` is the card's own
+ * getBoundingClientRect() at open time; positioned with `fixed` so the
+ * horizontal market scroller's own scroll offset never has to be
+ * accounted for. */
+function NoteMenu({
+  anchorRect,
+  players,
+  currentPlayerId,
+  onSelect,
+  onClose,
+}: {
+  anchorRect: DOMRect;
+  players: GameView["players"];
+  currentPlayerId: string | null;
+  onSelect: (playerId: string | null) => void;
+  onClose: () => void;
+}) {
+  const top = Math.min(anchorRect.bottom + 4, window.innerHeight - 8);
+  const left = Math.min(anchorRect.left, window.innerWidth - 180);
+  return (
+    <>
+      {/* Full-page backdrop, not just a blur click-outside listener --
+          also swallows a second right-click/long-press so it closes
+          instead of re-opening on top of itself. */}
+      <div
+        className="fixed inset-0 z-40"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onClose();
+        }}
+      />
+      <div className="fixed z-50 flex max-h-60 w-44 flex-col overflow-y-auto rounded border border-zinc-300 bg-white py-1 text-sm shadow-lg" style={{ top, left }}>
+        <div className="px-3 py-1 text-xs font-medium text-zinc-400">Tag with a name</div>
+        {players.map((p) => (
+          <button
+            key={p.game_player_id}
+            type="button"
+            onClick={() => {
+              onSelect(p.game_player_id);
+              onClose();
+            }}
+            className={`px-3 py-1.5 text-left hover:bg-zinc-100 ${
+              p.game_player_id === currentPlayerId ? "font-bold text-zinc-900" : "text-zinc-700"
+            }`}
+          >
+            {p.display_name}
+          </button>
+        ))}
+        {currentPlayerId && (
+          <button
+            type="button"
+            onClick={() => {
+              onSelect(null);
+              onClose();
+            }}
+            className="border-t border-zinc-100 px-3 py-1.5 text-left text-red-600 hover:bg-zinc-100"
+          >
+            Clear note
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
   const valueDelta = useValueDelta(self?.projected_value);
@@ -364,7 +432,36 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
   const supportMarkers = useMemo(() => computeSupportMarkers(events, view.pools), [events, view.pools]);
-  const getFlipStyle = useMarketReorderFlip(view.market.map((e) => e.entity_id));
+
+  // Private per-card notes (item 13) -- right-click/long-press a card,
+  // pick a name, it sticks until changed/cleared. Purely local (see
+  // useEntityNotes), never sent to the server. `noteMenu` tracks which
+  // card's menu is open and where to anchor it; frozenMarket snapshots
+  // view.market the instant it opens so the whole market grid (order,
+  // positions, points/payout numbers -- all three rows below read the
+  // same array) holds still while the menu is up, catching up to live
+  // state in one ordinary FLIP transition once it closes. State, not a
+  // ref -- displayedMarket reads it during render, and a ref read during
+  // render is exactly the "stale sibling row" trap the lingering-overlay
+  // race fix (see the detection effect above) already burned a real bug on.
+  const { notes, setNote } = useEntityNotes(gameId);
+  const [noteMenu, setNoteMenu] = useState<{ entityId: string; anchorRect: DOMRect } | null>(null);
+  const [frozenMarket, setFrozenMarket] = useState<GameView["market"] | null>(null);
+  const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggeredRef = useRef(false);
+  const displayedMarket = noteMenu ? (frozenMarket ?? view.market) : view.market;
+
+  function openNoteMenu(entityId: string, anchorRect: DOMRect) {
+    if (!noteMenu) setFrozenMarket(view.market);
+    setNoteMenu({ entityId, anchorRect });
+  }
+
+  function closeNoteMenu() {
+    setNoteMenu(null);
+    setFrozenMarket(null);
+  }
+
+  const getFlipStyle = useMarketReorderFlip(displayedMarket.map((e) => e.entity_id));
 
   // "Visualize" on an open proposal briefly emphasizes the two cards it
   // names, so a player doesn't have to mentally parse proposer + entity
@@ -826,8 +923,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             source of truth for an actual score. */}
         <div ref={marketScrollRef} className="-mx-4 overflow-x-auto px-4 pb-2">
           <div className="mb-2 flex gap-2 text-center">
-            {view.market.map((entity) => {
-              const points = view.market.length - entity.position + 1;
+            {displayedMarket.map((entity) => {
+              const points = displayedMarket.length - entity.position + 1;
               return (
                 <div key={entity.entity_id} className="w-28 flex-shrink-0 text-xs text-zinc-400">
                   #{entity.position} · {points}pt{points === 1 ? "" : "s"}
@@ -836,7 +933,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             })}
           </div>
           <div className="mb-2 flex gap-2 text-center">
-            {view.market.map((entity) => {
+            {displayedMarket.map((entity) => {
               const cell = payoutChanceCell(entity.position, view.haircut_risk_band_depth, view.haircut_profile);
               return (
                 <div key={entity.entity_id} className={`w-28 flex-shrink-0 text-xs font-bold ${cell.className}`}>
@@ -846,18 +943,48 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             })}
           </div>
           <div className="flex gap-2">
-            {view.market.map((entity) => {
+            {displayedMarket.map((entity) => {
               const owned = ownedCounts.get(entity.entity_id) ?? 0;
               const isSelected = selected.includes(entity.entity_id);
               const isDisabled = poolGuardrailEntities.has(entity.entity_id);
               const highlight = highlighted?.get(entity.entity_id);
               const markers = supportMarkers.get(entity.entity_id);
+              const notedPlayerId = notes[entity.entity_id];
               return (
                 <div key={entity.entity_id} className="flex-shrink-0" style={getFlipStyle(entity.entity_id)}>
                   <button
                     type="button"
                     data-entity-id={entity.entity_id}
-                    onClick={() => toggleSelect(entity.entity_id)}
+                    onClick={() => {
+                      if (longPressTriggeredRef.current) {
+                        longPressTriggeredRef.current = false;
+                        return;
+                      }
+                      toggleSelect(entity.entity_id);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      openNoteMenu(entity.entity_id, e.currentTarget.getBoundingClientRect());
+                    }}
+                    // Long-press on touch -- there's no right-click gesture
+                    // on a phone, and this game is played in-person on
+                    // phones as much as anywhere else. 500ms hold, same
+                    // shape as any long-press UI; a real move/scroll or an
+                    // early release cancels it and the tap falls through
+                    // to the ordinary onClick select behavior above.
+                    onTouchStart={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      longPressTimeoutRef.current = setTimeout(() => {
+                        longPressTriggeredRef.current = true;
+                        openNoteMenu(entity.entity_id, rect);
+                      }, 500);
+                    }}
+                    onTouchEnd={() => {
+                      if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+                    }}
+                    onTouchMove={() => {
+                      if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+                    }}
                     disabled={isDisabled}
                     className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center transition-transform duration-300 ${
                       owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
@@ -865,6 +992,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                       highlight ? "z-10 scale-110 shadow-lg" : ""
                     } ${highlightRingClass(highlight)}`}
                   >
+                    {notedPlayerId && (
+                      <span
+                        title={playerLabel(notedPlayerId, view)}
+                        className="absolute right-1 top-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-amber-400 text-[9px] font-bold text-white"
+                      >
+                        {playerInitial(notedPlayerId, view)}
+                      </span>
+                    )}
                     {entity.logo_url ? (
                       <Image src={entity.logo_url} alt="" width={28} height={28} unoptimized className="h-7 w-7 flex-shrink-0 rounded-sm object-cover" />
                     ) : (
@@ -918,6 +1053,16 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           <div className="h-px flex-1 bg-zinc-200" />
         </div>
       </div>
+
+      {noteMenu && (
+        <NoteMenu
+          anchorRect={noteMenu.anchorRect}
+          players={view.players}
+          currentPlayerId={notes[noteMenu.entityId] ?? null}
+          onSelect={(playerId) => setNote(noteMenu.entityId, playerId)}
+          onClose={closeNoteMenu}
+        />
+      )}
 
       {poolingProposalId && selected.length < 2 && (
         <div className="flex items-center justify-between gap-2 rounded border border-purple-300 bg-purple-50 p-2 text-xs text-purple-900">
@@ -1352,30 +1497,40 @@ function ReserveControls({
 /** Shared between a bare proposal's Accept and a Pool's Accept. Zero
  * available Influence never disables it -- accepting is free when you
  * can't afford the liability, see engine._handle_accept_proposal /
- * _handle_accept_pool -- so the only thing that can still disable it is
- * the accept-lock grace period (`lockedUntil`, omitted entirely for a
- * private pool, which is never locked -- see the call sites). */
+ * _handle_accept_pool -- so what can still disable it is the accept-lock
+ * grace period (`lockedUntil`, omitted entirely for a private pool, which
+ * is never locked -- see the call sites), or having already pledged
+ * toward a multi-accept threshold (5-6 players, see `pledge`, undefined
+ * everywhere accepters_required is 1 -- the ordinary case). */
 function AcceptButton({
   liability,
   lockedUntil,
+  pledge,
   busy,
   onAccept,
 }: {
   liability: 0 | 1 | undefined;
   lockedUntil?: string;
+  pledge?: { accepted: number; required: number; selfPledged: boolean };
   busy: boolean;
   onAccept: () => void;
 }) {
   const lockDeadlineMs = lockedUntil ? new Date(lockedUntil).getTime() : null;
   const locked = lockDeadlineMs !== null && !isPastDeadline(lockDeadlineMs);
   const costSuffix = liability === undefined ? "" : ` (${liability})`;
-  const label = locked ? `Accept in ${remainingSeconds(lockDeadlineMs!)}s` : `Accept${costSuffix}`;
+  const label = locked
+    ? `Accept in ${remainingSeconds(lockDeadlineMs!)}s`
+    : pledge?.selfPledged
+      ? `Pledged (${pledge.accepted}/${pledge.required})`
+      : pledge
+        ? `Accept${costSuffix} (${pledge.accepted}/${pledge.required})`
+        : `Accept${costSuffix}`;
   return (
     <button
       type="button"
       onClick={onAccept}
-      disabled={busy || locked}
-      title={locked ? "Give the room a moment to read this" : undefined}
+      disabled={busy || locked || pledge?.selfPledged === true}
+      title={locked ? "Give the room a moment to read this" : pledge ? "Needs more than one accepter at 5-6 players" : undefined}
       className="rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
     >
       {busy ? "…" : label}
@@ -1619,6 +1774,15 @@ function OpenProposals({
                       <AcceptButton
                         liability={p.my_accept_liability}
                         lockedUntil={p.accept_locked_until}
+                        pledge={
+                          p.accepters_required > 1
+                            ? {
+                                accepted: p.pending_accepter_ids.length,
+                                required: p.accepters_required,
+                                selfPledged: view.you !== null && p.pending_accepter_ids.includes(view.you),
+                              }
+                            : undefined
+                        }
                         busy={busyId === p.proposal_id}
                         onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
                       />
@@ -1699,6 +1863,15 @@ function OpenProposals({
                                 // own accept-lock. See
                                 // engine._require_accept_unlocked.
                                 lockedUntil={pool.visibility === "public" ? p.accept_locked_until : undefined}
+                                pledge={
+                                  pool.accepters_required > 1
+                                    ? {
+                                        accepted: pool.pending_accepter_ids.length,
+                                        required: pool.accepters_required,
+                                        selfPledged: view.you !== null && pool.pending_accepter_ids.includes(view.you),
+                                      }
+                                    : undefined
+                                }
                                 busy={busyId === pool.pool_id}
                                 onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
                               />
@@ -1782,6 +1955,8 @@ function RowOverlay({ text, tone, fading }: { text: string; tone: keyof typeof _
 const _ACTIVITY_EVENT_TYPES = new Set([
   "PROPOSAL_CREATED",
   "PROPOSAL_RESOLVED",
+  "PROPOSAL_ACCEPT_PLEDGED",
+  "POOL_ACCEPT_PLEDGED",
   "PRIVATE_POOL_CREATED",
   "PUBLIC_POOL_CREATED",
   "POOL_RESOLVED",
@@ -1855,6 +2030,18 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     // valid. See the market-direction-reversal design writeup.
     if (reason === "voided_market_swung") return { text: `${swap} — voided, market swung`, tone: "warning" };
     return { text: `${swap} — resolved`, tone: "muted" };
+  }
+  if (event.type === "PROPOSAL_ACCEPT_PLEDGED") {
+    const proposal = view.proposals.find((p) => p.proposal_id === event.payload.proposal_id);
+    const swap = proposal ? `${entityLabel(proposal.entity_a, view)} ↔ ${entityLabel(proposal.entity_b, view)}` : "A proposal";
+    const who = playerLabel(event.actor_game_player_id, view);
+    return { text: `${swap} — ${who} accepted (${event.payload.accepted_count}/${event.payload.required_count})`, tone: "open" };
+  }
+  if (event.type === "POOL_ACCEPT_PLEDGED") {
+    const pool = view.pools.find((p) => p.pool_id === event.payload.pool_id);
+    const swap = pool?.entity_c && pool?.entity_d ? `${entityLabel(pool.entity_c, view)} ↔ ${entityLabel(pool.entity_d, view)}` : "A pool";
+    const who = playerLabel(event.actor_game_player_id, view);
+    return { text: `${swap} — ${who} accepted (${event.payload.accepted_count}/${event.payload.required_count})`, tone: "open" };
   }
   if (event.type === "PRIVATE_POOL_CREATED" || event.type === "PUBLIC_POOL_CREATED") {
     const who = playerLabel(event.actor_game_player_id, view);

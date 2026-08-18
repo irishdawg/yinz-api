@@ -109,17 +109,25 @@ def project(game: Game, audience: Audience) -> dict:
             else None
         ),
         # Unconditionally public from game start, unlike haircut_profile
-        # itself -- every profile configured for this player count is
-        # validated at config load to share the exact same max_depth (see
-        # GameConfig's model_validator), so "the top K positions carry some
-        # risk" is structural, not profile-specific information. Revealing
-        # the boundary doesn't reveal the profile's shape (how risky each
-        # of those K positions actually is), matching the design's "some
-        # risk, not its shape" pre-reveal framing. Lets the client render a
-        # payout-chance row keyed by *position*, not by whichever entity
-        # currently occupies it -- positions beyond this depth are 100%
-        # safe from the very first render, not just after reveal.
-        "haircut_risk_band_depth": game.haircut_profile.max_depth if game.haircut_profile is not None else None,
+        # itself -- computed straight from config (round(market_size *
+        # risk_depth_fraction), the same formula
+        # engine._generate_random_haircut_profile targets), deliberately
+        # NOT game.haircut_profile.max_depth. The two used to always agree
+        # when profiles came from a curated list validated against this
+        # exact formula, but a randomly generated profile's own effective
+        # depth (highest nonzero index) can land earlier than the
+        # structural slot count -- see _generate_random_haircut_profile's
+        # docstring. Reading the profile's own shape here would leak
+        # exactly how deep the real risk goes before the reveal; this
+        # value must stay pure config, so "the top K positions carry some
+        # risk" is structural, not profile-specific information. Lets the
+        # client render a payout-chance row keyed by *position*, not by
+        # whichever entity currently occupies it -- positions beyond this
+        # depth are 100% safe from the very first render, not just after
+        # reveal.
+        "haircut_risk_band_depth": (
+            round(len(game.market) * game.config.risk_depth_fraction) if game.haircut_profile is not None else None
+        ),
         # Only meaningful once phase is CANCELLED -- null otherwise.
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
         # The *fact* of why/when the market closed, revealed only at the
@@ -225,6 +233,11 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.HAIRCUT_PROFILE_SELECTED: EventVisibility.SERVER_ONLY,
     EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
+    # Accepting is already fully public everywhere else (contrast
+    # PROPOSAL_PASSED below) -- a pledge toward accepters_required is no
+    # different, actor included.
+    EventType.PROPOSAL_ACCEPT_PLEDGED: EventVisibility.PUBLIC,
+    EventType.POOL_ACCEPT_PLEDGED: EventVisibility.PUBLIC,
     # Own pass only, in the passer's own history -- the proposer's only
     # channel to Pass feedback is the anonymous, aggregate passed_count on
     # the live proposal (project()/_project_proposal), never this event.
@@ -481,6 +494,15 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         # a public pool's own accept-lock is gated to -- see
         # engine._require_accept_unlocked.
         "accept_locked_until": proposal.created_at + timedelta(seconds=game.config.accept_lock_seconds),
+        # Public and unconditional, same tier as who proposed it -- accepting
+        # is already fully public everywhere else (contrast Pass). Lets the
+        # client render "2/3 accepted" progress and know whether the viewer
+        # themselves has already pledged, without a second per-audience field.
+        # Empty except at accepters_required > 1 (5-6 players) -- below that,
+        # the one accept that exists also always resolves the proposal in the
+        # same instant, so there's nothing here to ever observe live.
+        "pending_accepter_ids": sorted(proposal.pending_accepters),
+        "accepters_required": game.config.accepters_required(len(game.players)),
     }
     if isinstance(audience, PlayerAudience):
         if audience.game_player_id == proposal.swap.initiator_player_id:
@@ -518,6 +540,13 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
         "initiator_id": pool.swap.initiator_player_id,
         "status": pool.status.value,
         "resolution_reason": pool.resolution_reason.value if pool.resolution_reason else None,
+        # Same "who's pledged" transparency as _project_proposal, and same
+        # reasoning for staying unconditional (not gated behind
+        # can_see_contents) -- accepting is already public, and this
+        # doesn't reveal entity_c/entity_d. Always [] / 1 for a private
+        # pool -- see GameConfig.accepters_required's own exemption.
+        "pending_accepter_ids": sorted(pool.pending_accepters),
+        "accepters_required": 1 if pool.visibility is PoolVisibility.PRIVATE else game.config.accepters_required(len(game.players)),
     }
     if can_see_contents:
         out["entity_c"] = pool.swap.entity_a

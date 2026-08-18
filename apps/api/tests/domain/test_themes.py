@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from gotiate.domain import engine, themes
-from gotiate.domain.entities import GameConfig, HaircutProfile
+from gotiate.domain.entities import GameConfig
 from gotiate.domain.errors import IllegalCommandError, NotFoundError
 from gotiate.domain.projections import PlayerAudience, project
 from gotiate.domain.themes import PostgresThemeRepository, ThemeEntityDefinition, ThemeRepository, ThemeSet
@@ -142,13 +142,6 @@ def test_too_many_locked_entities_for_market_size_is_rejected_cleanly(fake_theme
         config=GameConfig(
             theme_set_id="tiny_v1",
             market_size_by_players={2: 3},
-            # Overriding market_size_by_players alone would leave the default
-            # haircut_profiles_by_players[2] (authored for market_size=11)
-            # mismatched against the new size=3 market -- GameConfig's own
-            # validator catches that drift, so this override has to travel
-            # with a matching profile, unrelated as it is to what this test
-            # actually exercises (locked-entity count vs. market size).
-            haircut_profiles_by_players={2: [HaircutProfile(depth_probabilities=[0.7, 0.3])]},
         ),
     )
     engine.join_game(game, actor_auth_user_id="auth-1", display_name="P1", now=now())

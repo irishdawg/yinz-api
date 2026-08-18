@@ -23,6 +23,15 @@ class EventType(StrEnum):
     # Negotiation
     PROPOSAL_CREATED = "PROPOSAL_CREATED"
     PROPOSAL_RESOLVED = "PROPOSAL_RESOLVED"
+    # Fired instead of PROPOSAL_RESOLVED/SWAP_EXECUTED when an accept
+    # doesn't yet reach GameConfig.accepters_required (5-6 players only --
+    # below that, the first accept always executes immediately, same as
+    # ever). Fully public, actor included -- accepting is an affirmative,
+    # already-public act everywhere else in this game (contrast PASS_PROPOSAL,
+    # which stays anonymous by design), so a pledge toward it is no
+    # different. See engine._handle_accept_proposal.
+    PROPOSAL_ACCEPT_PLEDGED = "PROPOSAL_ACCEPT_PLEDGED"
+    POOL_ACCEPT_PLEDGED = "POOL_ACCEPT_PLEDGED"
     PRIVATE_POOL_CREATED = "PRIVATE_POOL_CREATED"
     PUBLIC_POOL_CREATED = "PUBLIC_POOL_CREATED"
     POOL_MADE_PUBLIC = "POOL_MADE_PUBLIC"
