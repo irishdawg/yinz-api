@@ -841,7 +841,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // Without this the confirm bar just sat there disabled with no
   // explanation why (real playtest feedback).
   const duplicateOpenProposal = selectedPair
-    ? view.proposals.find((p) => p.status === "open" && new Set([p.entity_a, p.entity_b, ...selectedPair]).size === 2)
+    ? (view.proposals.find((p) => p.status === "open" && new Set([p.entity_a, p.entity_b, ...selectedPair]).size === 2) ?? null)
     : null;
 
   // Dedicated decision mode -- every hook above still runs every render
@@ -2304,14 +2304,17 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
         <p className="mt-1 text-xs text-zinc-500">{depth > 0 ? `Positions 1–${depth} were wiped by the realized risk.` : "Nothing was wiped this game."}</p>
         {view.haircut_profile && (
           <p className="mt-2 text-xs text-zinc-400">
-            This game&apos;s odds, by depth:{" "}
-            {view.haircut_profile.depth_probabilities.map((p, i) => (
-              <span key={i} className={i === depth ? "font-bold text-zinc-700" : undefined}>
-                {i > 0 ? " · " : ""}
-                {i}: {Math.round(p * 100)}%
-              </span>
-            ))}{" "}
-            — depth {depth} drawn.
+            This game&apos;s survival odds, by position (the same numbers Payout chance showed during play):{" "}
+            {view.haircut_profile.depth_probabilities.map((_, i) => {
+              const position = i + 1;
+              const pct = Math.round(certaintyAt(position, view.haircut_profile!.depth_probabilities) * 100);
+              return (
+                <span key={i}>
+                  {i > 0 ? " · " : ""}
+                  {position}: {pct}%
+                </span>
+              );
+            })}
           </p>
         )}
       </div>
