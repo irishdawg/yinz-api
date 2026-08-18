@@ -10,8 +10,8 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def later(seconds: float = 5) -> datetime:
-    """now() pushed past GameConfig.accept_lock_seconds's default (4s) --
+def later(seconds: float = 8) -> datetime:
+    """now() pushed past GameConfig.accept_lock_seconds's default (7s) --
     pass as `now` to an ACCEPT_PROPOSAL/ACCEPT_POOL call in a test that
     proposes and accepts back-to-back, so the accept-lock grace period
     (engine._require_accept_unlocked) doesn't reject it."""

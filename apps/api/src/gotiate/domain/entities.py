@@ -250,7 +250,11 @@ class GameConfig(BaseModel):
     # someone already at the keyboard snap-accepts it. Nothing else is
     # blocked -- withdraw/pass/pool/private-pool-accept all still work
     # immediately, see engine._handle_accept_proposal / _handle_accept_pool.
-    accept_lock_seconds: float = 4.0
+    # Was 4.0 -- real playtest feedback: in-person, the view poll's own
+    # lag ate a couple of seconds off the top, so 4s landed more like 2s
+    # in practice. 7s gives real margin against that lag, not just the
+    # bare reading time.
+    accept_lock_seconds: float = 7.0
     # Applied once, flat, the instant every seated player's
     # influence_available hits 0 at the same time -- see
     # engine._maybe_topup_zero_influence. Keeps the negotiation from

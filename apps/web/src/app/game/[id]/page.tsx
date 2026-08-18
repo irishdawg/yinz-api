@@ -352,22 +352,29 @@ function useMarketReorderFlip(entityIds: string[]): (entityId: string) => CSSPro
  * see MarketView's noteMenu state. `anchorRect` is the card's own
  * getBoundingClientRect() at open time; positioned with `fixed` so the
  * horizontal market scroller's own scroll offset never has to be
- * accounted for. */
+ * accounted for. Up to `maxNotes` names at once -- picking a tagged name
+ * again untags it, the menu stays open either way so a second pick is a
+ * single extra click, not a re-open. */
 function NoteMenu({
   anchorRect,
   players,
-  currentPlayerId,
-  onSelect,
+  taggedPlayerIds,
+  maxNotes,
+  onToggle,
+  onClear,
   onClose,
 }: {
   anchorRect: DOMRect;
   players: GameView["players"];
-  currentPlayerId: string | null;
-  onSelect: (playerId: string | null) => void;
+  taggedPlayerIds: string[];
+  maxNotes: number;
+  onToggle: (playerId: string) => void;
+  onClear: () => void;
   onClose: () => void;
 }) {
   const top = Math.min(anchorRect.bottom + 4, window.innerHeight - 8);
   const left = Math.min(anchorRect.left, window.innerWidth - 180);
+  const atCap = taggedPlayerIds.length >= maxNotes;
   return (
     <>
       {/* Full-page backdrop, not just a blur click-outside listener --
@@ -382,32 +389,36 @@ function NoteMenu({
         }}
       />
       <div className="fixed z-50 flex max-h-60 w-44 flex-col overflow-y-auto rounded border border-zinc-300 bg-white py-1 text-sm shadow-lg" style={{ top, left }}>
-        <div className="px-3 py-1 text-xs font-medium text-zinc-400">Tag with a name</div>
-        {players.map((p) => (
+        <div className="px-3 py-1 text-xs font-medium text-zinc-400">
+          Tag with a name ({taggedPlayerIds.length}/{maxNotes})
+        </div>
+        {players.map((p) => {
+          const tagged = taggedPlayerIds.includes(p.game_player_id);
+          return (
+            <button
+              key={p.game_player_id}
+              type="button"
+              onClick={() => onToggle(p.game_player_id)}
+              disabled={!tagged && atCap}
+              className={`px-3 py-1.5 text-left hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent ${
+                tagged ? "font-bold text-zinc-900" : "text-zinc-700"
+              }`}
+            >
+              {tagged ? "✓ " : ""}
+              {p.display_name}
+            </button>
+          );
+        })}
+        {taggedPlayerIds.length > 0 && (
           <button
-            key={p.game_player_id}
             type="button"
             onClick={() => {
-              onSelect(p.game_player_id);
-              onClose();
-            }}
-            className={`px-3 py-1.5 text-left hover:bg-zinc-100 ${
-              p.game_player_id === currentPlayerId ? "font-bold text-zinc-900" : "text-zinc-700"
-            }`}
-          >
-            {p.display_name}
-          </button>
-        ))}
-        {currentPlayerId && (
-          <button
-            type="button"
-            onClick={() => {
-              onSelect(null);
+              onClear();
               onClose();
             }}
             className="border-t border-zinc-100 px-3 py-1.5 text-left text-red-600 hover:bg-zinc-100"
           >
-            Clear note
+            Clear note{taggedPlayerIds.length > 1 ? "s" : ""}
           </button>
         )}
       </div>
@@ -444,7 +455,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // ref -- displayedMarket reads it during render, and a ref read during
   // render is exactly the "stale sibling row" trap the lingering-overlay
   // race fix (see the detection effect above) already burned a real bug on.
-  const { notes, setNote } = useEntityNotes(gameId);
+  const { notes, toggleNote, clearNotes, maxNotesPerEntity } = useEntityNotes(gameId);
   const [noteMenu, setNoteMenu] = useState<{ entityId: string; anchorRect: DOMRect } | null>(null);
   const [frozenMarket, setFrozenMarket] = useState<GameView["market"] | null>(null);
   const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -807,6 +818,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   }, [gameId, selectedPair]);
   const displayedProposeCost = selectedPair ? proposeCost : null;
   const proposeUnaffordable = displayedProposeCost === 1 && (self?.influence?.available ?? 0) < 1;
+  // Mirrors engine._handle_propose_swap's own cross-player duplicate-pair
+  // check (order-independent) -- catches it client-side, before a click
+  // ever round-trips to the server just to bounce off the same rejection.
+  // Without this the confirm bar just sat there disabled with no
+  // explanation why (real playtest feedback).
+  const duplicateOpenProposal = selectedPair
+    ? view.proposals.find((p) => p.status === "open" && new Set([p.entity_a, p.entity_b, ...selectedPair]).size === 2)
+    : null;
 
   // Dedicated decision mode -- every hook above still runs every render
   // (rules of hooks), but nothing below this point ever executes or
@@ -949,7 +968,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               const isDisabled = poolGuardrailEntities.has(entity.entity_id);
               const highlight = highlighted?.get(entity.entity_id);
               const markers = supportMarkers.get(entity.entity_id);
-              const notedPlayerId = notes[entity.entity_id];
+              const notedPlayerIds = notes[entity.entity_id] ?? [];
               return (
                 <div key={entity.entity_id} className="flex-shrink-0" style={getFlipStyle(entity.entity_id)}>
                   <button
@@ -992,12 +1011,17 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                       highlight ? "z-10 scale-110 shadow-lg" : ""
                     } ${highlightRingClass(highlight)}`}
                   >
-                    {notedPlayerId && (
-                      <span
-                        title={playerLabel(notedPlayerId, view)}
-                        className="absolute right-1 top-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-amber-400 text-[9px] font-bold text-white"
-                      >
-                        {playerInitial(notedPlayerId, view)}
+                    {notedPlayerIds.length > 0 && (
+                      <span className="absolute right-1 top-1 flex flex-shrink-0 gap-0.5">
+                        {notedPlayerIds.map((id) => (
+                          <span
+                            key={id}
+                            title={playerLabel(id, view)}
+                            className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-400 text-[9px] font-bold text-white"
+                          >
+                            {playerInitial(id, view)}
+                          </span>
+                        ))}
                       </span>
                     )}
                     {entity.logo_url ? (
@@ -1058,8 +1082,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         <NoteMenu
           anchorRect={noteMenu.anchorRect}
           players={view.players}
-          currentPlayerId={notes[noteMenu.entityId] ?? null}
-          onSelect={(playerId) => setNote(noteMenu.entityId, playerId)}
+          taggedPlayerIds={notes[noteMenu.entityId] ?? []}
+          maxNotes={maxNotesPerEntity}
+          onToggle={(playerId) => toggleNote(noteMenu.entityId, playerId)}
+          onClear={() => clearNotes(noteMenu.entityId)}
           onClose={closeNoteMenu}
         />
       )}
@@ -1122,7 +1148,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                 <button
                   type="button"
                   onClick={() => handleConfirm()}
-                  disabled={proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null))}
+                  disabled={
+                    proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null || duplicateOpenProposal !== null))
+                  }
                   className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
                 >
                   {proposing ? "…" : burningReserveId ? "Burn" : `Propose${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
@@ -1130,8 +1158,15 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
               )}
             </div>
           </div>
+          {!poolingProposalId && !burningReserveId && duplicateOpenProposal && (
+            <p className="text-xs text-red-700">
+              {playerLabel(duplicateOpenProposal.proposer_id, view)} already has an open proposal for this pair — pick different cards, or
+              Cancel and wait for it to resolve.
+            </p>
+          )}
           {!poolingProposalId &&
             !burningReserveId &&
+            !duplicateOpenProposal &&
             view.proposals.some((p) => p.proposer_id === view.you && p.status === "open") && (
               <p className="text-xs text-blue-700">This will withdraw your existing proposal.</p>
             )}
@@ -1572,6 +1607,12 @@ function OpenProposals({
   // same as lingeringById below.
   const [passLingering, setPassLingering] = useState<Map<string, PassLingeringEntry>>(new Map());
   const openCount = view.proposals.filter((p) => p.status === "open").length;
+  // Scoped to this list specifically (not a global playerLabel change) --
+  // real playtest feedback that reading your own name back at the table
+  // is slower to parse than just seeing "You".
+  function labelOrYou(playerId: string | null): string {
+    return playerId === view.you ? "You" : playerLabel(playerId, view);
+  }
   // Keyed by proposal_id/pool_id -- a resolved-but-still-lingering row is
   // found and overlaid in place below, never rendered as a second, freshly
   // -positioned entry (that used to make an accepted deal visually jump to
@@ -1710,7 +1751,7 @@ function OpenProposals({
                 className={`flex items-center justify-between gap-2 rounded ${lingering ? "" : "cursor-pointer hover:bg-zinc-50"}`}
               >
                 <span>
-                  {playerLabel(p.proposer_id, view)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
+                  {labelOrYou(p.proposer_id)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
                   {/* Self-only, proposer-only, anonymous -- the proposer's one
                       and only channel to Pass feedback. See the Pass design
                       writeup: never identities, never shown to anyone else. */}
@@ -1815,7 +1856,7 @@ function OpenProposals({
                         className={`relative flex items-center justify-between gap-2 text-xs text-zinc-700 ${visualizePoolLeg ? "cursor-pointer hover:bg-zinc-50" : ""}`}
                       >
                         <span>
-                          {playerLabel(pool.initiator_id, view)} pooled {pool.visibility}
+                          {labelOrYou(pool.initiator_id)} pooled {pool.visibility}
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
                         </span>
                         {!poolLingering && (
@@ -2240,6 +2281,18 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
             : `${playerLabel([...winners][0] ?? null, view)} wins with ${topValue}!`}
         </p>
         <p className="mt-1 text-xs text-zinc-500">{depth > 0 ? `Positions 1–${depth} were wiped by the realized risk.` : "Nothing was wiped this game."}</p>
+        {view.haircut_profile && (
+          <p className="mt-2 text-xs text-zinc-400">
+            This game&apos;s odds, by depth:{" "}
+            {view.haircut_profile.depth_probabilities.map((p, i) => (
+              <span key={i} className={i === depth ? "font-bold text-zinc-700" : undefined}>
+                {i > 0 ? " · " : ""}
+                {i}: {Math.round(p * 100)}%
+              </span>
+            ))}{" "}
+            — depth {depth} drawn.
+          </p>
+        )}
       </div>
 
       <div>

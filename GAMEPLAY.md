@@ -249,7 +249,9 @@ better position if swapped.
   proposal (duplicate pair, unaffordable) leaves the old one untouched, no
   partial effect. Pools are **not** further capped beyond the existing "one
   open pool per player per base proposal" rule.
-- **Accept-lock grace period** (`accept_lock_seconds`, default 4s): blocks
+- **Accept-lock grace period** (`accept_lock_seconds`, default 7s — was
+  4s, bumped after real playtesting showed the view poll's own lag ate a
+  couple of seconds off the top, landing more like 2s in practice): blocks
   only `ACCEPT_PROPOSAL`, and `ACCEPT_POOL` on a **public** pool, for this
   long after the *base proposal's* own `PROPOSAL_CREATED` — gives the room
   a moment to actually read a new proposal before someone already at the
@@ -544,6 +546,11 @@ position `p` (1-indexed) survives.
   cumulative sum), and every deeper position keeps climbing by a fresh
   random amount toward certainty — deliberately lumpy rather than a fixed
   step, so some games jump to safety early and others creep up gradually.
+  Every adjacent pair is floored at least `_HAIRCUT_MIN_ADJACENT_GAP` (4
+  percentage points) apart, except a step that lands exactly on 100% —
+  an unbounded draw landed two adjacent positions only ~1 point apart in
+  real play, reading as no differentiation at all even though it was
+  technically a valid distribution.
   The survival curve always reaches exactly 100% by the profile's last
   structural slot (`round(market_size * risk_depth_fraction)` deep, same
   as the risk band above) — sometimes earlier, leaving a genuinely
@@ -844,10 +851,11 @@ public.
 
 **`useEntityNotes.ts`** — private per-player "who does this remind me of"
 notes: right-click (or long-press on touch) a market card for a list of
-seated players' names, pick one, it sticks on the card. Purely a personal
-memory aid, **not gameplay state at all** — `localStorage` only, scoped to
-this browser and this game, never sent to the server, never read by
-`project()`. While a card's note menu is open, the whole market grid
+seated players' names, pick up to two, they stick on the card (picking a
+tagged name again untags it). Purely a personal memory aid, **not
+gameplay state at all** — `localStorage` only, scoped to this browser and
+this game, never sent to the server, never read by `project()`. While a
+card's note menu is open, the whole market grid
 (order, positions, points/payout numbers) freezes to a snapshot taken the
 instant it opened, so the menu's anchor point doesn't slide out from under
 a live reorder mid-interaction; it catches up to live state in one

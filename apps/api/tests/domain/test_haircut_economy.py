@@ -72,6 +72,33 @@ def test_generated_profile_respects_the_first_and_second_position_survival_range
         assert second > first
 
 
+def test_generated_profile_adjacent_depths_are_never_closer_than_the_minimum_gap():
+    # Real playtest feedback: an unbounded draw landed two adjacent
+    # positions only ~1 percentage point apart, reading as no real
+    # differentiation. Every adjacent pair of cumulative survival values
+    # must now differ by at least _HAIRCUT_MIN_ADJACENT_GAP (4%), with two
+    # exemptions: a step that *lands on* exactly 100% (whether it's the
+    # final structural slot or an earlier "big jump to certainty" --
+    # reaching certainty is always meaningful regardless of how far it had
+    # to jump, explicitly tolerated per real playtest direction), and any
+    # gap once certainty was already reached earlier (every further slot
+    # is trivially 0 -- flat continuations, not two genuinely different
+    # risk levels crammed together).
+    rng = random.Random(23)
+    for _ in range(2000):
+        profile = engine._generate_random_haircut_profile(6, rng)
+        cumulative = []
+        running = 0.0
+        for p in profile.depth_probabilities:
+            running += p
+            cumulative.append(running)
+        for i in range(1, len(cumulative) - 1):
+            if cumulative[i - 1] >= 1.0 - 1e-9 or cumulative[i] >= 1.0 - 1e-9:
+                continue
+            gap = cumulative[i] - cumulative[i - 1]
+            assert gap >= 0.04 - 1e-9, f"gap {gap} between depths {i - 1} and {i} is below the 4% floor"
+
+
 def test_generated_profile_certainty_is_monotonic_and_reaches_100_percent_at_the_last_slot():
     rng = random.Random(13)
     for _ in range(500):

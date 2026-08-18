@@ -411,6 +411,12 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
 
 _HAIRCUT_FIRST_DEPTH_SURVIVAL_RANGE = (0.05, 0.50)
 _HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE = (0.11, 0.61)
+# Every adjacent pair of depths' survival CDF must differ by at least this
+# much -- without a floor, a continuous uniform draw can (and did, in real
+# play) land two adjacent positions only ~1 percentage point apart, which
+# reads as no real differentiation at all even though it's technically a
+# valid distribution.
+_HAIRCUT_MIN_ADJACENT_GAP = 0.04
 
 
 def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) -> HaircutProfile:
@@ -438,19 +444,26 @@ def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) 
     across all remaining room up to 100%, so some games jump hard early
     and coast, others creep up gradually -- genuine game-to-game
     variability, not a family of curves a player could learn to recognize
-    (the entire reason the curated list was retired)."""
+    (the entire reason the curated list was retired). Every step is still
+    floored at _HAIRCUT_MIN_ADJACENT_GAP, though -- an unbounded draw
+    could (and did, in real play) land two adjacent positions only ~1
+    percentage point apart, reading as no differentiation at all; once
+    there's less room left than the floor, the step jumps straight to
+    certainty instead of squeezing in one more too-small increment."""
     if structural_depth <= 0:
         return HaircutProfile(depth_probabilities=[1.0])
 
     cumulative = [rng.uniform(*_HAIRCUT_FIRST_DEPTH_SURVIVAL_RANGE)]
     if structural_depth >= 2:
         low, high = _HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE
-        cumulative.append(rng.uniform(max(low, cumulative[0]), high))
+        cumulative.append(rng.uniform(max(low, cumulative[0] + _HAIRCUT_MIN_ADJACENT_GAP), high))
     for _ in range(2, structural_depth):
         previous = cumulative[-1]
-        if previous >= 1.0 or rng.random() < 0.25:
-            # A genuine chance of reaching certainty early, not just
-            # asymptotically approaching it -- a pure continuous uniform
+        room = 1.0 - previous
+        if room <= _HAIRCUT_MIN_ADJACENT_GAP or rng.random() < 0.25:
+            # Either there's no room left for a properly-separated step, or
+            # a genuine chance of reaching certainty early anyway -- not
+            # just asymptotically approaching it. A pure continuous uniform
             # draw only reaches exactly 1.0 in the mathematical limit
             # (probability zero in practice), which would make "a big
             # jump to the first 100% spot" theoretically possible but
@@ -458,7 +471,7 @@ def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) 
             # regularly-occurring shape instead.
             cumulative.append(1.0)
         else:
-            cumulative.append(previous + rng.uniform(0.0, 1.0 - previous))
+            cumulative.append(previous + rng.uniform(_HAIRCUT_MIN_ADJACENT_GAP, room))
     cumulative[-1] = 1.0  # the last structural slot is always where safety becomes certain
 
     depth_probabilities = [cumulative[0]] + [cumulative[i] - cumulative[i - 1] for i in range(1, structural_depth)]
