@@ -110,6 +110,18 @@ function playerInitial(playerId: string, view: GameView): string {
   return playerLabel(playerId, view).charAt(0).toUpperCase();
 }
 
+// Six entries -- matches the game's own max seat count, so every player
+// gets a distinct color, never just distinguished by initial (two players
+// sharing a first initial, e.g. Tedy/Tery, would otherwise render
+// identical private-note badges). Keyed by seat, not display order or
+// name, so a given player's color is stable for the whole game.
+const _PLAYER_NOTE_COLORS = ["bg-amber-500", "bg-blue-500", "bg-emerald-500", "bg-purple-500", "bg-rose-500", "bg-cyan-500"];
+
+function playerNoteColor(playerId: string, view: GameView): string {
+  const seat = view.players.find((p) => p.game_player_id === playerId)?.seat ?? 0;
+  return _PLAYER_NOTE_COLORS[seat % _PLAYER_NOTE_COLORS.length];
+}
+
 /** A just-resolved proposal/pool, held onto client-side just long enough to
  * overlay its *own, still-in-place* row with a frozen banner before it
  * fades -- see MarketView's lingeringDeals state. Keyed by proposal_id/
@@ -400,10 +412,15 @@ function NoteMenu({
               type="button"
               onClick={() => onToggle(p.game_player_id)}
               disabled={!tagged && atCap}
-              className={`px-3 py-1.5 text-left hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent ${
+              className={`flex items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent ${
                 tagged ? "font-bold text-zinc-900" : "text-zinc-700"
               }`}
             >
+              {/* Same color the card badge uses for this player (keyed by
+                  seat, see _PLAYER_NOTE_COLORS) -- shown here so the
+                  color-to-name mapping is actually learnable, not just an
+                  initial that two players can share (e.g. Tedy/Tery). */}
+              <span aria-hidden className={`h-3 w-3 flex-shrink-0 rounded-full ${_PLAYER_NOTE_COLORS[p.seat % _PLAYER_NOTE_COLORS.length]}`} />
               {tagged ? "✓ " : ""}
               {p.display_name}
             </button>
@@ -1017,7 +1034,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                           <span
                             key={id}
                             title={playerLabel(id, view)}
-                            className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-400 text-[9px] font-bold text-white"
+                            className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white ${playerNoteColor(id, view)}`}
                           >
                             {playerInitial(id, view)}
                           </span>
@@ -1194,7 +1211,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
           {view.players.map((p) => (
             <li key={p.game_player_id} className="flex items-center justify-between text-sm text-zinc-900">
-              <span>
+              <span className="flex items-center gap-2">
+                {/* Same color the private-note badges/menu use for this
+                    player (see _PLAYER_NOTE_COLORS) -- shown here too so
+                    the roster is the reference for "which color is who". */}
+                <span aria-hidden className={`h-3 w-3 flex-shrink-0 rounded-full ${_PLAYER_NOTE_COLORS[p.seat % _PLAYER_NOTE_COLORS.length]}`} />
                 <span className={p.is_golden_name ? "font-medium text-amber-700" : undefined}>{p.display_name}</span>
                 {p.game_player_id === view.you && <span className="ml-2 text-xs font-medium text-zinc-500">YOU</span>}
               </span>

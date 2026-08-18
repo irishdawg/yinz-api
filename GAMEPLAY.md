@@ -852,7 +852,12 @@ public.
 **`useEntityNotes.ts`** — private per-player "who does this remind me of"
 notes: right-click (or long-press on touch) a market card for a list of
 seated players' names, pick up to two, they stick on the card (picking a
-tagged name again untags it). Purely a personal memory aid, **not
+tagged name again untags it). Each seated player gets a distinct badge
+color (`_PLAYER_NOTE_COLORS` in `page.tsx`, keyed by seat, 6 entries for
+the game's own max seat count) — not just the initial, which two players
+can share (Tedy/Tery would otherwise render identical badges) — and the
+same color swatch shows next to each name in the tag menu so the mapping
+is actually learnable. Purely a personal memory aid, **not
 gameplay state at all** — `localStorage` only, scoped to this browser and
 this game, never sent to the server, never read by `project()`. While a
 card's note menu is open, the whole market grid
