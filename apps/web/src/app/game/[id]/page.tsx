@@ -122,6 +122,14 @@ function playerNoteColor(playerId: string, view: GameView): string {
   return _PLAYER_NOTE_COLORS[seat % _PLAYER_NOTE_COLORS.length];
 }
 
+// Not a real game_player_id (those are UUIDs) -- a declarative "I've
+// checked, nobody holds this" tag, distinct from an actual player pick.
+// Mutually exclusive with real picks (see MarketView's handleToggleNote):
+// tagging Nobody clears any existing names, and tagging a name clears
+// Nobody -- the two states don't compose the way two different players'
+// names do.
+const _NOBODY_TAG = "__nobody__";
+
 /** A just-resolved proposal/pool, held onto client-side just long enough to
  * overlay its *own, still-in-place* row with a frozen banner before it
  * fades -- see MarketView's lingeringDeals state. Keyed by proposal_id/
@@ -426,6 +434,23 @@ function NoteMenu({
             </button>
           );
         })}
+        {/* Declarative "nobody holds this" state -- mutually exclusive
+            with name picks (see handleToggleNote), so never disabled by
+            atCap the way another name pick would be once already at the
+            cap. */}
+        <button
+          type="button"
+          onClick={() => onToggle(_NOBODY_TAG)}
+          className={`flex items-center gap-2 border-t border-zinc-100 px-3 py-1.5 text-left hover:bg-zinc-100 ${
+            taggedPlayerIds.includes(_NOBODY_TAG) ? "font-bold text-zinc-900" : "text-zinc-700"
+          }`}
+        >
+          <span aria-hidden className="flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full bg-zinc-900 text-[7px] leading-none text-white">
+            ✕
+          </span>
+          {taggedPlayerIds.includes(_NOBODY_TAG) ? "✓ " : ""}
+          Nobody
+        </button>
         {taggedPlayerIds.length > 0 && (
           <button
             type="button"
@@ -487,6 +512,20 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   function closeNoteMenu() {
     setNoteMenu(null);
     setFrozenMarket(null);
+  }
+
+  // Nobody and a real name don't compose -- picking one clears the other
+  // first, rather than just adding/removing the clicked entry in
+  // isolation the way two different players' names do.
+  function handleToggleNote(playerId: string) {
+    if (!noteMenu) return;
+    const current = notes[noteMenu.entityId] ?? [];
+    if (playerId === _NOBODY_TAG) {
+      if (!current.includes(_NOBODY_TAG)) clearNotes(noteMenu.entityId);
+    } else if (current.includes(_NOBODY_TAG)) {
+      clearNotes(noteMenu.entityId);
+    }
+    toggleNote(noteMenu.entityId, playerId);
   }
 
   const getFlipStyle = useMarketReorderFlip(displayedMarket.map((e) => e.entity_id));
@@ -1030,15 +1069,25 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                   >
                     {notedPlayerIds.length > 0 && (
                       <span className="absolute right-1 top-1 flex flex-shrink-0 gap-0.5">
-                        {notedPlayerIds.map((id) => (
-                          <span
-                            key={id}
-                            title={playerLabel(id, view)}
-                            className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white ${playerNoteColor(id, view)}`}
-                          >
-                            {playerInitial(id, view)}
-                          </span>
-                        ))}
+                        {notedPlayerIds.map((id) =>
+                          id === _NOBODY_TAG ? (
+                            <span
+                              key={id}
+                              title="Nobody"
+                              className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-900 text-[9px] font-bold text-white"
+                            >
+                              ✕
+                            </span>
+                          ) : (
+                            <span
+                              key={id}
+                              title={playerLabel(id, view)}
+                              className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white ${playerNoteColor(id, view)}`}
+                            >
+                              {playerInitial(id, view)}
+                            </span>
+                          ),
+                        )}
                       </span>
                     )}
                     {entity.logo_url ? (
@@ -1098,10 +1147,12 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       {noteMenu && (
         <NoteMenu
           anchorRect={noteMenu.anchorRect}
-          players={view.players}
+          // You already know your own holdings -- tagging yourself is
+          // never useful, so the menu only ever offers everyone else.
+          players={view.players.filter((p) => p.game_player_id !== view.you)}
           taggedPlayerIds={notes[noteMenu.entityId] ?? []}
           maxNotes={maxNotesPerEntity}
-          onToggle={(playerId) => toggleNote(noteMenu.entityId, playerId)}
+          onToggle={handleToggleNote}
           onClear={() => clearNotes(noteMenu.entityId)}
           onClose={closeNoteMenu}
         />

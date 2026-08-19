@@ -851,13 +851,19 @@ public.
 
 **`useEntityNotes.ts`** — private per-player "who does this remind me of"
 notes: right-click (or long-press on touch) a market card for a list of
-seated players' names, pick up to two, they stick on the card (picking a
-tagged name again untags it). Each seated player gets a distinct badge
-color (`_PLAYER_NOTE_COLORS` in `page.tsx`, keyed by seat, 6 entries for
-the game's own max seat count) — not just the initial, which two players
-can share (Tedy/Tery would otherwise render identical badges) — and the
-same color swatch shows next to each name in the tag menu so the mapping
-is actually learnable. Purely a personal memory aid, **not
+*other* seated players' names (never your own — you already know your own
+holdings, so the menu excludes `view.you`), pick up to two, they stick on
+the card (picking a tagged name again untags it). A `Nobody` entry (black
+dot, ✕) is also offered — mutually exclusive with real names
+(`MarketView.handleToggleNote`): tagging it clears any names already
+there, and tagging a name clears `Nobody`, since "nobody holds this" and
+"X holds this" don't compose the way two different players' names do.
+Each seated player gets a distinct badge color (`_PLAYER_NOTE_COLORS` in
+`page.tsx`, keyed by seat, 6 entries for the game's own max seat count) —
+not just the initial, which two players can share (Tedy/Tery would
+otherwise render identical badges) — and the same color swatch shows next
+to each name in the tag menu so the mapping is actually learnable. Purely
+a personal memory aid, **not
 gameplay state at all** — `localStorage` only, scoped to this browser and
 this game, never sent to the server, never read by `project()`. While a
 card's note menu is open, the whole market grid
