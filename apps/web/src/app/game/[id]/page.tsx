@@ -963,6 +963,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             </div>
           </div>
           <InfluenceGauge influence={self.influence} />
+          <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
         </div>
       )}
 
@@ -1255,8 +1256,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
       <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
 
-      <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
-
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
         <ul className="flex flex-col gap-1 rounded border border-zinc-200 bg-white p-3">
@@ -1306,19 +1305,20 @@ function ReadyToCloseToggle({ gameId, view, onChanged }: { gameId: string; view:
   }
 
   return (
-    <div className="flex items-center justify-between gap-2 rounded border border-zinc-200 bg-white p-3 text-sm">
-      <span className="text-zinc-700">{ready ? "You're marked ready to close." : "Mark yourself ready to close whenever you're done."}</span>
+    <div>
+      <div className="text-xs font-medium text-zinc-500">Close</div>
       <button
         type="button"
         onClick={handleToggle}
         disabled={busy}
-        className={`flex-shrink-0 rounded border px-3 py-1 text-xs font-medium disabled:opacity-50 ${
+        title={ready ? "You're marked ready to close." : "Mark yourself ready to close whenever you're done."}
+        className={`mt-0.5 flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium disabled:opacity-50 ${
           ready ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-zinc-300 text-zinc-700"
         }`}
       >
         {busy ? "…" : ready ? "Ready ✓" : "Ready to close"}
       </button>
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {error && <p className="mt-0.5 text-xs text-red-600">{error}</p>}
     </div>
   );
 }

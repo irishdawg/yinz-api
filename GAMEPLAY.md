@@ -547,17 +547,27 @@ position `p` (1-indexed) survives.
   random amount toward certainty — deliberately lumpy rather than a fixed
   step, so some games jump to safety early and others creep up gradually.
   Every adjacent pair is floored at least `_HAIRCUT_MIN_ADJACENT_GAP` (4
-  percentage points) apart, except a step that lands exactly on 100% —
-  an unbounded draw landed two adjacent positions only ~1 point apart in
-  real play, reading as no differentiation at all even though it was
-  technically a valid distribution.
-  The survival curve always reaches exactly 100% by the profile's last
-  structural slot (`round(market_size * risk_depth_fraction)` deep, same
-  as the risk band above) — sometimes earlier, leaving a genuinely
-  zero-probability tail ("a big jump from the last at-risk position
-  straight to certain safety" is an intended shape, not an edge case).
-  Still varies on the same two axes the old curated shapes did — how
-  severe position #1 is, and how deep the danger zone cascades into
+  percentage points) apart, except a step that lands exactly on the
+  within-band ceiling — an unbounded draw landed two adjacent positions
+  only ~1 point apart in real play, reading as no differentiation at all
+  even though it was technically a valid distribution.
+  **No position inside the risk band ever reaches full safety**: every
+  in-band position's own cumulative survival is capped at
+  `_HAIRCUT_WITHIN_BAND_CEILING` (92%) — real playtest catch, the deepest
+  in-band position (`round(market_size * risk_depth_fraction)` deep, same
+  as the risk band above) was showing exactly 100% survival, because the
+  profile's `depth_probabilities` list was built with exactly that many
+  entries, so summing *all* of them (= that position's own survival
+  chance) was forced to 1.0 by construction — "the top K positions carry
+  some risk" was a lie for position K itself. The profile now carries one
+  extra slot *past* the band (`depth_probabilities` has `risk_band_depth
+  + 1` entries), which is what's actually structurally safe, absorbing
+  whatever's left (always ≥ 8%) — the survival curve reaches exactly 100%
+  only there, sometimes with a genuine zero-probability stretch leading
+  up to it within the band itself ("a big jump from the last at-risk
+  position straight to certain safety" is an intended shape, not an edge
+  case). Still varies on the same two axes the old curated shapes did —
+  how severe position #1 is, and how deep the danger zone cascades into
   #2/#3 — just drawn instead of picked, for real game-to-game variability
   instead of a small family of curves.
 - **The one random draw**: `draw_haircut_depth` runs exactly once, at
@@ -630,11 +640,17 @@ after the fact):
    `market_correction_max_spread_fraction=0.4`,
    `market_correction_gap_saturation_fraction=1.0`, all × `market_size`).
 2. **Targeting** (`_construct_one_correction_move`, locked, never relaxed):
-   start from the player's **top two distinct owned entities by position**.
-   A doubled/anchor holding is excluded from eligibility if the player's
-   *other* top-two entity is singly-owned; only when **both** top-two are
-   doubled does a double become eligible. Selection within the eligible set
-   is uniform-random, never damage-optimized.
+   start from the player's **top two distinct owned entities by position**,
+   after first excluding any entity **both players own** in PORTFOLIO
+   (`_construct_market_correction`'s `mutually_owned` set) — without this,
+   a shared holding could be the *other* player's move target, landing a
+   second, uninvited hit on top of your own already-independently
+   -targeted move; real playtest catch, since the mechanic is supposed to
+   be exactly one downward move per player, never two. A doubled/anchor
+   holding is excluded from eligibility if the player's *other* (non
+   -mutually-owned) top-two entity is singly-owned; only when **both**
+   top-two are doubled does a double become eligible. Selection within
+   the eligible set is uniform-random, never damage-optimized.
 3. **Destination search** (`_find_correction_destination`): must be
    strictly *worse* (higher position) than the source and unowned by
    **either** player. Prefers the entity closest to the exact target

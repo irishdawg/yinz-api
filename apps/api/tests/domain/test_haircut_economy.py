@@ -46,15 +46,38 @@ def test_max_depth_is_the_highest_index_with_nonzero_probability():
 
 def test_generated_profile_is_valid_across_every_configured_player_count():
     # round(market_size * risk_depth_fraction) for n=2..6 -- see
-    # GameConfig.market_size_by_players / risk_depth_fraction.
-    structural_depths = [round(GameConfig().market_size_by_players[n] * GameConfig().risk_depth_fraction) for n in range(2, 7)]
+    # GameConfig.market_size_by_players / risk_depth_fraction. One extra
+    # entry beyond risk_band_depth -- see the "off by one" note in
+    # _generate_random_haircut_profile's own docstring.
+    risk_band_depths = [round(GameConfig().market_size_by_players[n] * GameConfig().risk_depth_fraction) for n in range(2, 7)]
     rng = random.Random(7)
-    for depth in structural_depths:
+    for depth in risk_band_depths:
         for _ in range(200):
             profile = engine._generate_random_haircut_profile(depth, rng)
-            assert len(profile.depth_probabilities) == depth
+            assert len(profile.depth_probabilities) == depth + 1
             assert sum(profile.depth_probabilities) == pytest.approx(1.0, abs=1e-9)
             assert all(p >= 0 for p in profile.depth_probabilities)
+
+
+def test_the_last_in_band_position_never_reaches_full_safety():
+    # The actual bug caught in real play: building exactly risk_band_depth
+    # entries forced summing all of them -- the deepest in-band position's
+    # own survival chance -- to exactly 1.0, so "the top K positions carry
+    # some risk" was a lie for position K itself, always perfectly safe in
+    # practice. Now the profile carries one extra slot past the band, and
+    # every in-band position's own cumulative survival is capped at
+    # _HAIRCUT_WITHIN_BAND_CEILING (92%).
+    rng = random.Random(29)
+    risk_band_depth = 4
+    for _ in range(2000):
+        profile = engine._generate_random_haircut_profile(risk_band_depth, rng)
+        assert len(profile.depth_probabilities) == risk_band_depth + 1
+        last_in_band_survival = sum(profile.depth_probabilities[:risk_band_depth])
+        assert last_in_band_survival <= engine._HAIRCUT_WITHIN_BAND_CEILING + 1e-9
+        assert last_in_band_survival < 1.0 - 1e-9
+        # The one slot past the band absorbs the remainder -- always at
+        # least (1 - ceiling), never zero.
+        assert profile.depth_probabilities[-1] >= (1.0 - engine._HAIRCUT_WITHIN_BAND_CEILING) - 1e-9
 
 
 def test_generated_profile_respects_the_first_and_second_position_survival_ranges():
@@ -77,14 +100,17 @@ def test_generated_profile_adjacent_depths_are_never_closer_than_the_minimum_gap
     # positions only ~1 percentage point apart, reading as no real
     # differentiation. Every adjacent pair of cumulative survival values
     # must now differ by at least _HAIRCUT_MIN_ADJACENT_GAP (4%), with two
-    # exemptions: a step that *lands on* exactly 100% (whether it's the
-    # final structural slot or an earlier "big jump to certainty" --
-    # reaching certainty is always meaningful regardless of how far it had
-    # to jump, explicitly tolerated per real playtest direction), and any
-    # gap once certainty was already reached earlier (every further slot
-    # is trivially 0 -- flat continuations, not two genuinely different
-    # risk levels crammed together).
+    # exemptions: a step that *lands on* the within-band ceiling (whether
+    # it's the deepest in-band position or an earlier "big jump to the
+    # ceiling" -- reaching it is always meaningful regardless of how far
+    # it had to jump, explicitly tolerated per real playtest direction),
+    # and any gap once the ceiling was already reached earlier (every
+    # further in-band slot is trivially 0 -- flat continuations, not two
+    # genuinely different risk levels crammed together). The final jump
+    # past the band (always >= 1 - ceiling, i.e. >= 8%) is excluded by the
+    # loop bound itself, same as before.
     rng = random.Random(23)
+    ceiling = engine._HAIRCUT_WITHIN_BAND_CEILING
     for _ in range(2000):
         profile = engine._generate_random_haircut_profile(6, rng)
         cumulative = []
@@ -93,7 +119,7 @@ def test_generated_profile_adjacent_depths_are_never_closer_than_the_minimum_gap
             running += p
             cumulative.append(running)
         for i in range(1, len(cumulative) - 1):
-            if cumulative[i - 1] >= 1.0 - 1e-9 or cumulative[i] >= 1.0 - 1e-9:
+            if cumulative[i - 1] >= ceiling - 1e-9 or cumulative[i] >= ceiling - 1e-9:
                 continue
             gap = cumulative[i] - cumulative[i - 1]
             assert gap >= 0.04 - 1e-9, f"gap {gap} between depths {i - 1} and {i} is below the 4% floor"
@@ -122,15 +148,17 @@ def test_generated_profiles_show_real_game_to_game_variability():
     assert max(firsts) - min(firsts) > 0.30
 
 
-def test_generated_profile_can_reach_certainty_before_the_last_structural_slot():
-    # "A big jump between the last at-risk position and the first 100%
-    # spot" is an intended shape, not something to avoid -- over enough
-    # draws, at least some profiles should have a genuinely zero-
-    # probability trailing slot (HaircutProfile.max_depth landing earlier
-    # than the structural depth passed in).
+def test_generated_profile_can_hit_the_ceiling_before_the_last_in_band_position():
+    # "A big jump" is allowed to happen early within the band too -- once
+    # the ceiling's reached, every subsequent in-band position (before the
+    # one guaranteed-nonzero slot past the band) shows a genuinely zero
+    # probability of its own, a flat continuation rather than a forced
+    # small residual.
     rng = random.Random(19)
-    depth = 6
-    assert any(engine._generate_random_haircut_profile(depth, rng).max_depth < depth - 1 for _ in range(500))
+    risk_band_depth = 6
+    assert any(
+        0.0 in engine._generate_random_haircut_profile(risk_band_depth, rng).depth_probabilities[:-1] for _ in range(500)
+    )
 
 
 # --------------------------------------------------------------------------

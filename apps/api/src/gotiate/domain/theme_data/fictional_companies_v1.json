@@ -195,7 +195,8 @@
       "theme_key": "fc_031",
       "display_name": "Oxide Tractor Co.",
       "ticker_symbol": "OXID",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/tractor.png"
     },
     {
       "theme_key": "fc_032",

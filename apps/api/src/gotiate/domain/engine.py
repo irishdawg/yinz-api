@@ -417,9 +417,17 @@ _HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE = (0.11, 0.61)
 # reads as no real differentiation at all even though it's technically a
 # valid distribution.
 _HAIRCUT_MIN_ADJACENT_GAP = 0.04
+# No position *inside* the risk band is ever fully safe -- real playtest
+# feedback: the deepest in-band position was showing 100% survival, which
+# defeats the entire point of it being "in the risk band" at all. Every
+# in-band position's own cumulative survival is capped here; the
+# remainder (at least 8%) always lands on the one guaranteed-unsafe-if-
+# nothing-else-was outcome, one slot past the band -- see the depth-count
+# note below.
+_HAIRCUT_WITHIN_BAND_CEILING = 0.92
 
 
-def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) -> HaircutProfile:
+def _generate_random_haircut_profile(risk_band_depth: int, rng: random.Random) -> HaircutProfile:
     """A fresh Haircut profile, drawn at random every game rather than
     picked from a fixed list -- see GameConfig.haircut_reveal_fraction's
     docstring for why the old 5-curve-per-player-count list was retired.
@@ -429,52 +437,60 @@ def _generate_random_haircut_profile(structural_depth: int, rng: random.Random) 
     "second always greater than first" falls out for free rather than
     needing its own check.
 
-    `structural_depth` is round(market_size * risk_depth_fraction), same
-    formula the old model_validator enforced against the curated list --
-    still the number of slots in depth_probabilities, and still what
-    haircut_risk_band_depth reports pre-reveal (projections.project, kept
-    independent of any specific profile's shape -- see its own comment).
-    Deliberately NOT the same thing as this profile's own effective depth
-    (HaircutProfile.max_depth, highest nonzero index): the survival CDF
-    can reach 1.0 before using every slot, in which case every later slot
-    is legitimately 0 -- "a big jump from the last at-risk position
-    straight to certain safety" is an intended shape, not an edge case to
-    avoid, per real playtest direction. Deliberately lumpy rather than a
-    fixed step size between depths: each step is a fresh uniform draw
-    across all remaining room up to 100%, so some games jump hard early
-    and coast, others creep up gradually -- genuine game-to-game
-    variability, not a family of curves a player could learn to recognize
-    (the entire reason the curated list was retired). Every step is still
-    floored at _HAIRCUT_MIN_ADJACENT_GAP, though -- an unbounded draw
-    could (and did, in real play) land two adjacent positions only ~1
-    percentage point apart, reading as no differentiation at all; once
-    there's less room left than the floor, the step jumps straight to
-    certainty instead of squeezing in one more too-small increment."""
-    if structural_depth <= 0:
+    `risk_band_depth` is round(market_size * risk_depth_fraction), same
+    formula the old model_validator enforced against the curated list, and
+    still what haircut_risk_band_depth reports pre-reveal (projections.project,
+    kept independent of any specific profile's shape -- see its own
+    comment) -- but NOT the length of depth_probabilities: the returned
+    profile has risk_band_depth + 1 entries, one per in-band position plus
+    exactly one more for "the wipe reached the bottom of the band and
+    nothing saved it," which is what's structurally always-100%-safe one
+    position past the band. Getting this off by one (building exactly
+    risk_band_depth entries, so summing all of them forced position
+    risk_band_depth's own survival to exactly 100%) was a real bug caught
+    in real play -- the deepest in-band position must never actually be
+    the safe one.
+
+    Every in-band position's own cumulative survival is additionally
+    capped at _HAIRCUT_WITHIN_BAND_CEILING (92%), so even the deepest
+    in-band position keeps genuine risk, never approaching certainty
+    within the band itself. Deliberately lumpy rather than a fixed step
+    size between depths: each step is a fresh uniform draw across all
+    remaining room up to the ceiling, so some games jump hard early and
+    coast, others creep up gradually -- genuine game-to-game variability,
+    not a family of curves a player could learn to recognize (the entire
+    reason the curated list was retired). Every step is still floored at
+    _HAIRCUT_MIN_ADJACENT_GAP, though -- an unbounded draw could (and did,
+    in real play) land two adjacent positions only ~1 percentage point
+    apart, reading as no differentiation at all; once there's less room
+    left than the floor, the step jumps straight to the ceiling instead
+    of squeezing in one more too-small increment."""
+    if risk_band_depth <= 0:
         return HaircutProfile(depth_probabilities=[1.0])
 
     cumulative = [rng.uniform(*_HAIRCUT_FIRST_DEPTH_SURVIVAL_RANGE)]
-    if structural_depth >= 2:
+    if risk_band_depth >= 2:
         low, high = _HAIRCUT_SECOND_DEPTH_SURVIVAL_RANGE
-        cumulative.append(rng.uniform(max(low, cumulative[0] + _HAIRCUT_MIN_ADJACENT_GAP), high))
-    for _ in range(2, structural_depth):
+        cumulative.append(rng.uniform(max(low, cumulative[0] + _HAIRCUT_MIN_ADJACENT_GAP), min(high, _HAIRCUT_WITHIN_BAND_CEILING)))
+    for _ in range(2, risk_band_depth):
         previous = cumulative[-1]
-        room = 1.0 - previous
+        room = _HAIRCUT_WITHIN_BAND_CEILING - previous
         if room <= _HAIRCUT_MIN_ADJACENT_GAP or rng.random() < 0.25:
             # Either there's no room left for a properly-separated step, or
-            # a genuine chance of reaching certainty early anyway -- not
+            # a genuine chance of hitting the ceiling early anyway -- not
             # just asymptotically approaching it. A pure continuous uniform
-            # draw only reaches exactly 1.0 in the mathematical limit
-            # (probability zero in practice), which would make "a big
-            # jump to the first 100% spot" theoretically possible but
+            # draw only reaches the ceiling exactly in the mathematical
+            # limit (probability zero in practice), which would make "a
+            # big jump straight to the ceiling" theoretically possible but
             # never actually observed. This is what makes it a real,
             # regularly-occurring shape instead.
-            cumulative.append(1.0)
+            cumulative.append(_HAIRCUT_WITHIN_BAND_CEILING)
         else:
             cumulative.append(previous + rng.uniform(_HAIRCUT_MIN_ADJACENT_GAP, room))
-    cumulative[-1] = 1.0  # the last structural slot is always where safety becomes certain
+    cumulative[-1] = min(cumulative[-1], _HAIRCUT_WITHIN_BAND_CEILING)  # the deepest in-band position never reaches the ceiling's own cap
+    cumulative.append(1.0)  # one slot past the band -- structurally safe, absorbs whatever's left (always >= 1 - ceiling)
 
-    depth_probabilities = [cumulative[0]] + [cumulative[i] - cumulative[i - 1] for i in range(1, structural_depth)]
+    depth_probabilities = [cumulative[0]] + [cumulative[i] - cumulative[i - 1] for i in range(1, len(cumulative))]
     return HaircutProfile(depth_probabilities=depth_probabilities)
 
 
@@ -1600,20 +1616,29 @@ def _find_correction_destination(game: Game, source_position: int, target_displa
 
 
 def _construct_one_correction_move(
-    game: Game, player_id: str, target_displacement: int, unavailable_destinations: set[str], rng: random.Random
+    game: Game,
+    player_id: str,
+    target_displacement: int,
+    unavailable_destinations: set[str],
+    rng: random.Random,
+    mutually_owned: frozenset[str] | set[str] = frozenset(),
 ) -> MarketCorrectionMove | None:
     """Targeting rules, locked: start from the player's top two *distinct*
-    owned entities by current position. A doubled/anchor holding (owned
-    x2+) is excluded if the other of the top two is singly-owned; only
-    when *both* are doubled does a double become eligible. Selection
-    within the eligible set is uniform-random, never damage-optimized.
-    If the randomly-drawn candidate has no legal destination, the
-    *other* eligible candidate is tried before giving up -- never chains
-    multiple swaps to force an exact displacement."""
+    owned entities by current position, excluding anything in
+    `mutually_owned` (both players' own PORTFOLIO, see
+    _construct_market_correction) -- a shared holding is never eligible
+    to be *anyone's* move source, so the other player's own independently
+    -computed move can never land a second, uninvited hit on it. A
+    doubled/anchor holding (owned x2+) is excluded if the other of the
+    top two is singly-owned; only when *both* are doubled does a double
+    become eligible. Selection within the eligible set is uniform-random,
+    never damage-optimized. If the randomly-drawn candidate has no legal
+    destination, the *other* eligible candidate is tried before giving up
+    -- never chains multiple swaps to force an exact displacement."""
     positions = {eid: m.position for eid, m in game.market.items()}
     owned_counts: dict[str, int] = {}
     for h in game.holdings.values():
-        if h.owner_player_id == player_id and h.zone == HoldingZone.PORTFOLIO:
+        if h.owner_player_id == player_id and h.zone == HoldingZone.PORTFOLIO and h.entity_id not in mutually_owned:
             owned_counts[h.entity_id] = owned_counts.get(h.entity_id, 0) + 1
     top_two = sorted(owned_counts, key=lambda eid: positions[eid])[:2]
     if not top_two:
@@ -1678,14 +1703,32 @@ def _construct_market_correction(game: Game, now: datetime, rng: random.Random) 
     Severity is derived from the private Projected Value gap and never
     shown; returns None if either player's eligible top-two holdings have
     no legal destination this cycle (expected to be exceptionally rare).
-    See the Market Correction design writeup."""
+    See the Market Correction design writeup.
+
+    Entities both players own in PORTFOLIO are excluded from *either*
+    player's own top-two eligibility (see _construct_one_correction_move)
+    -- without this, a shared holding could be the OTHER player's move
+    target, landing a second, uninvited hit on top of your own already
+    -independently-targeted move. Real playtest catch: player 1's own
+    move hit one of player 1's top two, and player 2's move (computed
+    purely from player 2's own top two) happened to land on an entity
+    player 1 also held, so player 1 took two hits from a mechanic that's
+    supposed to be exactly one downward move per player."""
     players = game.players
     _leader_id, _trailer_id, target_displacement = _market_correction_target_displacements(game)
+
+    portfolio_owners: dict[str, set[str]] = {}
+    for h in game.holdings.values():
+        if h.zone == HoldingZone.PORTFOLIO:
+            portfolio_owners.setdefault(h.entity_id, set()).add(h.owner_player_id)
+    mutually_owned = {eid for eid, owners in portfolio_owners.items() if len(owners) >= 2}
 
     used_destinations: set[str] = set()
     moves: list[MarketCorrectionMove] = []
     for player in players:
-        move = _construct_one_correction_move(game, player.game_player_id, target_displacement[player.game_player_id], used_destinations, rng)
+        move = _construct_one_correction_move(
+            game, player.game_player_id, target_displacement[player.game_player_id], used_destinations, rng, mutually_owned
+        )
         if move is None:
             return None
         used_destinations.add(move.swap.entity_b)

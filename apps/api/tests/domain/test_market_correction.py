@@ -132,6 +132,33 @@ def test_singly_owned_alternative_excludes_the_doubled_holding():
     assert sources == {e[1]}, "the doubled position-1 holding must never be targeted while a singly-owned alternative exists"
 
 
+def test_a_mutually_owned_entity_is_never_eligible_for_either_players_move():
+    # Real playtest catch: without this exclusion, a shared holding could
+    # be the OTHER player's move target -- landing a second, uninvited
+    # hit on top of your own already-independently-targeted move, when
+    # the mechanic is supposed to be exactly one downward move per player.
+    game = make_started_game(2)
+    host, guest = [p.game_player_id for p in game.players]
+    e = _entities_by_position(game)
+    # Both own e[0] (position 1) -- host's own top-two would otherwise be
+    # [e[0], e[1]], guest's [e[0], e[2]], but e[0] must never be eligible
+    # for *either* move since it's shared.
+    _set_portfolio(game, host, [e[0], e[1]])
+    _set_portfolio(game, guest, [e[0], e[2]])
+
+    saw_a_correction = False
+    for seed in range(20):
+        correction = engine._construct_market_correction(game, now(), random.Random(seed))
+        if correction is None:
+            continue
+        saw_a_correction = True
+        host_source = _move_for(correction, host).swap.entity_a
+        guest_source = _move_for(correction, guest).swap.entity_a
+        assert host_source == e[1]
+        assert guest_source == e[2]
+    assert saw_a_correction
+
+
 def test_both_doubled_makes_either_eligible():
     game = make_started_game(2)
     host, guest = [p.game_player_id for p in game.players]
