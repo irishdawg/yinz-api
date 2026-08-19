@@ -37,7 +37,8 @@
       "theme_key": "fc_006",
       "display_name": "Consolidated Ham",
       "ticker_symbol": "HAM",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/ham.png"
     },
     {
       "theme_key": "fc_007",
@@ -69,7 +70,8 @@
       "theme_key": "fc_011",
       "display_name": "Meisterburger Ink",
       "ticker_symbol": "INK",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/meisterburger.png"
     },
     {
       "theme_key": "fc_012",
@@ -167,13 +169,15 @@
       "theme_key": "fc_027",
       "display_name": "Scuttleworth Marine",
       "ticker_symbol": "SCUT",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/scuttleworth.png"
     },
     {
       "theme_key": "fc_028",
       "display_name": "Tiny Giant Mining",
       "ticker_symbol": "TINY",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/mining.png"
     },
     {
       "theme_key": "fc_029",
@@ -189,7 +193,7 @@
     },
     {
       "theme_key": "fc_031",
-      "display_name": "Oxide Tractor",
+      "display_name": "Oxide Tractor Co.",
       "ticker_symbol": "OXID",
       "is_locked": false
     },
