@@ -1,7 +1,13 @@
-"""PASS_PROPOSAL — a non-binding, permanent per-player exit from an open
-proposal. See the Pass design writeup: no Influence cost, doesn't bind or
-block anyone else, gives the proposer only a private anonymous count, and
-auto-expiry is publicly indistinguishable from an ordinary withdrawal."""
+"""PASS_PROPOSAL — a permanent, per-player exit from an open proposal that
+removes that player from the active negotiating set.
+
+NOTE (cadence/economy redesign, checkpoint 2): Pass is now fully public.
+The old anonymity model (proposer-only aggregate count, live masking of
+auto-expiry to look like an ordinary withdrawal, the proposal disappearing
+from a passer's own view) is gone entirely -- a Pass is a visible,
+intentional narrowing of who's still deciding, and passed_player_ids is
+public to everyone. A passed player still SEES the proposal (and any Pool
+on it), just can no longer act on it."""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ from gotiate.domain import engine
 from gotiate.domain.entities import GamePhase, ProposalResolutionReason, ResolutionStatus
 from gotiate.domain.errors import IllegalCommandError
 from gotiate.domain.projections import PlayerAudience, PublicAudience, ReplayAudience, project, project_events
-from tests.conftest import find_swap_pair, later, make_started_game, now
+from tests.conftest import later, make_started_game, now
 
 
 def _pass(game, proposal_id, actor):
@@ -123,17 +129,21 @@ def test_proposer_can_propose_again_immediately_after_auto_expiry():
     entities = list(game.market.keys())
     proposal_id = _propose(game, tedy, entities[0], entities[1])
     _pass(game, proposal_id, mortia)
-    new_id = _propose(game, tedy, entities[2], entities[3])  # falls out of the existing "one OPEN proposal" check
+    # EXPIRED_ALL_PASSED resolution clears game.active_proposal_id (the
+    # single choke point in engine._resolve_proposal), so the single
+    # -active-negotiation gate no longer blocks a fresh PROPOSE_SWAP.
+    assert game.active_proposal_id is None
+    new_id = _propose(game, tedy, entities[2], entities[3])
     assert new_id != proposal_id
     assert game.proposals[new_id].status == ResolutionStatus.OPEN
 
 
 # --------------------------------------------------------------------------
-# Live-view omission -- the actual enforcement of "ceases to exist"
+# Live-view visibility -- narrowing is visible, not an omission
 # --------------------------------------------------------------------------
 
 
-def test_passed_proposal_and_its_pools_omitted_from_passers_own_view_only():
+def test_passed_proposal_and_its_pools_stay_visible_to_the_passer():
     game = make_started_game(4)
     tedy, mortia, hanky, josiah = [p.game_player_id for p in game.players]
     entities = list(game.market.keys())
@@ -142,32 +152,26 @@ def test_passed_proposal_and_its_pools_omitted_from_passers_own_view_only():
     _pass(game, proposal_id, mortia)
 
     mortia_view = project(game, PlayerAudience(mortia))
-    assert mortia_view["proposals"] == []
-    assert mortia_view["pools"] == []
+    assert len(mortia_view["proposals"]) == 1
+    assert len(mortia_view["pools"]) == 1
+    assert mortia in mortia_view["proposals"][0]["passed_player_ids"]
 
     josiah_view = project(game, PlayerAudience(josiah))
     assert len(josiah_view["proposals"]) == 1
     assert len(josiah_view["pools"]) == 1
 
 
-def test_passed_count_visible_only_to_the_proposer():
+def test_passed_player_ids_visible_to_everyone():
     game = make_started_game(4)
     tedy, mortia, hanky, _ = [p.game_player_id for p in game.players]
     entities = list(game.market.keys())
     proposal_id = _propose(game, tedy, entities[0], entities[1])
     _pass(game, proposal_id, mortia)
 
-    tedy_view = project(game, PlayerAudience(tedy))
-    assert next(p for p in tedy_view["proposals"] if p["proposal_id"] == proposal_id)["passed_count"] == 1
-
-    hanky_view = project(game, PlayerAudience(hanky))
-    assert "passed_count" not in next(p for p in hanky_view["proposals"] if p["proposal_id"] == proposal_id)
-
-    public_view = project(game, PublicAudience())
-    assert "passed_count" not in next(p for p in public_view["proposals"] if p["proposal_id"] == proposal_id)
-
-    # Mortia herself doesn't see the proposal at all anymore, let alone a count.
-    assert project(game, PlayerAudience(mortia))["proposals"] == []
+    for audience in (PlayerAudience(tedy), PlayerAudience(hanky), PlayerAudience(mortia), PublicAudience()):
+        view = project(game, audience)
+        proj = next(p for p in view["proposals"] if p["proposal_id"] == proposal_id)
+        assert proj["passed_player_ids"] == [mortia]
 
 
 # --------------------------------------------------------------------------
@@ -206,11 +210,11 @@ def test_auto_expires_only_once_every_other_player_has_passed():
 
 
 # --------------------------------------------------------------------------
-# "Publicly indistinguishable from a withdrawal" -- the whole social contract
+# Fully public, unmasked -- the opposite of the old anonymity model
 # --------------------------------------------------------------------------
 
 
-def test_expired_all_passed_is_publicly_indistinguishable_from_withdrawal():
+def test_expired_all_passed_is_visible_unmasked_to_every_live_audience():
     game = make_started_game(3)
     tedy, mortia, hanky = [p.game_player_id for p in game.players]
     entities = list(game.market.keys())
@@ -219,15 +223,15 @@ def test_expired_all_passed_is_publicly_indistinguishable_from_withdrawal():
     _pass(game, proposal_id, hanky)
 
     proposal = game.proposals[proposal_id]
-    assert proposal.resolution_reason == ProposalResolutionReason.EXPIRED_ALL_PASSED  # true internal value
+    assert proposal.resolution_reason == ProposalResolutionReason.EXPIRED_ALL_PASSED
 
-    for audience in (PublicAudience(), PlayerAudience(tedy)):
+    for audience in (PublicAudience(), PlayerAudience(tedy), PlayerAudience(mortia)):
         view = project(game, audience)
         proj = next(p for p in view["proposals"] if p["proposal_id"] == proposal_id)
-        assert proj["resolution_reason"] == "withdrawn_by_initiator"
+        assert proj["resolution_reason"] == "expired_all_passed"
 
-    # ReplayAudience is the one path that sees the truth -- only reachable
-    # once SCORED, same guard every other replay-visible fact already uses.
+    # ReplayAudience sees the same true value -- no longer a distinct
+    # reveal, since there's nothing left to unmask.
     for actor in (tedy, mortia, hanky):
         engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=actor, expected_version=None, now=now())
     assert game.phase == GamePhase.SCORED
@@ -236,7 +240,7 @@ def test_expired_all_passed_is_publicly_indistinguishable_from_withdrawal():
     assert proj["resolution_reason"] == "expired_all_passed"
 
 
-def test_expired_all_passed_masked_in_event_log_too():
+def test_expired_all_passed_unmasked_in_event_log_too():
     game = make_started_game(3)
     tedy, mortia, hanky = [p.game_player_id for p in game.players]
     entities = list(game.market.keys())
@@ -246,16 +250,16 @@ def test_expired_all_passed_masked_in_event_log_too():
 
     resolved_events = [e for e in events if e.type.value == "PROPOSAL_RESOLVED"]
     assert resolved_events
-    assert resolved_events[0].payload["reason"] == "expired_all_passed"  # stored true, unredacted
+    assert resolved_events[0].payload["reason"] == "expired_all_passed"
 
     public_views = project_events(game, resolved_events, PublicAudience())
-    assert public_views[0]["payload"]["reason"] == "withdrawn_by_initiator"
+    assert public_views[0]["payload"]["reason"] == "expired_all_passed"
 
     replay_views = project_events(game, resolved_events, ReplayAudience())
     assert replay_views[0]["payload"]["reason"] == "expired_all_passed"
 
 
-def test_proposal_passed_event_is_actor_only():
+def test_proposal_passed_event_is_public():
     game = make_started_game(3)
     tedy, mortia, hanky = [p.game_player_id for p in game.players]
     entities = list(game.market.keys())
@@ -264,10 +268,10 @@ def test_proposal_passed_event_is_actor_only():
     passed_events = [e for e in events if e.type.value == "PROPOSAL_PASSED"]
     assert passed_events
 
-    assert project_events(game, passed_events, PlayerAudience(mortia))  # sees her own pass
-    assert project_events(game, passed_events, PlayerAudience(tedy)) == []  # the proposer does NOT
-    assert project_events(game, passed_events, PlayerAudience(hanky)) == []
-    assert project_events(game, passed_events, PublicAudience()) == []
+    for audience in (PlayerAudience(mortia), PlayerAudience(tedy), PlayerAudience(hanky), PublicAudience()):
+        views = project_events(game, passed_events, audience)
+        assert views
+        assert views[0]["actor_game_player_id"] == mortia
 
 
 # --------------------------------------------------------------------------

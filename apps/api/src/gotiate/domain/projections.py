@@ -3,17 +3,19 @@ rules get enforced; every client view, live or replay, is this same function
 called with a different audience. Audience is never client-supplied — the
 caller (api/routes.py) derives it from the verified JWT and game.phase.
 
-Cadence/economy redesign (prototype branch), checkpoint 1: strips every
+Cadence/economy redesign (prototype branch): checkpoint 1 stripped every
 Influence, Market Correction, gameplay-clock, Accept Lock, multi-accept
--threshold, and old Reserve/Pickup field/branch out of the projection. The
+-threshold, and old Reserve/Pickup field/branch out of the projection (the
 pending-pickup frozen-view short-circuit is removed along with it -- its
-*pattern* returns in a later checkpoint for Boosts, under a different name.
+*pattern* returns in a later checkpoint for Boosts, under a different
+name). Checkpoint 2 makes Pass fully public: a passed proposal/pool is no
+longer omitted from the passer's own view, and passed_player_ids is now
+exposed to everyone, not just an anonymous count to the proposer.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import StrEnum
 from typing import Iterable
 
@@ -28,7 +30,6 @@ from gotiate.domain.entities import (
     PoolResolutionReason,
     PoolVisibility,
     Proposal,
-    ProposalResolutionReason,
     ResolutionStatus,
 )
 from gotiate.domain.events import EventType, GameEvent
@@ -106,21 +107,23 @@ def project(game: Game, audience: Audience) -> dict:
         # a secret trigger, not a public countdown.
         "close_reason": game.close_reason.value if game.close_reason else None,
         "closed_at": game.closed_at,
+        # Public and unconditional -- at most one bare negotiation open
+        # table-wide at any time; null whenever the table is open for
+        # anyone with Moves left to seize initiative.
+        "active_proposal_id": game.active_proposal_id,
+        # Public and unconditional, flips once, permanently -- every Boost
+        # control should disable table-wide the instant this is true.
+        "boosts_expired": game.boosts_expired,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
-        # A proposal (and every Pool attached to it) is omitted entirely
-        # -- not hidden client-side -- from the live view of any player
-        # who has PASS_PROPOSAL'd it. This is the actual enforcement of
-        # "this negotiation ceases to exist in my world"; the engine-side
-        # legality checks (can't accept/pool after passing) are the
-        # backstop, this is what makes it true even before a player tries
-        # to act.
-        "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values() if not _proposal_passed_by(p, audience)],
-        "pools": [
-            _project_pool(game, pool, audience)
-            for pool in game.pools.values()
-            if not _proposal_passed_by(game.proposals.get(pool.base_proposal_id), audience)
-        ],
+        # NOTE (cadence/economy redesign): a passed proposal/pool is no
+        # longer omitted from the passer's own view -- Pass is public and
+        # narrows the active participant set visibly, it doesn't make the
+        # negotiation disappear. The engine-side legality checks (can't
+        # accept/pool after passing) still enforce that a passed player
+        # can no longer act on it.
+        "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values()],
+        "pools": [_project_pool(game, pool, audience) for pool in game.pools.values()],
     }
 
     if scored:
@@ -185,17 +188,18 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     # path to this information, so a future payload addition here doesn't
     # silently start leaking through the event log instead.
     EventType.PORTFOLIO_DEALT: EventVisibility.SERVER_ONLY,
-    # Hidden until the live reveal trigger (wired up in a later checkpoint).
+    # Hidden until the live reveal trigger (engine._maybe_reveal_haircut).
     EventType.HAIRCUT_PROFILE_SELECTED: EventVisibility.SERVER_ONLY,
+    # Fires once, table-wide, the instant the reveal trigger crosses --
+    # nothing per-player to redact.
+    EventType.HAIRCUT_RISK_REVEALED: EventVisibility.PUBLIC,
+    # Fires once, table-wide, the instant boosts_expired flips -- nothing
+    # per-player to redact.
+    EventType.BOOSTS_EXPIRED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
-    # Own pass only, in the passer's own history -- the proposer's only
-    # channel to Pass feedback is the anonymous, aggregate passed_count on
-    # the live proposal (project()/_project_proposal), never this event.
-    #
-    # NOTE (cadence/economy redesign): flips to PUBLIC in a later
-    # checkpoint alongside the rest of the Pass/narrowing rework.
-    EventType.PROPOSAL_PASSED: EventVisibility.ACTOR_ONLY,
+    # Fully public -- a Pass is now a visible, intentional information leak.
+    EventType.PROPOSAL_PASSED: EventVisibility.PUBLIC,
     # Payload carries entity_c/entity_d directly -- the actual swap.
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
@@ -245,16 +249,6 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
                 or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
             )
             views.append(_event_view(event, redact=() if can_see_contents else _POOL_CONTENT_KEYS))
-            continue
-        if event.type is EventType.PROPOSAL_RESOLVED:
-            # Same masking _public_resolution_reason applies to the live
-            # proposal projection -- EXPIRED_ALL_PASSED must never appear
-            # live, in the event log any more than in the proposal's own
-            # current-state view.
-            view = _event_view(event)
-            if view["payload"].get("reason") == ProposalResolutionReason.EXPIRED_ALL_PASSED.value:
-                view = {**view, "payload": {**view["payload"], "reason": ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value}}
-            views.append(view)
             continue
         views.append(_event_view(event))  # PUBLIC
     return views
@@ -344,28 +338,8 @@ def _safe_value(game: Game, game_player_id: str) -> int:
     return sum(n - positions[h.entity_id] + 1 for h in holdings if positions[h.entity_id] > max_depth)
 
 
-def _proposal_passed_by(proposal: Proposal | None, audience: Audience) -> bool:
-    return proposal is not None and isinstance(audience, PlayerAudience) and audience.game_player_id in proposal.passed_player_ids
-
-
-def _public_resolution_reason(reason: ProposalResolutionReason | None, audience: Audience) -> str | None:
-    """EXPIRED_ALL_PASSED is masked back to WITHDRAWN_BY_INITIATOR for
-    every live audience -- publicly indistinguishable from an ordinary
-    withdrawal, by design. If we reported "no takers" live, we'd have
-    reconstructed the exact public stigma Pass exists to avoid, one level
-    removed. ReplayAudience sees the true reason.
-
-    NOTE (cadence/economy redesign): this masking is removed in a later
-    checkpoint once Pass becomes fully public."""
-    if reason is None:
-        return None
-    if reason is ProposalResolutionReason.EXPIRED_ALL_PASSED and not isinstance(audience, ReplayAudience):
-        return ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value
-    return reason.value
-
-
 def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dict:
-    out: dict = {
+    return {
         "proposal_id": proposal.proposal_id,
         "entity_a": proposal.swap.entity_a,
         "entity_b": proposal.swap.entity_b,
@@ -376,15 +350,12 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         "rising_entity_id": proposal.swap.rising_entity_id,
         "proposer_id": proposal.swap.initiator_player_id,
         "status": proposal.status.value,
-        "resolution_reason": _public_resolution_reason(proposal.resolution_reason, audience),
+        "resolution_reason": proposal.resolution_reason.value if proposal.resolution_reason else None,
+        # Fully public, identities and all -- Pass is a visible,
+        # intentional information leak that narrows the active
+        # participant set for everyone to see. Empty until anyone passes.
+        "passed_player_ids": sorted(proposal.passed_player_ids),
     }
-    if isinstance(audience, PlayerAudience) and audience.game_player_id == proposal.swap.initiator_player_id:
-        # Anonymous, aggregate-only -- never identities. This is the
-        # proposer's one and only channel to Pass feedback; PROPOSAL_PASSED
-        # itself is ACTOR_ONLY in EVENT_VISIBILITY, so there's no live
-        # event stream of individual passes to correlate against timing.
-        out["passed_count"] = len(proposal.passed_player_ids)
-    return out
 
 
 def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:

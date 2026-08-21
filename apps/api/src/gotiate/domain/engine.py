@@ -6,14 +6,16 @@ The lock and persistence live in `api/routes.py` and `persistence/`; this module
 only ever sees one `Game` at a time and mutates it in place, returning the list
 of newly emitted events.
 
-Cadence/economy redesign (prototype branch), checkpoint 1: Influence, Market
-Correction, the gameplay clock, Accept Lock, the 5-6 player multi-accept
-threshold, and the old Reserve/Pickup/unilateral-burn commands are removed
-here. PROPOSE_SWAP/PASS_PROPOSAL/ACCEPT_PROPOSAL/ACCEPT_POOL still behave
-close to their pre-redesign shape otherwise -- Move-gating, the single
--active-negotiation constraint, public Pass/narrowing, Arbitration, and
-Boosts are wired up in later checkpoints, not here. See the redesign plan
-artifact for the full sequence.
+Cadence/economy redesign (prototype branch): checkpoint 1 removed Influence,
+Market Correction, the gameplay clock, Accept Lock, the 5-6 player
+multi-accept threshold, and the old Reserve/Pickup/unilateral-burn commands.
+Checkpoint 2 wires up the actual cadence: PROPOSE_SWAP now consumes a Move
+and is illegal while another negotiation is already active table-wide;
+WITHDRAW_PROPOSAL is gone entirely (spending a Move commits the table);
+Pass is fully public and narrows the active participant set; Boost expiry
+and the Haircut reveal are now Move-driven; the game can now end via Move
+exhaustion, not just Ready-to-Close. Boosts and Arbitration remain
+scaffolded for later checkpoints -- see the redesign plan artifact.
 """
 
 from __future__ import annotations
@@ -173,6 +175,28 @@ def handle_command(
         game.version += 1
     events += new_events
 
+    # Checked after every command, not just Move-spending ones -- cheap (a
+    # plain scan of the roster/state) and this is the one chokepoint every
+    # command already passes through. Only PROPOSE_SWAP can ever change
+    # moves_remaining or active_proposal_id today, so this is a no-op the
+    # vast majority of the time -- same discipline the old zero-Influence
+    # top-up check used.
+    if game.phase == GamePhase.NEGOTIATION:
+        side_effects: list[GameEvent] = []
+        side_effects += _maybe_expire_boosts(game, now)
+        side_effects += _maybe_reveal_haircut(game, now)
+        if side_effects:
+            game.version += 1
+        events += side_effects
+        # Checked last -- a game-ending close should see the freshest
+        # possible state (including the two checks just above), and must
+        # not itself be short-circuited by them.
+        if game.phase == GamePhase.NEGOTIATION:
+            close_events = _maybe_close_on_moves_exhausted(game, now)
+            if close_events:
+                game.version += 1
+            events += close_events
+
     return events
 
 
@@ -183,9 +207,11 @@ def handle_command(
 
 def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     """NOTE (cadence/economy redesign): there is no gameplay clock. The
-    lobby reminder/grace auto-cancel is the only time-driven transition
-    left in checkpoint 1 -- the Arbitration 20s timer and the Move-based
-    Haircut reveal trigger are wired up in later checkpoints."""
+    lobby reminder/grace auto-cancel is the only time-driven transition in
+    this game -- the Arbitration 20s timer is wired up in a later
+    checkpoint; every other trigger in this redesign (Boost expiry, the
+    Haircut reveal, the Move-exhaustion endgame) is a direct, synchronous
+    consequence of a command, not something that needs polling to notice."""
     events: list[GameEvent] = []
 
     if game.phase == GamePhase.LOBBY:
@@ -222,6 +248,61 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Move-driven side effects (checkpoint 2) — each a direct, synchronous
+# consequence of PROPOSE_SWAP consuming a Move, checked generically after
+# every command (see handle_command). None of these are time-driven.
+# --------------------------------------------------------------------------
+
+
+def _maybe_expire_boosts(game: Game, now: datetime) -> list[GameEvent]:
+    """Flips boosts_expired False -> True exactly once, the instant any
+    SINGLE player's own moves_remaining first hits zero -- not when every
+    player's does. This is the unilateral cutoff now, expressed as game
+    state rather than a timer."""
+    if game.boosts_expired:
+        return []
+    if not any(p.moves_remaining <= 0 for p in game.players):
+        return []
+    game.boosts_expired = True
+    return [_emit(game, now, EventType.BOOSTS_EXPIRED, actor=None, payload={})]
+
+
+def _maybe_reveal_haircut(game: Game, now: datetime) -> list[GameEvent]:
+    """Replaces the old clock-fraction reveal trigger: fires exactly once,
+    the instant cumulative Moves consumed across the table first reaches
+    or crosses 50% of the initial total Move allocation
+    (len(players) * starting_moves). A game that ends before crossing this
+    threshold never sees it live; project() reveals the profile
+    unconditionally once phase is SCORED regardless."""
+    if game.haircut_profile_revealed_at is not None or game.haircut_profile is None:
+        return []
+    total_initial = len(game.players) * game.config.starting_moves
+    if total_initial <= 0:
+        return []
+    consumed = total_initial - sum(p.moves_remaining for p in game.players)
+    if consumed / total_initial < 0.5:
+        return []
+    game.haircut_profile_revealed_at = now
+    return [_emit(game, now, EventType.HAIRCUT_RISK_REVEALED, actor=None, payload={})]
+
+
+def _maybe_close_on_moves_exhausted(game: Game, now: datetime) -> list[GameEvent]:
+    """The Move-exhaustion endgame: the game ends once every seated
+    player's own moves_remaining has hit zero AND there is no active
+    negotiation left to resolve. Deliberately not the same instant as
+    boosts_expired (that fires on the *first* player to hit zero) -- the
+    table can still spend its last few Moves, opening and resolving
+    negotiations, for a while after Boosts have already expired. Only
+    fires once the very last negotiation opened by the very last Move has
+    itself resolved (active_proposal_id back to None)."""
+    if game.active_proposal_id is not None:
+        return []
+    if not game.players or any(p.moves_remaining > 0 for p in game.players):
+        return []
+    return close_market(game, CloseReason.MOVES_EXHAUSTED, now)
+
+
+# --------------------------------------------------------------------------
 # close_market — the one canonical closure operation (§04, §07)
 # --------------------------------------------------------------------------
 
@@ -234,6 +315,12 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
     game.phase = GamePhase.CLOSING
     game.closed_at = now
     game.close_reason = reason
+    # Defense-in-depth: the loop below also clears this via
+    # _resolve_proposal the instant the matching (still-open) proposal
+    # resolves MARKET_CLOSED, but clearing it explicitly here means the
+    # invariant holds even if active_proposal_id ever pointed at a
+    # proposal that wasn't actually OPEN.
+    game.active_proposal_id = None
     events.append(_emit(game, now, EventType.MARKET_CLOSED, actor=None, payload={"reason": reason.value}))
 
     for proposal in game.proposals.values():
@@ -475,10 +562,10 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
     game.started_at = now
     game.close_threshold = game.config.close_threshold(n)
 
-    # Generated fresh and locked now. NOTE (cadence/economy redesign): the
-    # live reveal trigger (50% of total Move allocation consumed) is wired
-    # up in a later checkpoint -- until then the profile only becomes
-    # visible once the game reaches SCORED (see project()).
+    # Generated fresh and locked now -- live reveal trigger is
+    # _maybe_reveal_haircut (Move-driven, checked generically after every
+    # command). Until it fires, the profile only becomes visible once the
+    # game reaches SCORED (see project()).
     game.haircut_profile = _generate_random_haircut_profile(round(market_size * game.config.risk_depth_fraction), rng)
     events.append(_emit(game, now, EventType.HAIRCUT_PROFILE_SELECTED, actor=None, payload={}))
     game.phase = GamePhase.NEGOTIATION
@@ -488,42 +575,25 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
 
 def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
+    # Single-active-negotiation constraint: at most one bare negotiation
+    # open table-wide at any time. This also makes the old auto-withdraw
+    # -your-own-open-proposal path and the cross-player same-pair dedup
+    # scan structurally unreachable -- there is never a second proposal to
+    # collide with -- so both are gone rather than kept as dead code.
+    if game.active_proposal_id is not None:
+        raise IllegalCommandError("a negotiation is already active")
+
     entity_a, entity_b = payload["entity_a"], payload["entity_b"]
     if entity_a == entity_b:
         raise IllegalCommandError("a proposal must name two different entities")
     _require_entities_exist(game, entity_a, entity_b)
-    # Auto-withdraw, not block -- proposing a new one is a clear enough
-    # signal of intent that forcing an explicit Withdraw first was just
-    # friction (real playtest feedback). Found here but not yet acted on:
-    # every check below must pass first, so a rejected new proposal never
-    # costs the player their still-open old one. Excluded from the
-    # duplicate-pair scan below since it's about to stop existing.
-    #
-    # NOTE (cadence/economy redesign): this whole auto-withdraw path, and
-    # the cross-player duplicate-pair scan below it, become structurally
-    # unreachable once the single-active-negotiation constraint and the
-    # no-Withdraw rule land in a later checkpoint -- left as-is here since
-    # checkpoint 1 doesn't yet enforce that constraint.
-    existing = next(
-        (p for p in game.proposals.values() if p.status == ResolutionStatus.OPEN and p.swap.initiator_player_id == actor_game_player_id),
-        None,
-    )
-    if any(
-        p.status == ResolutionStatus.OPEN
-        and p.proposal_id != (existing.proposal_id if existing else None)
-        and {p.swap.entity_a, p.swap.entity_b} == {entity_a, entity_b}
-        for p in game.proposals.values()
-    ):
-        raise IllegalCommandError("a proposal for this pair is already open")
 
-    events: list[GameEvent] = []
-    if existing is not None:
-        events.append(_resolve_proposal(game, existing, ProposalResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now))
-        for pool in list(game.pools.values()):
-            if pool.base_proposal_id == existing.proposal_id and pool.status == ResolutionStatus.OPEN:
-                events.append(
-                    _resolve_pool(game, pool, PoolResolutionReason.BASE_PROPOSAL_WITHDRAWN, actor_game_player_id, now)
-                )
+    # Opening a negotiation is the only thing that spends a Move.
+    # Committed permanently the instant this succeeds -- never refunded,
+    # regardless of how the negotiation eventually resolves (rule 1).
+    player = game.player_by_id(actor_game_player_id)
+    if player.moves_remaining < 1:
+        raise IllegalCommandError("no Moves remaining")
 
     proposal = Proposal(
         proposal_id=new_id(),
@@ -536,7 +606,10 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
         created_at=now,
     )
     game.proposals[proposal.proposal_id] = proposal
-    events.append(
+    player.moves_remaining -= 1
+    game.active_proposal_id = proposal.proposal_id
+
+    return [
         _emit(
             game,
             now,
@@ -544,25 +617,7 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
             actor=actor_game_player_id,
             payload={"proposal_id": proposal.proposal_id, "entity_a": entity_a, "entity_b": entity_b},
         )
-    )
-    return events
-
-
-def _handle_withdraw_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
-    # NOTE (cadence/economy redesign): WITHDRAW_PROPOSAL is removed from the
-    # rules entirely in a later checkpoint (rule 4 -- spending a Move
-    # commits the table). Left in place, unchanged, for checkpoint 1.
-    _require_negotiation(game)
-    proposal = _require_open_proposal(game, payload["proposal_id"])
-    if proposal.swap.initiator_player_id != actor_game_player_id:
-        raise IllegalCommandError("only the proposer can withdraw")
-
-    events = [_resolve_proposal(game, proposal, ProposalResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now)]
-
-    for pool in list(game.pools.values()):
-        if pool.base_proposal_id == proposal.proposal_id and pool.status == ResolutionStatus.OPEN:
-            events.append(_resolve_pool(game, pool, PoolResolutionReason.BASE_PROPOSAL_WITHDRAWN, actor_game_player_id, now))
-    return events
+    ]
 
 
 def _all_others_passed(game: Game, proposal: Proposal) -> bool:
@@ -590,6 +645,10 @@ def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: st
     ):
         raise IllegalCommandError("withdraw your Pool on this proposal before passing")
 
+    # Public and permanent -- this is the active-participant-set narrowing
+    # mechanic itself. A passed player can no longer Accept/Pool this
+    # proposal, but keeps seeing it (see projections.project(), which no
+    # longer omits a proposal from a player who has passed it).
     proposal.passed_player_ids.add(actor_game_player_id)
     events = [_emit(game, now, EventType.PROPOSAL_PASSED, actor=actor_game_player_id, payload={"proposal_id": proposal.proposal_id})]
 
@@ -751,7 +810,6 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "EXTEND_LOBBY_TIMER": _handle_extend_lobby_timer,
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,
-    "WITHDRAW_PROPOSAL": _handle_withdraw_proposal,
     "PASS_PROPOSAL": _handle_pass_proposal,
     "ACCEPT_PROPOSAL": _handle_accept_proposal,
     "CREATE_POOL": _handle_create_pool,
@@ -779,6 +837,11 @@ def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolution
     proposal.resolved_at_seq_no = game.next_seq_no
     proposal.resolved_by_player_id = resolved_by
     proposal.resolution_reason = reason
+    # The single place active_proposal_id ever gets cleared -- every
+    # proposal resolution, of any reason, funnels through here. Never set
+    # or cleared anywhere else in the engine.
+    if game.active_proposal_id == proposal.proposal_id:
+        game.active_proposal_id = None
     return _emit(game, now, EventType.PROPOSAL_RESOLVED, actor=resolved_by, payload={"proposal_id": proposal.proposal_id, "reason": reason.value})
 
 

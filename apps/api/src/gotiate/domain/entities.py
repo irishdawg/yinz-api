@@ -5,9 +5,11 @@ aggregate: one instance per match, mutated only by `domain.engine`.
 
 Cadence/economy redesign (prototype branch): Influence, the gameplay clock,
 Market Correction, Accept Lock, and the old Reserve/Pickup/unilateral-burn
-mechanic are removed here (checkpoint 1). Moves, Boosts, and Arbitration are
-scaffolded as inert fields in this checkpoint and wired up for real in later
-checkpoints -- see the redesign plan artifact for the full sequence.
+mechanic are removed (checkpoint 1). Moves gate opening a negotiation,
+enforce a single active negotiation table-wide, and drive the Haircut
+reveal/Boost-expiry/game-end triggers (checkpoint 2). Boosts and Arbitration
+remain scaffolded, wired up for real in later checkpoints -- see the
+redesign plan artifact for the full sequence.
 """
 
 from __future__ import annotations
@@ -49,21 +51,13 @@ class ResolutionStatus(StrEnum):
 
 class ProposalResolutionReason(StrEnum):
     EXECUTED = "executed"
-    # NOTE (cadence/economy redesign): WITHDRAW_PROPOSAL itself is removed
-    # from the rules in a later checkpoint (rule 4) -- this reason survives
-    # until then since engine._handle_withdraw_proposal is still present in
-    # checkpoint 1.
-    WITHDRAWN_BY_INITIATOR = "withdrawn_by_initiator"
+    # NOTE (cadence/economy redesign): the opener can no longer withdraw --
+    # spending a Move commits the table (rule 4). WITHDRAWN_BY_INITIATOR is
+    # gone; there is no voluntary-withdrawal path left for a bare proposal.
     MARKET_CLOSED = "market_closed"
     # Every other seated player has PASS_PROPOSAL'd -- mathematically dead,
-    # nobody rejected it. Never shown live as this value: projections.py's
-    # _public_resolution_reason masks it back to WITHDRAWN_BY_INITIATOR for
-    # every live audience, so Pass never becomes a public signal. See the
-    # Pass design writeup.
-    #
-    # NOTE (cadence/economy redesign): Pass anonymity/masking is retired in
-    # a later checkpoint (Pass becomes fully public), at which point this
-    # reason becomes directly public too. Left unchanged in checkpoint 1.
+    # nobody rejected it. Fully public, unmasked -- Pass itself is public
+    # now, so there is nothing left to hide about its consequence either.
     EXPIRED_ALL_PASSED = "expired_all_passed"
     # The market moved under this proposal's locked direction (see
     # SwapIntent.rising_entity_id) -- the opposite of EXPIRED_ALL_PASSED:
@@ -74,18 +68,23 @@ class ProposalResolutionReason(StrEnum):
 
 class PoolResolutionReason(StrEnum):
     EXECUTED = "executed"
+    # The pool's own initiator withdrew it -- unaffected by the redesign;
+    # Pools aren't Moves, so this stays fully legal (contrast the base
+    # proposal, which can no longer be withdrawn at all).
     WITHDRAWN_BY_INITIATOR = "withdrawn_by_initiator"
     INVALIDATED_BY_INITIATOR_ACTION = "invalidated_by_initiator_action"
     DECLINED_BY_TARGET = "declined_by_target"
     PREEMPTED_BY_OTHER_ACTION = "preempted_by_other_action"
-    BASE_PROPOSAL_WITHDRAWN = "base_proposal_withdrawn"
+    # NOTE (cadence/economy redesign): BASE_PROPOSAL_WITHDRAWN is gone --
+    # a base proposal can no longer be withdrawn, so a Pool attached to it
+    # can never be cascaded this way again.
     MARKET_CLOSED = "market_closed"
     # This pool's own leg crossed -- mirrors ProposalResolutionReason's
     # value above, never masked. Distinct from BASE_PROPOSAL_VOIDED below:
     # this pool's own direction, not its base proposal's, is what broke.
     VOIDED_MARKET_SWUNG = "voided_market_swung"
-    # Cascaded because this pool's base proposal voided -- mirrors
-    # BASE_PROPOSAL_WITHDRAWN's existing cascade shape exactly, new reason.
+    # Cascaded because this pool's base proposal voided (crossing
+    # invalidation, not withdrawal).
     BASE_PROPOSAL_VOIDED = "base_proposal_voided"
 
 
@@ -97,8 +96,12 @@ class PoolVisibility(StrEnum):
 class CloseReason(StrEnum):
     READY_THRESHOLD = "READY_THRESHOLD"
     # NOTE (cadence/economy redesign): TIME_EXPIRED is gone -- there is no
-    # gameplay clock. MOVES_EXHAUSTED is added in a later checkpoint once
-    # the Move economy itself exists.
+    # gameplay clock. The game now also ends once every seated player's own
+    # moves_remaining has hit zero AND there is no active negotiation left
+    # to resolve -- deliberately not the same instant as boosts_expired
+    # (that fires on the *first* player to hit zero); see
+    # engine._maybe_close_on_moves_exhausted.
+    MOVES_EXHAUSTED = "MOVES_EXHAUSTED"
     # No OPTIONALITY_EXHAUSTED for V1 — deliberately deferred, see decision log §10.
 
 
@@ -300,9 +303,12 @@ class Proposal(BaseModel):
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
     resolution_reason: ProposalResolutionReason | None = None
-    # Add-only, permanent per player -- see PASS_PROPOSAL. A player in this
-    # set never sees this proposal (or any Pool on it) in their own live
-    # view again; see projections.project()'s omission filter.
+    # Add-only, permanent per player -- see PASS_PROPOSAL. Fully public
+    # (projections._project_proposal exposes it unconditionally): this is
+    # the narrowing active-participant-set mechanic itself, and a passed
+    # player becomes Arbitration jury-eligible once that lands. A player
+    # in this set can no longer Accept/Pool this proposal, but still sees
+    # it -- narrowing is visible, not an omission.
     passed_player_ids: set[str] = Field(default_factory=set)
 
 
@@ -371,12 +377,15 @@ class Game(BaseModel):
     close_threshold: int | None = None
 
     # --- Cadence/economy redesign ---
-    # At most one bare negotiation open table-wide at any time. Wired up in
-    # a later checkpoint; PROPOSE_SWAP is not yet gated on it in checkpoint 1.
+    # At most one bare negotiation open table-wide at any time --
+    # PROPOSE_SWAP is illegal whenever this is set. Cleared, centrally, by
+    # engine._resolve_proposal the instant the matching proposal resolves
+    # (any reason) -- never set/cleared anywhere else, so there is exactly
+    # one place a future reviewer needs to check for "is this in sync."
     active_proposal_id: str | None = None
     # Flips False -> True exactly once, the instant any single player's own
-    # moves_remaining first hits zero, and never resets. Wired up once
-    # Moves themselves are gating PROPOSE_SWAP (later checkpoint).
+    # moves_remaining first hits zero (not when everyone's does), and never
+    # resets. See engine._maybe_expire_boosts.
     boosts_expired: bool = False
 
     # Chosen and locked at START_GAME, hidden until haircut_reveal_at (or
@@ -387,9 +396,10 @@ class Game(BaseModel):
     # it, only reads it.
     #
     # NOTE (cadence/economy redesign): the live reveal trigger was
-    # previously a fraction of the gameplay clock; the clock is gone. A
-    # later checkpoint re-triggers this at 50% of total Move allocation
-    # consumed. Until then the profile only becomes visible once SCORED.
+    # previously a fraction of the gameplay clock; the clock is gone. It
+    # now fires the instant cumulative Moves consumed across the table
+    # first reaches or crosses 50% of the initial total Move allocation --
+    # see engine._maybe_reveal_haircut.
     haircut_profile: HaircutProfile | None = None
     haircut_profile_revealed_at: datetime | None = None
     realized_haircut_depth: int | None = None

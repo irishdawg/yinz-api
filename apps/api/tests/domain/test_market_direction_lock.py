@@ -1,16 +1,26 @@
 """Market-direction-reversal locking: a bare proposal or Pool leg's
 "rising" entity is locked once, at authoring time, via
-SwapIntent.rising_entity_id -- never recomputed. Mere magnitude movement
-that preserves the same up/down relationship leaves a negotiation valid;
-a crossing (the live-derived rising entity no longer matches the locked
-one) voids it, LOUD, through engine._invalidate_crossed_negotiations --
-the single choke point folded into _execute_swap so every trigger
-(accepted bare proposal, executed Pool, Stage 5's unilateral
-burn-for-swap) shares one code path. See the design writeup."""
+SwapIntent.rising_entity_id -- never recomputed. A crossing (the
+live-derived rising entity no longer matches the locked one) voids it,
+LOUD, through engine._invalidate_crossed_negotiations -- the single choke
+point folded into _execute_swap so every trigger shares one code path.
+
+NOTE (cadence/economy redesign, checkpoint 2): the single-active-negotiation
+constraint plus Pool-entities-disjoint-from-base-entities (enforced at
+CREATE_POOL) together make PROPOSAL-vs-PROPOSAL and POOL-vs-BASE crossing
+structurally unreachable from the live command surface now -- there is
+never a second open proposal to collide with, and nothing can move the
+base proposal's own two entities except its own execution (excluded from
+the scan by construction). What remains reachable is POOL-vs-sibling-POOL
+crossing: two different pools attached to the same base proposal, where
+accepting one moves entities the OTHER (still-open) pool's own lock
+depends on. That's what's tested below. Proposal-vs-anything crossing
+becomes reachable again once checkpoint 4's Force Swap Boost lands (a
+genuinely unilateral move that doesn't conclude the open negotiation) --
+this file should gain a Force-Swap-crosses-the-active-proposal test then,
+mirroring the old burn-reserve test removed in checkpoint 1."""
 
 from __future__ import annotations
-
-import pytest
 
 from gotiate.domain import engine
 from gotiate.domain.entities import PoolResolutionReason, ProposalResolutionReason, ResolutionStatus
@@ -61,92 +71,57 @@ def _accept_pool(game, pool_id, actor):
 
 
 # --------------------------------------------------------------------------
-# Locking + non-crossing movement leaves a negotiation valid
+# Crossing voids a sibling Pool, loud, never masked
 # --------------------------------------------------------------------------
 
 
-def test_rising_entity_id_is_locked_at_proposal_creation():
-    game = make_started_game(3)
-    tedy, mortia, _ = [p.game_player_id for p in game.players]
-    a, b, c = list(game.market.keys())[:3]
-    _force_order(game, a, b, c)  # a best, b middle, c worst -- b rises against a
-
-    proposal_id = _propose(game, tedy, a, b)
-    assert game.proposals[proposal_id].swap.rising_entity_id == b
-
-    # Magnitude-only move: mortia proposes b<->c and a third player
-    # accepts it. b moves from "middle" to "worst" -- still worse than a,
-    # so the a<->b relationship is UNCHANGED, not crossed.
-    bc_proposal_id = _propose(game, mortia, b, c)
-    # a third player accepts -- game has 3 players, use whichever isn't tedy/mortia.
-    third = next(p.game_player_id for p in game.players if p.game_player_id not in (tedy, mortia))
-    _accept_proposal(game, bc_proposal_id, third)
-
-    proposal = game.proposals[proposal_id]
-    assert proposal.status == ResolutionStatus.OPEN
-    assert proposal.resolution_reason is None
-
-
-# --------------------------------------------------------------------------
-# Crossing voids -- bare proposal, cascading to attached Pools
-# --------------------------------------------------------------------------
-
-
-def test_crossing_voids_the_proposal_and_cascades_to_attached_pools():
-    game = make_started_game(3)
-    tedy, mortia, hanky = [p.game_player_id for p in game.players]
-    a, b, c = list(game.market.keys())[:3]
-    # c best, a middle, b worst -- b rises against a (locked below).
-    _force_order(game, c, a, b)
-
-    proposal_id = _propose(game, tedy, a, b)
-    assert game.proposals[proposal_id].swap.rising_entity_id == b
-
-    d, e = [eid for eid in game.market if eid not in (a, b, c)][:2]
-    pool_id = _pool(game, hanky, proposal_id, d, e)
-
-    # An unrelated b<->c swap: b takes c's (better-than-a) position, so
-    # b now sits BETTER than a -- the a<->b relationship has crossed.
-    bc_proposal_id = _propose(game, mortia, b, c)
-    events = _accept_proposal(game, bc_proposal_id, hanky)
-
-    proposal = game.proposals[proposal_id]
-    assert proposal.status == ResolutionStatus.RESOLVED
-    assert proposal.resolution_reason == ProposalResolutionReason.VOIDED_MARKET_SWUNG
-
-    pool = game.pools[pool_id]
-    assert pool.status == ResolutionStatus.RESOLVED
-    assert pool.resolution_reason == PoolResolutionReason.BASE_PROPOSAL_VOIDED
-
-    reasons = [ev.payload.get("reason") for ev in events if ev.type.value in ("PROPOSAL_RESOLVED", "POOL_RESOLVED")]
-    assert "voided_market_swung" in reasons
-    assert "base_proposal_voided" in reasons
-
-
-def test_pool_only_leg_crossing_voids_just_the_pool():
+def test_sibling_pool_crossing_voids_it_with_the_louder_reason():
     game = make_started_game(3)
     tedy, mortia, hanky = [p.game_player_id for p in game.players]
     a, b = list(game.market.keys())[:2]
-    _force_order(game, a, b)  # a best, b worse -- b rises against a, never crossed in this test
-
     proposal_id = _propose(game, tedy, a, b)
 
     c, d, e = [eid for eid in game.market if eid not in (a, b)][:3]
-    _force_order(game, e, c, d)  # e best, c middle, d worst -- d rises against c
-    pool_id = _pool(game, hanky, proposal_id, c, d)
-    assert game.pools[pool_id].swap.rising_entity_id == d
+    _force_order(game, e, c, d)  # e best, c middle, d worst
 
-    de_proposal_id = _propose(game, mortia, d, e)
-    _accept_proposal(game, de_proposal_id, hanky)
+    # mortia's pool (c, d): d worse than c -- locked rising = d.
+    pool1_id = _pool(game, mortia, proposal_id, c, d, visibility="private")
+    assert game.pools[pool1_id].swap.rising_entity_id == d
 
-    pool = game.pools[pool_id]
-    assert pool.status == ResolutionStatus.RESOLVED
-    assert pool.resolution_reason == PoolResolutionReason.VOIDED_MARKET_SWUNG
+    # hanky's pool (d, e), public: d worse than e -- locked rising = d too
+    # (an independent lock on a different pair, coincidence not collision).
+    pool2_id = _pool(game, hanky, proposal_id, d, e, visibility="public")
+    assert game.pools[pool2_id].swap.rising_entity_id == d
 
-    # The base proposal's own direction never crossed -- untouched, still open.
+    # tedy (base proposer) accepts hanky's public pool2: (d, e) trade
+    # positions -- d jumps to e's old (best) position, now BETTER than c.
+    # mortia's pool1 locked "d worse than c"; live now says the opposite --
+    # crossed. This happens during pool2's own _execute_swap, BEFORE
+    # resolve_sibling_pools would otherwise have force-resolved pool1 as
+    # the generic PREEMPTED_BY_OTHER_ACTION -- crossing gets there first
+    # and wins with the louder, more specific reason.
+    events = _accept_pool(game, pool2_id, tedy)
+
+    pool1 = game.pools[pool1_id]
+    assert pool1.status == ResolutionStatus.RESOLVED
+    assert pool1.resolution_reason == PoolResolutionReason.VOIDED_MARKET_SWUNG
+
+    pool2 = game.pools[pool2_id]
+    assert pool2.resolution_reason == PoolResolutionReason.EXECUTED
     proposal = game.proposals[proposal_id]
-    assert proposal.status == ResolutionStatus.OPEN
-    assert proposal.resolution_reason is None
+    assert proposal.resolution_reason == ProposalResolutionReason.EXECUTED
+
+    reasons = [ev.payload.get("reason") for ev in events if ev.type.value == "POOL_RESOLVED"]
+    assert "voided_market_swung" in reasons
+
+    # Loud, never masked -- unlike Pass's EXPIRED_ALL_PASSED, visible
+    # identically to every live audience.
+    public_view = project(game, PublicAudience())
+    tedy_view = project(game, PlayerAudience(tedy))
+    voided_public = next(p for p in public_view["pools"] if p["pool_id"] == pool1_id)
+    voided_self = next(p for p in tedy_view["pools"] if p["pool_id"] == pool1_id)
+    assert voided_public["resolution_reason"] == "voided_market_swung"
+    assert voided_self["resolution_reason"] == "voided_market_swung"
 
 
 # --------------------------------------------------------------------------
@@ -169,31 +144,6 @@ def test_accept_pool_does_not_void_its_own_base_or_pool_leg():
     pool = game.pools[pool_id]
     assert proposal.resolution_reason == ProposalResolutionReason.EXECUTED
     assert pool.resolution_reason == PoolResolutionReason.EXECUTED
-
-
-# --------------------------------------------------------------------------
-# Public, loud -- the opposite of Pass's masking
-# --------------------------------------------------------------------------
-
-
-def test_voided_market_swung_is_never_masked_for_any_live_audience():
-    game = make_started_game(3)
-    tedy, mortia, hanky = [p.game_player_id for p in game.players]
-    a, b, c = list(game.market.keys())[:3]
-    _force_order(game, c, a, b)
-
-    proposal_id = _propose(game, tedy, a, b)
-    bc_proposal_id = _propose(game, mortia, b, c)
-    _accept_proposal(game, bc_proposal_id, hanky)
-
-    assert game.proposals[proposal_id].resolution_reason == ProposalResolutionReason.VOIDED_MARKET_SWUNG
-
-    public_view = project(game, PublicAudience())
-    tedy_view = project(game, PlayerAudience(tedy))
-    voided_public = next(p for p in public_view["proposals"] if p["proposal_id"] == proposal_id)
-    voided_self = next(p for p in tedy_view["proposals"] if p["proposal_id"] == proposal_id)
-    assert voided_public["resolution_reason"] == "voided_market_swung"
-    assert voided_self["resolution_reason"] == "voided_market_swung"
 
 
 def test_rising_entity_id_exposed_in_projection_and_pinned():

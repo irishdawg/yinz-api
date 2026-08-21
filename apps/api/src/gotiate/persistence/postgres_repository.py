@@ -139,40 +139,18 @@ class PostgresGameRepository:
                     await cur.execute("update games set host_player_id = %s where id = %s", (game.host_player_id, game.id))
 
     async def save(self, game: Game) -> None:
+        # Ordering matters here, not just style: games.active_proposal_id
+        # carries a foreign key to proposals(id), and a freshly-opened
+        # negotiation's Proposal row does not exist yet on the very save()
+        # call that both creates it AND points active_proposal_id at it.
+        # Postgres checks a plain (non-deferred) FK per-statement, not at
+        # transaction commit, so the games row update must run AFTER every
+        # child-table upsert below has had a chance to insert the row it
+        # might reference -- never before. Verified against the real
+        # Postgres repository shape (not just InMemoryGameRepository, which
+        # enforces no such constraint and would never have caught this).
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    update games set
-                        version = %s, next_seq_no = %s, phase = %s, host_player_id = %s,
-                        config = %s, lobby_reminder_deadline_at = %s, started_at = %s,
-                        close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
-                        haircut_profile = %s, haircut_profile_revealed_at = %s,
-                        realized_haircut_depth = %s, cancellation_reason = %s,
-                        active_proposal_id = %s, boosts_expired = %s
-                    where id = %s
-                    """,
-                    (
-                        game.version,
-                        game.next_seq_no,
-                        game.phase.value,
-                        game.host_player_id,
-                        Json(game.config.model_dump(mode="json")),
-                        game.lobby_reminder_deadline_at,
-                        game.started_at,
-                        game.close_threshold,
-                        game.closed_at,
-                        game.close_reason.value if game.close_reason else None,
-                        game.scored_at,
-                        Json(game.haircut_profile.model_dump(mode="json")) if game.haircut_profile else None,
-                        game.haircut_profile_revealed_at,
-                        game.realized_haircut_depth,
-                        game.cancellation_reason.value if game.cancellation_reason else None,
-                        game.active_proposal_id,
-                        game.boosts_expired,
-                        game.id,
-                    ),
-                )
                 for player in game.players:
                     await self._upsert_player(cur, game.id, player)
                 for entity in game.market.values():
@@ -279,6 +257,42 @@ class PostgresGameRepository:
                             holding.revealed_at_seq_no,
                         ),
                     )
+                # Last, deliberately -- see the ordering note at the top of
+                # this method. By this point every proposal this update
+                # could possibly reference via active_proposal_id has
+                # already been upserted above.
+                await cur.execute(
+                    """
+                    update games set
+                        version = %s, next_seq_no = %s, phase = %s, host_player_id = %s,
+                        config = %s, lobby_reminder_deadline_at = %s, started_at = %s,
+                        close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
+                        haircut_profile = %s, haircut_profile_revealed_at = %s,
+                        realized_haircut_depth = %s, cancellation_reason = %s,
+                        active_proposal_id = %s, boosts_expired = %s
+                    where id = %s
+                    """,
+                    (
+                        game.version,
+                        game.next_seq_no,
+                        game.phase.value,
+                        game.host_player_id,
+                        Json(game.config.model_dump(mode="json")),
+                        game.lobby_reminder_deadline_at,
+                        game.started_at,
+                        game.close_threshold,
+                        game.closed_at,
+                        game.close_reason.value if game.close_reason else None,
+                        game.scored_at,
+                        Json(game.haircut_profile.model_dump(mode="json")) if game.haircut_profile else None,
+                        game.haircut_profile_revealed_at,
+                        game.realized_haircut_depth,
+                        game.cancellation_reason.value if game.cancellation_reason else None,
+                        game.active_proposal_id,
+                        game.boosts_expired,
+                        game.id,
+                    ),
+                )
 
     async def _upsert_player(self, cur: psycopg.AsyncCursor, game_id: str, player: GamePlayer) -> None:
         # display_name stored as text, deliberately not a name_seed_id FK --
