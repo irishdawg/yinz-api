@@ -56,18 +56,21 @@ done as part of this change.
 
 ## Two pre-existing tests are intermittently flaky in a full suite run
 
-Not caused by any specific feature — found while adding the real-names
-tests below simply made the suite slightly larger/slower. Both are 100%
-reliable run individually or in their own file, but each failed once in
-5 full-suite runs (never both in the same run, never a consistent
-repro): `tests/api/test_lobby_flow.py::test_extend_lobby_timer_pushes_the_deadline_out`
+Not caused by any specific feature. Both are 100% reliable run
+individually or in their own file, but each has been observed to fail
+roughly once per several full-suite runs (never both in the same run, no
+consistent repro), across multiple separate sessions now — most recently
+`test_discard_holding_that_changes_source_ownership_resolves_invalidated`,
+confirmed flaky again this way (full-suite fail, isolated-run pass,
+full-suite re-run clean) while adding unrelated features:
+`tests/api/test_lobby_flow.py::test_extend_lobby_timer_pushes_the_deadline_out`
 and `tests/domain/test_market_correction.py::test_discard_holding_that_changes_source_ownership_resolves_invalidated`.
-Comparing against the baseline before this session's additions (5/5
-clean full-suite runs) suggests real wall-clock timing and/or shared
-unseeded `random` module state leaking across tests, not a logic bug —
-worth a closer look (seed/inject time and rng explicitly in both) before
-the suite gets meaningfully larger, but out of scope to chase down here.
-If you see either fail, rerun before treating it as a regression.
+Suggests real wall-clock timing and/or shared unseeded `random` module
+state leaking across tests, not a logic bug — worth a closer look
+(seed/inject time and rng explicitly in both) before the suite gets
+meaningfully larger (currently 284 tests), but still out of scope to
+chase down opportunistically. If you see either fail, rerun before
+treating it as a regression.
 
 ---
 
@@ -153,7 +156,7 @@ the curated-catalog approach was originally built to avoid entirely.
   under a `Gotiate` Project with a `Staging` environment specifically so a
   `Production` environment can join later without restructuring, but that
   hasn't happened.
-- **No integration test suite against real Postgres.** The 238-test
+- **No integration test suite against real Postgres.** The 284-test
   offline suite (`uv run pytest`) exercises the domain engine directly and
   `InMemoryGameRepository` — real-Postgres behavior (constraints, RLS,
   concurrency) has been verified manually/live per feature, not via a
@@ -172,29 +175,81 @@ the curated-catalog approach was originally built to avoid entirely.
   Win32_Process | Where-Object Name -match 'python'` — kill all, start
   exactly one, confirm before proceeding).
 
-## This session's own unfinished follow-ups (Market Correction feature)
+## Market Correction — known gaps
+
+Two real bugs have been found and fixed via live 2-player play since the
+feature shipped (`git log --grep "Market Correction"` /
+`tests/domain/test_market_correction.py`): the cooldown was pushing
+forward unconditionally on *every* resolution reason, including
+`EXPIRED`/`INVALIDATED` where nothing actually changed — this tacked
+extra silence onto an already-stagnant market, so the real trigger
+cadence drifted from "90s since the last deal" into something that felt
+random to the player who reported it. Fixed: cooldown now only extends
+on `TRIGGERED`/`MARKET_RESUMED`. Separately, a shared (mutually-owned)
+holding could be the *other* player's move target, landing a second,
+uninvited hit on top of your own already-independently-targeted move —
+the mechanic is supposed to be exactly one downward move per player.
+Fixed: each player's move source now excludes anything both players own.
+Both fixes are covered by dedicated regression tests. What's still
+genuinely unverified:
 
 - **Stagnation-point construction-success rate is not yet instrumented.**
-  The Market Correction feature's construction-failure rate was measured
-  extensively at `START_GAME` time (led to widening the 2-player market
-  from 9 to 11 slots — see `GAMEPLAY.md` §9 and `git log` around
+  The feature's construction-failure rate was measured extensively at
+  `START_GAME` time (led to widening the 2-player market from 9 to 11
+  slots — see `GAMEPLAY.md` §9 and `git log` around
   `20260815000000_market_correction.sql`), but the rate that actually
   matters — construction success right when the 90-second stagnation
   threshold fires, in a genuinely stagnant late-game state — has not been
-  separately measured. This was explicitly called out as a follow-up, not
-  something the `START_GAME`-time numbers substitute for.
-- **No live browser verification of the Market Correction banner/ticker
-  UI.** The backend + Postgres persistence path was live-verified end to
-  end (a real save/reload round-trip against the live Supabase project,
-  plus `TRIGGER_MARKET_CORRECTION` executed against a game reloaded fresh
-  from the database) — see the commit message on
-  `464b104`/`git log --grep "Market Correction"`. The frontend banner
-  (`MarketCorrectionBanner` in `apps/web/src/app/game/[id]/page.tsx`),
-  its countdown, and the new ticker copy (`describeEvent`'s
-  `MARKET_CORRECTION_*` branches) have only been verified via `tsc`/
-  `eslint`/`next build` passing cleanly plus a standalone script against
-  the real `computeSupportMarkers` — not an actual browser/Playwright
-  pass.
+  separately measured.
+- **No automated browser verification of the Market Correction banner/
+  ticker UI.** The backend + Postgres persistence path has been
+  live-verified repeatedly (including catching both bugs above); the
+  frontend banner (`MarketCorrectionBanner`), its countdown, and the
+  ticker copy (`describeEvent`'s `MARKET_CORRECTION_*` branches) have
+  only ever been verified via `tsc`/`eslint`/`next build` plus manual
+  playtesting, never an automated Playwright-style pass.
+
+---
+
+## Playtest punch list — one item still outstanding
+
+An extended live-playtesting cycle (2-6 player games, real feedback —
+`git log` from `845bf1b` "Fix four playtest-found bugs" through the most
+recent commits) worked through a 23-item punch list. Every item shipped
+except:
+
+- **"Faster pool alternative"** — a lighter-weight way to counter a
+  proposal than the full Pool flow, floated as a possible pacing
+  improvement. Never designed or implemented. If picked back up, start by
+  asking what's actually slow about the current Pool flow in live play
+  (composer steps? Influence-cost preview latency? something else)
+  rather than assuming the fix.
+
+Everything else from that list shipped: the accept-lock grace period
+(now 7s, was 4s — real-play sync lag ate into the original window),
+zero-Influence agency, the all-zero-Influence top-up, private per-card
+notes (with per-player colors and a "Nobody" tag), the multi-accept
+threshold at 5-6 players, the randomized Haircut generator, the flat
+9-minute clock, and auto-withdraw on re-proposing.
+
+Two of the more structurally novel additions have thorough test coverage
+but haven't been exercised in an actual multi-player live game yet:
+
+- **The accept threshold at 5-6 players** (`GameConfig.accepters_required`,
+  `Proposal`/`Pool.pending_accepters`) — a bare proposal or public pool
+  needs 2 distinct accepters before it executes, not just 1, at that
+  headcount. Covered thoroughly by `tests/domain/test_accept_threshold.py`
+  (pledge/refund/settlement paths), but never actually played out live at
+  5 or 6 seats — watch for it feeling right pacing-wise once it does.
+- **The randomized Haircut generator**'s two tunable constants —
+  `_HAIRCUT_MIN_ADJACENT_GAP` (4 percentage points) and
+  `_HAIRCUT_WITHIN_BAND_CEILING` (92%) — are first-cut numbers reasoned
+  from a handful of real games, not a large sample. Both were added
+  reactively to real problems found in play (adjacent positions reading
+  as barely differentiated; the deepest in-band position always showing
+  100% safe, defeating "the top K positions carry some risk"), so
+  they're grounded, not arbitrary — but still worth revisiting if either
+  starts to feel off with more play.
 
 ## External references that don't resolve — worth knowing, not fixing
 

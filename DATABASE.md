@@ -202,9 +202,33 @@ file names — some migrations alter existing tables rather than create new
 ones): `command_receipts`, `event_ledger`, `game_player_private`,
 `game_players`, `games`, `holdings`, `market_entities`, `player_name_seeds`,
 `pool_contents`, `pools`, `proposal_passes`, `proposals`, `theme_entities`,
-`theme_sets`. 23 migrations under `supabase/migrations/` as of this
-writing — run `ls supabase/migrations/` for the authoritative current
-list, don't count from prose in this file or in `HISTORY.md`.
+`theme_sets`. (`waterline` was a 15th table, created with the original
+schema and properly `drop table`'d in `20260813010000_haircut_risk_economy.sql`
+when the Haircut-risk model replaced it — gone, not orphaned, confirmed
+live.) 29 migrations under `supabase/migrations/` as of this writing — run
+`ls supabase/migrations/` for the authoritative current list, don't count
+from prose in this file or in `HISTORY.md`.
+
+**A real bug class to watch for**: `pools.visibility` was live-broken for
+a while — `MAKE_POOL_PUBLIC` flipped it correctly in the domain object and
+appended the event, but the `pools` row's own `ON CONFLICT (id) DO UPDATE
+SET` clause in `postgres_repository.py` never listed `visibility`, so the
+write silently kept its insert-time value forever (every reload read the
+stale value straight back off the row — nothing about it looked wrong at
+the domain-test level, since the offline suite never touches Postgres).
+Fixed by adding the missing column to the `SET` list; a full audit of
+every other upsert in the file (`proposals`, `game_players`,
+`game_player_private`, `pool_contents`, `holdings`, `market_entities`)
+at the same time found no other instance. **Whenever a new mutable
+column is added to an existing table's upsert** (most recently
+`proposals.pending_accepters`/`pools.pending_accepters`, added
+correctly with this lesson already in mind), it must be added to that
+table's `ON CONFLICT ... DO UPDATE SET` list too, or it silently never
+persists past the first insert — confirmed correct in every offline
+test (which never touches Postgres) while being live-broken the whole
+time. Double-check the `SET` list explicitly whenever a migration adds
+a column the domain layer ever mutates after creation, not just on the
+migration itself.
 
 Direct-read (public, RLS via `is_game_member()`), FastAPI-only (RLS
 enabled, zero policies, grants only to `gotiate_backend`), and global
