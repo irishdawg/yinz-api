@@ -26,13 +26,17 @@ a real concurrent store, both handled here rather than left as latent bugs:
    on the same connection is already consistent, and psycopg won't let you
    set isolation level mid-transaction anyway.
 
-Cadence/economy redesign (prototype branch), checkpoint 1: stops
+Cadence/economy redesign (prototype branch): checkpoint 1 stopped
 reading/writing every column exclusive to Influence, Market Correction, the
-gameplay clock, and the old Reserve/Pickup mechanic; starts writing the new
+gameplay clock, and the old Reserve/Pickup mechanic; started writing the new
 Moves/Boosts/active-negotiation columns. The now-unused legacy columns
 (influence_*, pending_pickup, max_duration_s, unilateral_cutoff_at, ...)
 are left in place on the live schema until a later checkpoint's forward
 migration drops them — never edit an applied migration, see DATABASE.md.
+Checkpoint 3 adds `proposal_arbitration`, a dedicated FastAPI-only table
+(not a jsonb column on the direct-read `proposals` table -- it holds secret
+jury votes, which must never be reachable through Supabase's direct-read
+RLS path at all, only through project()'s own redaction).
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ from gotiate.domain.entities import (
     Holding,
     HoldingZone,
     MarketEntity,
+    PendingArbitration,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -202,6 +207,24 @@ class PostgresGameRepository:
                             """,
                             (proposal.proposal_id, game.id, passed_player_id),
                         )
+                    # Deliberately its own FastAPI-only table, not a jsonb
+                    # column on `proposals` (a direct-read table) -- see
+                    # the migration's own comment. Upsert while pending,
+                    # delete once resolved (any reason) -- at most one row
+                    # for this proposal exists at a time; the permanent
+                    # record for Replay lives in event_ledger's own
+                    # ARBITRATION_RESOLVED payload, not here.
+                    if proposal.pending_arbitration is not None:
+                        await cur.execute(
+                            """
+                            insert into proposal_arbitration (proposal_id, game_id, state)
+                            values (%s, %s, %s)
+                            on conflict (proposal_id) do update set state = excluded.state
+                            """,
+                            (proposal.proposal_id, game.id, Json(proposal.pending_arbitration.model_dump(mode="json"))),
+                        )
+                    else:
+                        await cur.execute("delete from proposal_arbitration where proposal_id = %s", (proposal.proposal_id,))
                 for pool in game.pools.values():
                     await cur.execute(
                         """
@@ -446,8 +469,20 @@ class PostgresGameRepository:
             await cur.execute("select * from holdings where game_id = %s", (game_id,))
             holding_rows = await cur.fetchall()
 
+            await cur.execute("select * from proposal_arbitration where game_id = %s", (game_id,))
+            arbitration_state_by_proposal = {str(r["proposal_id"]): r["state"] for r in await cur.fetchall()}
+
         return _to_game(
-            game_row, player_rows, private_rows, market_rows, proposal_rows, passed_player_ids_by_proposal, pool_rows, pool_content_rows, holding_rows
+            game_row,
+            player_rows,
+            private_rows,
+            market_rows,
+            proposal_rows,
+            passed_player_ids_by_proposal,
+            arbitration_state_by_proposal,
+            pool_rows,
+            pool_content_rows,
+            holding_rows,
         )
 
     async def get_receipt(self, game_id: str, command_id: str) -> CommandReceipt | None:
@@ -536,6 +571,7 @@ def _to_game(
     market_rows: list[DictRow],
     proposal_rows: list[DictRow],
     passed_player_ids_by_proposal: dict[str, set[str]],
+    arbitration_state_by_proposal: dict[str, Any],
     pool_rows: list[DictRow],
     pool_content_rows: dict[str, DictRow],
     holding_rows: list[DictRow],
@@ -585,6 +621,9 @@ def _to_game(
             resolved_by_player_id=str(pr["resolved_by_player_id"]) if pr["resolved_by_player_id"] else None,
             resolution_reason=ProposalResolutionReason(pr["resolution_reason"]) if pr["resolution_reason"] else None,
             passed_player_ids=passed_player_ids_by_proposal.get(pid, set()),
+            pending_arbitration=(
+                PendingArbitration.model_validate(arbitration_state_by_proposal[pid]) if pid in arbitration_state_by_proposal else None
+            ),
         )
 
     pools: dict[str, Pool] = {}

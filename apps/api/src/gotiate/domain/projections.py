@@ -11,6 +11,11 @@ pending-pickup frozen-view short-circuit is removed along with it -- its
 name). Checkpoint 2 makes Pass fully public: a passed proposal/pool is no
 longer omitted from the passer's own view, and passed_player_ids is now
 exposed to everyone, not just an anonymous count to the proposer.
+Checkpoint 3 adds Arbitration: a pending arbitration's existence, caller,
+and timing are public, but its weights and its jury's votes are never
+shown to any live audience -- not even the two active participants --
+only that a given juror *has* voted. ReplayAudience unlocks all of it,
+same "postgame reveals everything" precedent as Pool contents.
 """
 
 from __future__ import annotations
@@ -200,6 +205,22 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
     # Fully public -- a Pass is now a visible, intentional information leak.
     EventType.PROPOSAL_PASSED: EventVisibility.PUBLIC,
+    # Either active participant already knows who called it; this is the
+    # irreversible starting gun for the whole 20s window.
+    EventType.ARBITRATION_CALLED: EventVisibility.PUBLIC,
+    EventType.ARBITRATION_POOL_REVEALED: EventVisibility.PUBLIC,
+    # The vote's own content lives in the payload but stays actor-only live
+    # -- same shape as READY_TO_CLOSE_CHANGED. Only "a juror has voted,"
+    # never which choice, is separately projected to everyone else -- see
+    # _project_proposal's voted_player_ids.
+    EventType.ARBITRATION_VOTE_CAST: EventVisibility.ACTOR_ONLY,
+    # PUBLIC at the table-driven policy level (the outcome reason and any
+    # resulting SWAP_EXECUTED are already publicly observable regardless),
+    # but project_events applies its own bespoke redaction below, stripping
+    # base_weights/final_weights/votes from every live audience -- not just
+    # non-insiders, the two active participants included -- unlocked only
+    # for ReplayAudience.
+    EventType.ARBITRATION_RESOLVED: EventVisibility.PUBLIC,
     # Payload carries entity_c/entity_d directly -- the actual swap.
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
@@ -218,6 +239,7 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
 }
 
 _POOL_CONTENT_KEYS = frozenset({"entity_c", "entity_d"})
+_ARBITRATION_RESOLVED_SECRET_KEYS = frozenset({"base_weights", "final_weights", "votes"})
 
 
 def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) -> list[dict]:
@@ -249,6 +271,13 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
                 or (isinstance(audience, PlayerAudience) and audience.game_player_id in _pool_insiders(game, pool))
             )
             views.append(_event_view(event, redact=() if can_see_contents else _POOL_CONTENT_KEYS))
+            continue
+        if event.type is EventType.ARBITRATION_RESOLVED:
+            # Never shown live, to anyone, including the two active
+            # participants -- "the jury can lean on the machine, never
+            # become it" only holds if the weights/votes stay invisible
+            # during play. is_replay already returned above.
+            views.append(_event_view(event, redact=_ARBITRATION_RESOLVED_SECRET_KEYS))
             continue
         views.append(_event_view(event))  # PUBLIC
     return views
@@ -339,7 +368,7 @@ def _safe_value(game: Game, game_player_id: str) -> int:
 
 
 def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dict:
-    return {
+    out: dict = {
         "proposal_id": proposal.proposal_id,
         "entity_a": proposal.swap.entity_a,
         "entity_b": proposal.swap.entity_b,
@@ -355,6 +384,31 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         # intentional information leak that narrows the active
         # participant set for everyone to see. Empty until anyone passes.
         "passed_player_ids": sorted(proposal.passed_player_ids),
+        "pending_arbitration": _project_pending_arbitration(proposal),
+    }
+    return out
+
+
+def _project_pending_arbitration(proposal: Proposal) -> dict | None:
+    """Existence, caller, and timing are public the instant Arbitration is
+    called -- the two active participants already know, and everyone else
+    needs to see the irreversible countdown start. voted_player_ids is
+    "who has voted," never what -- see EVENT_VISIBILITY's own
+    ARBITRATION_VOTE_CAST/ARBITRATION_RESOLVED entries for where the actual
+    content stays hidden. base_weights/final_weights/votes are
+    deliberately never included here at all, live or replay -- Replay
+    reads them from the ARBITRATION_RESOLVED event's own (unredacted for
+    ReplayAudience) payload instead, once resolved."""
+    pending = proposal.pending_arbitration
+    if pending is None:
+        return None
+    return {
+        "arbitration_id": pending.arbitration_id,
+        "called_by": pending.called_by,
+        "caller_role": "originator" if pending.called_by == proposal.swap.initiator_player_id else "other",
+        "resolves_at": pending.resolves_at,
+        "eligible_pool_id": pending.eligible_pool_id,
+        "voted_player_ids": sorted(pending.votes.keys()),
     }
 
 

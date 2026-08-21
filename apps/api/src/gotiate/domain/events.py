@@ -5,8 +5,8 @@ Cadence/economy redesign (prototype branch): checkpoint 1 removed every
 event exclusive to Influence, Market Correction, the gameplay clock, and the
 old Reserve/Pickup/unilateral-burn mechanic. Checkpoint 2 makes PASS public
 and reintroduces the Haircut reveal event and a table-wide Boost-expiry
-event, both now Move-driven rather than clock-driven. Arbitration and
-per-Boost-use events are added in later checkpoints, not here."""
+event, both now Move-driven rather than clock-driven. Checkpoint 3 adds
+Arbitration's event family. Per-Boost-use events are added in checkpoint 4."""
 
 from __future__ import annotations
 
@@ -51,6 +51,32 @@ class EventType(StrEnum):
     # that narrows the active participant set for everyone to see, not a
     # private signal to the proposer alone.
     PROPOSAL_PASSED = "PROPOSAL_PASSED"
+
+    # Arbitration (checkpoint 3) -- see engine._handle_call_arbitration /
+    # _resolve_arbitration_via_machine. Public: either active participant
+    # already knows who called it, and this is the irreversible starting
+    # gun for the whole 20s window.
+    ARBITRATION_CALLED = "ARBITRATION_CALLED"
+    # Fires only when the one eligible Pool was still private at call
+    # time -- the forced-visibility exception jurors need to vote on
+    # informed terms. Never fires for an already-public eligible Pool, or
+    # when no Pool is eligible at all.
+    ARBITRATION_POOL_REVEALED = "ARBITRATION_POOL_REVEALED"
+    # ledger only, actor-visible live -- same shape as READY_TO_CLOSE_CHANGED:
+    # the vote's own content lives in the payload, but EVENT_VISIBILITY
+    # keeps it to the voter alone until Replay. Only "a juror has voted"
+    # (never which one) is ever separately projected live -- see
+    # projections._project_proposal's voted_player_ids.
+    ARBITRATION_VOTE_CAST = "ARBITRATION_VOTE_CAST"
+    # Public reason (settled_normally / machine_base / machine_pool /
+    # machine_neither / market_closed) -- the fact of how it ended, and
+    # any resulting SWAP_EXECUTED, are already publicly observable through
+    # other events regardless. The weights and the jury's actual votes are
+    # a bespoke live redaction in project_events -- never shown to any
+    # live audience, including the two active participants -- unlocked
+    # only for ReplayAudience. See the Market Correction precedent this
+    # redaction shape is modeled on.
+    ARBITRATION_RESOLVED = "ARBITRATION_RESOLVED"
 
     # Close & scoring
     CLOSE_THRESHOLD_REACHED = "CLOSE_THRESHOLD_REACHED"

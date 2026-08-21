@@ -64,6 +64,10 @@ class ProposalResolutionReason(StrEnum):
     # this is deliberately LOUD, never masked, for every live audience.
     # See the market-direction-reversal design writeup.
     VOIDED_MARKET_SWUNG = "voided_market_swung"
+    # Arbitration's machine draw landed on "nothing happens" -- the
+    # negotiation concludes with no deal and no market change. The Move
+    # the opener spent to create it is still never refunded (rule 1).
+    ARBITRATION_NEITHER = "arbitration_neither"
 
 
 class PoolResolutionReason(StrEnum):
@@ -91,6 +95,30 @@ class PoolResolutionReason(StrEnum):
 class PoolVisibility(StrEnum):
     PRIVATE = "private"
     PUBLIC = "public"
+
+
+class ArbitrationChoice(StrEnum):
+    """The three machine outcomes -- and, identically, the three legal
+    jury votes, since a vote just names which outcome a juror wants to
+    lean the machine toward. Chaos/random-swap is deliberately not a
+    member -- parked out of this prototype entirely, not merely unused."""
+
+    BASE = "base"
+    POOL = "pool"
+    NEITHER = "neither"
+
+
+class ArbitrationResolutionReason(StrEnum):
+    # The active pair settled it themselves during the 20s window (a
+    # normal ACCEPT_PROPOSAL/ACCEPT_POOL) -- the machine never drew.
+    SETTLED_NORMALLY = "settled_normally"
+    MACHINE_BASE = "machine_base"
+    MACHINE_POOL = "machine_pool"
+    MACHINE_NEITHER = "machine_neither"
+    # Ready-to-Close (or any other close_market trigger) preempted the
+    # whole thing before it could resolve on its own -- outranks a
+    # pending machine draw outright, no draw ever happens.
+    MARKET_CLOSED = "market_closed"
 
 
 class CloseReason(StrEnum):
@@ -230,6 +258,28 @@ class GameConfig(BaseModel):
     starting_boosts: int = 2
     concentrate_max_copies: int = 3
 
+    # --- Cadence/economy redesign: Arbitration (checkpoint 3) ---
+    arbitration_window_seconds: float = 20.0
+    # Deliberately weights, not percentages -- they don't need to sum to
+    # 100, which keeps the additive jury-vote math (below) clean. Keyed by
+    # caller role: the active participant who calls Arbitration shifts the
+    # odds slightly away from the outcome they themselves triggered it
+    # from, on the theory that calling it is itself a signal about what
+    # you think you'd get from a normal negotiated settlement instead.
+    arbitration_base_weights: dict[str, dict[str, int]] = Field(
+        default_factory=lambda: {
+            "originator": {"base": 30, "pool": 40, "neither": 40},
+            "other": {"base": 40, "pool": 30, "neither": 40},
+        }
+    )
+    # Each juror's secret vote is additive and cumulative, independent of
+    # every other juror's: +bonus to the voted choice, -penalty to each of
+    # the other legal choices, floored at zero. Normalized only once, at
+    # draw time -- see engine._resolve_arbitration_via_machine. Influential,
+    # never determinative: the jury can lean on the machine, never become it.
+    arbitration_vote_bonus: int = 10
+    arbitration_vote_penalty: int = 5
+
     join_code_length: int = 7
     # Bounds the brute-force window on a live join code independent of how
     # long the lobby happens to sit open. 30 is a placeholder default, not a
@@ -294,6 +344,38 @@ class SwapIntent(BaseModel):
     rising_entity_id: str
 
 
+class PendingArbitration(BaseModel):
+    """Exists only for the negotiation's own final two active
+    participants (the opener plus its one remaining non-passed
+    responder). Constructed once, at CALL_ARBITRATION time, and never
+    recomputed -- `base_weights` locks the caller-role-dependent starting
+    weights and, if no Pool survived to eligibility, drops "pool" from
+    the candidate set entirely rather than assigning it a weight of zero
+    (so a juror is never offered an illegal vote for an outcome that
+    isn't on the table). `votes` accumulates secretly; nobody (not even
+    the two active participants) sees a vote's contents live -- see
+    projections.py's redaction. Cleared the instant this negotiation
+    resolves, one way or another; the full detail survives permanently in
+    the ARBITRATION_RESOLVED event for Replay, not here."""
+
+    arbitration_id: str
+    called_by: str
+    called_at: datetime
+    resolves_at: datetime  # called_at + GameConfig.arbitration_window_seconds
+    # The one Pool eligible for the "pool" outcome, if any -- see the
+    # engine's own "which Pool" derivation: at most one can structurally
+    # exist once eligibility (exactly one active responder) is reached.
+    eligible_pool_id: str | None
+    # {"base": int, "pool": int (only if eligible_pool_id is set),
+    # "neither": int} -- keys ARE the legal choice set, both for casting
+    # a vote and for the machine's own draw.
+    base_weights: dict[str, int]
+    # juror_game_player_id -> ArbitrationChoice value. Secret live; see
+    # projections.py -- only "who has voted" (not what) is ever projected
+    # to a live audience, and only ReplayAudience sees this dict itself.
+    votes: dict[str, str] = Field(default_factory=dict)
+
+
 class Proposal(BaseModel):
     proposal_id: str
     swap: SwapIntent
@@ -306,10 +388,14 @@ class Proposal(BaseModel):
     # Add-only, permanent per player -- see PASS_PROPOSAL. Fully public
     # (projections._project_proposal exposes it unconditionally): this is
     # the narrowing active-participant-set mechanic itself, and a passed
-    # player becomes Arbitration jury-eligible once that lands. A player
-    # in this set can no longer Accept/Pool this proposal, but still sees
-    # it -- narrowing is visible, not an omission.
+    # player is Arbitration jury-eligible the instant it's called. A
+    # player in this set can no longer Accept/Pool/Pass this proposal
+    # again, but still sees it -- narrowing is visible, not an omission.
     passed_player_ids: set[str] = Field(default_factory=set)
+    # None until CALL_ARBITRATION, cleared the instant this negotiation
+    # resolves (any reason) -- see engine._resolve_proposal, the single
+    # chokepoint that clears it exactly like it clears active_proposal_id.
+    pending_arbitration: PendingArbitration | None = None
 
 
 class Pool(BaseModel):

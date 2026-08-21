@@ -14,8 +14,12 @@ and is illegal while another negotiation is already active table-wide;
 WITHDRAW_PROPOSAL is gone entirely (spending a Move commits the table);
 Pass is fully public and narrows the active participant set; Boost expiry
 and the Haircut reveal are now Move-driven; the game can now end via Move
-exhaustion, not just Ready-to-Close. Boosts and Arbitration remain
-scaffolded for later checkpoints -- see the redesign plan artifact.
+exhaustion, not just Ready-to-Close. Checkpoint 3 adds Arbitration: once a
+negotiation has narrowed to exactly two active participants (the opener
+plus one remaining responder), either may call it, starting an irreversible
+20-second last-chance window with a weighted machine draw at the end,
+secretly influenced by the jury of already-passed players. Boosts remain
+scaffolded for checkpoint 4 -- see the redesign plan artifact.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from gotiate.domain.entities import (
+    ArbitrationChoice,
+    ArbitrationResolutionReason,
     CancellationReason,
     CloseReason,
     Game,
@@ -37,6 +43,7 @@ from gotiate.domain.entities import (
     Holding,
     HoldingZone,
     MarketEntity,
+    PendingArbitration,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -207,11 +214,11 @@ def handle_command(
 
 def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     """NOTE (cadence/economy redesign): there is no gameplay clock. The
-    lobby reminder/grace auto-cancel is the only time-driven transition in
-    this game -- the Arbitration 20s timer is wired up in a later
-    checkpoint; every other trigger in this redesign (Boost expiry, the
-    Haircut reveal, the Move-exhaustion endgame) is a direct, synchronous
-    consequence of a command, not something that needs polling to notice."""
+    lobby reminder/grace auto-cancel and Arbitration's own 20-second
+    last-chance window are the only two time-driven transitions in this
+    game -- every other trigger (Boost expiry, the Haircut reveal, the
+    Move-exhaustion endgame) is a direct, synchronous consequence of a
+    command, not something that needs polling to notice."""
     events: list[GameEvent] = []
 
     if game.phase == GamePhase.LOBBY:
@@ -231,6 +238,14 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
             )
         return events
 
+    if game.phase != GamePhase.NEGOTIATION:
+        return events
+
+    pending = _pending_arbitration(game)
+    if pending is not None and now >= pending.resolves_at:
+        proposal = game.proposals[game.active_proposal_id]  # type: ignore[index]
+        events += _resolve_arbitration_via_machine(game, proposal, now, random.Random())
+
     return events
 
 
@@ -244,7 +259,10 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
             game.lobby_reminder_deadline_at is not None
             and now >= game.lobby_reminder_deadline_at + timedelta(seconds=game.config.lobby_reminder_grace_seconds)
         )
-    return False
+    if game.phase != GamePhase.NEGOTIATION:
+        return False
+    pending = _pending_arbitration(game)
+    return pending is not None and now >= pending.resolves_at
 
 
 # --------------------------------------------------------------------------
@@ -325,7 +343,7 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
 
     for proposal in game.proposals.values():
         if proposal.status == ResolutionStatus.OPEN:
-            events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.MARKET_CLOSED, None, now))
+            events += _resolve_proposal(game, proposal, ProposalResolutionReason.MARKET_CLOSED, None, now)
 
     for pool in list(game.pools.values()):
         if pool.status == ResolutionStatus.OPEN:
@@ -473,7 +491,11 @@ def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: str, now: datetime) -> list[GameEvent]:
+def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: str | None, now: datetime) -> list[GameEvent]:
+    """resolving_actor is None for a machine-driven Arbitration outcome --
+    a sibling pool can never match None as its own initiator_player_id, so
+    it always falls through to PREEMPTED_BY_OTHER_ACTION for that case,
+    which is exactly right (nobody "chose" this, the machine did)."""
     events: list[GameEvent] = []
     for pool in list(game.pools.values()):
         if pool.base_proposal_id != base_proposal.proposal_id or pool.status != ResolutionStatus.OPEN:
@@ -483,6 +505,61 @@ def resolve_sibling_pools(game: Game, base_proposal: Proposal, resolving_actor: 
         else:
             events.append(_resolve_pool(game, pool, PoolResolutionReason.PREEMPTED_BY_OTHER_ACTION, resolving_actor, now))
     return events
+
+
+# --------------------------------------------------------------------------
+# Arbitration (checkpoint 3) -- eligibility/lookup helpers shared between
+# the command handlers and the machine-draw resolver below.
+# --------------------------------------------------------------------------
+
+
+def _pending_arbitration(game: Game) -> PendingArbitration | None:
+    if game.active_proposal_id is None:
+        return None
+    return game.proposals[game.active_proposal_id].pending_arbitration
+
+
+def _active_responder_ids(game: Game, proposal: Proposal) -> set[str]:
+    """Every seated player except the proposal's own initiator, minus
+    whoever has already passed -- the active-participant-set narrowing
+    mechanic (§Pass) is what Arbitration eligibility is built directly on
+    top of. Arbitration becomes callable the instant this set's size hits
+    exactly 1 (the opener plus that one remaining responder = "exactly
+    two active participants")."""
+    return {p.game_player_id for p in game.players} - {proposal.swap.initiator_player_id} - proposal.passed_player_ids
+
+
+def _eligible_arbitration_pool_id(game: Game, proposal: Proposal) -> str | None:
+    """The one Pool eligible for the "pool" outcome, if any. Each
+    non-originator may create at most one open Pool per negotiation; the
+    originator can never pool their own proposal; and every OTHER
+    responder has, by the time they passed, been forced to withdraw any
+    Pool of their own first (_handle_pass_proposal's own check). So by
+    the time Arbitration eligibility (exactly one active responder) is
+    reached, there is structurally at most one still-open Pool on this
+    base, and it can only belong to that one remaining responder -- no
+    "which Pool" ambiguity is possible."""
+    open_pools = [p for p in game.pools.values() if p.base_proposal_id == proposal.proposal_id and p.status == ResolutionStatus.OPEN]
+    assert len(open_pools) <= 1, "at most one open Pool can survive to Arbitration eligibility"
+    return open_pools[0].pool_id if open_pools else None
+
+
+def _require_no_active_arbitration(proposal: Proposal) -> None:
+    """Once Arbitration is called, its candidate set (the base proposal
+    and the one eligible Pool, if any) is locked -- nothing may add a new
+    Pool, remove the eligible one, or narrow the participant set further
+    (a further Pass) out from under a machine draw that might still pick
+    it. Settling normally (Accept) remains the one way out during the
+    window; see _handle_accept_proposal/_handle_accept_pool, neither of
+    which calls this."""
+    if proposal.pending_arbitration is not None:
+        raise IllegalCommandError("arbitration is already underway for this negotiation")
+
+
+def _require_no_active_arbitration_on_pool(game: Game, pool: Pool) -> None:
+    base = game.proposals.get(pool.base_proposal_id)
+    if base is not None:
+        _require_no_active_arbitration(base)
 
 
 # --------------------------------------------------------------------------
@@ -630,6 +707,7 @@ def _all_others_passed(game: Game, proposal: Proposal) -> bool:
 def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
+    _require_no_active_arbitration(proposal)
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("the proposer cannot pass their own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
@@ -657,7 +735,7 @@ def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: st
     # are only poolable by players who haven't passed -- see
     # _handle_create_pool). So this is a pure status flip, never a cascade.
     if _all_others_passed(game, proposal):
-        events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXPIRED_ALL_PASSED, None, now))
+        events += _resolve_proposal(game, proposal, ProposalResolutionReason.EXPIRED_ALL_PASSED, None, now)
     return events
 
 
@@ -671,7 +749,7 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
 
     events: list[GameEvent] = []
     events += _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id)
-    events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
+    events += _resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, actor_game_player_id, now)
     events += resolve_sibling_pools(game, proposal, actor_game_player_id, now)
     return events
 
@@ -679,6 +757,7 @@ def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: 
 def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
+    _require_no_active_arbitration(proposal)
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("the proposer cannot pool their own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
@@ -738,6 +817,7 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
 def _handle_withdraw_pool(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
+    _require_no_active_arbitration_on_pool(game, pool)
     if pool.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the pool's initiator can withdraw it")
     return [_resolve_pool(game, pool, PoolResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now)]
@@ -746,6 +826,7 @@ def _handle_withdraw_pool(game: Game, *, payload: dict, actor_game_player_id: st
 def _handle_make_pool_public(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
+    _require_no_active_arbitration_on_pool(game, pool)
     if pool.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the pool's initiator can make it public")
     if pool.visibility is PoolVisibility.PUBLIC:
@@ -760,6 +841,7 @@ def _handle_decline_pool(game: Game, *, payload: dict, actor_game_player_id: str
     if pool.visibility is not PoolVisibility.PRIVATE:
         raise IllegalCommandError("only a private pool can be declined")
     base = _require_open_proposal(game, pool.base_proposal_id)
+    _require_no_active_arbitration(base)
     if base.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the base proposer may decline a private pool")
     return [_resolve_pool(game, pool, PoolResolutionReason.DECLINED_BY_TARGET, actor_game_player_id, now)]
@@ -780,10 +862,105 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     events: list[GameEvent] = []
     events += _execute_swap(game, base.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
     events += _execute_swap(game, pool.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
-    events.append(_resolve_proposal(game, base, ProposalResolutionReason.EXECUTED, actor_game_player_id, now))
+    events += _resolve_proposal(game, base, ProposalResolutionReason.EXECUTED, actor_game_player_id, now)
     events.append(_resolve_pool(game, pool, PoolResolutionReason.EXECUTED, actor_game_player_id, now))
     events += resolve_sibling_pools(game, base, actor_game_player_id, now)
     return events
+
+
+def _handle_call_arbitration(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """Either of the final two active participants may call it; the other
+    has no veto. Irreversible -- there is no UNCALL, and _require_no_active
+    _arbitration blocks every other command that could otherwise alter the
+    candidate set out from under it. Forces the one eligible Pool (if
+    still private) public on the way in -- jurors need to know what's
+    actually on the table for a secret vote to mean anything."""
+    _require_negotiation(game)
+    if game.active_proposal_id is None:
+        raise IllegalCommandError("no active negotiation")
+    proposal = game.proposals[game.active_proposal_id]
+    _require_no_active_arbitration(proposal)
+
+    active_responders = _active_responder_ids(game, proposal)
+    if len(active_responders) != 1:
+        raise IllegalCommandError("arbitration requires the negotiation to have narrowed to exactly two active participants")
+    remaining_responder = next(iter(active_responders))
+    final_two = {proposal.swap.initiator_player_id, remaining_responder}
+    if actor_game_player_id not in final_two:
+        raise IllegalCommandError("only the two active participants may call arbitration")
+
+    caller_role = "originator" if actor_game_player_id == proposal.swap.initiator_player_id else "other"
+    base_weights = dict(game.config.arbitration_base_weights[caller_role])
+
+    events: list[GameEvent] = []
+    eligible_pool_id = _eligible_arbitration_pool_id(game, proposal)
+    if eligible_pool_id is None:
+        # Nothing to renormalize yet -- the draw itself renormalizes
+        # whatever's left. Just drop the illegal candidate outright.
+        base_weights.pop("pool", None)
+    else:
+        pool = game.pools[eligible_pool_id]
+        if pool.visibility is PoolVisibility.PRIVATE:
+            pool.visibility = PoolVisibility.PUBLIC
+            events.append(
+                _emit(game, now, EventType.ARBITRATION_POOL_REVEALED, actor=actor_game_player_id, payload={"pool_id": eligible_pool_id})
+            )
+
+    proposal.pending_arbitration = PendingArbitration(
+        arbitration_id=new_id(),
+        called_by=actor_game_player_id,
+        called_at=now,
+        resolves_at=now + timedelta(seconds=game.config.arbitration_window_seconds),
+        eligible_pool_id=eligible_pool_id,
+        base_weights=base_weights,
+    )
+    events.append(
+        _emit(
+            game,
+            now,
+            EventType.ARBITRATION_CALLED,
+            actor=actor_game_player_id,
+            payload={
+                "proposal_id": proposal.proposal_id,
+                "caller_role": caller_role,
+                "resolves_at": proposal.pending_arbitration.resolves_at.isoformat(),
+            },
+        )
+    )
+    return events
+
+
+def _handle_cast_arbitration_vote(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """Jury-only: exactly the players who have already passed this
+    negotiation, per the locked rules -- the active pair settles by
+    Accept, never by voting. Secret live (EVENT_VISIBILITY.ACTOR_ONLY;
+    only "who has voted," never the content, is ever projected to anyone
+    else -- see projections._project_proposal)."""
+    _require_negotiation(game)
+    if game.active_proposal_id is None:
+        raise IllegalCommandError("no active negotiation")
+    proposal = game.proposals[game.active_proposal_id]
+    pending = proposal.pending_arbitration
+    if pending is None:
+        raise IllegalCommandError("no arbitration in progress")
+    if actor_game_player_id not in proposal.passed_player_ids:
+        raise IllegalCommandError("only players who have passed this negotiation may serve on its jury")
+    if actor_game_player_id in pending.votes:
+        raise IllegalCommandError("you already voted")
+
+    vote = payload["vote"]
+    if vote not in pending.base_weights:
+        # Covers both a genuinely illegal choice string and "pool" when no
+        # Pool survived to eligibility -- a juror is never offered a vote
+        # for an outcome that isn't actually on the table.
+        raise IllegalCommandError("not a legal vote this cycle")
+
+    pending.votes[actor_game_player_id] = vote
+    return [
+        _emit(
+            game, now, EventType.ARBITRATION_VOTE_CAST, actor=actor_game_player_id, payload={"proposal_id": proposal.proposal_id, "vote": vote}
+        )
+    ]
 
 
 def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -817,6 +994,8 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "MAKE_POOL_PUBLIC": _handle_make_pool_public,
     "DECLINE_POOL": _handle_decline_pool,
     "ACCEPT_POOL": _handle_accept_pool,
+    "CALL_ARBITRATION": _handle_call_arbitration,
+    "CAST_ARBITRATION_VOTE": _handle_cast_arbitration_vote,
     "SET_READY_TO_CLOSE": _handle_set_ready_to_close,
 }
 
@@ -832,17 +1011,64 @@ def _emit(game: Game, now: datetime, type_: EventType, *, actor: str | None, pay
     return event
 
 
-def _resolve_proposal(game: Game, proposal: Proposal, reason: ProposalResolutionReason, resolved_by: str | None, now: datetime) -> GameEvent:
+def _resolve_proposal(
+    game: Game, proposal: Proposal, reason: ProposalResolutionReason, resolved_by: str | None, now: datetime
+) -> list[GameEvent]:
+    """The single chokepoint every proposal resolution funnels through,
+    regardless of reason -- this is where active_proposal_id is cleared
+    (never set or cleared anywhere else) and, if Arbitration was still
+    pending on this exact proposal, where it gets swept up too.
+
+    A pending Arbitration only ever reaches this function still SET in
+    two cases: a normal ACCEPT_PROPOSAL/ACCEPT_POOL settling it during the
+    20s window (reason == EXECUTED -> ArbitrationResolutionReason
+    .SETTLED_NORMALLY), or close_market's own generic MARKET_CLOSED loop
+    preempting it before it could resolve on its own (any other reason ->
+    ArbitrationResolutionReason.MARKET_CLOSED). The machine-draw path
+    (_resolve_arbitration_via_machine) always clears pending_arbitration
+    itself, *before* calling this, specifically so this auto-detection
+    never double-fires for that path -- it emits its own, fuller
+    ARBITRATION_RESOLVED first."""
     proposal.status = ResolutionStatus.RESOLVED
     proposal.resolved_at_seq_no = game.next_seq_no
     proposal.resolved_by_player_id = resolved_by
     proposal.resolution_reason = reason
+
+    events: list[GameEvent] = []
+    if proposal.pending_arbitration is not None:
+        pending = proposal.pending_arbitration
+        proposal.pending_arbitration = None
+        arb_reason = (
+            ArbitrationResolutionReason.SETTLED_NORMALLY
+            if reason is ProposalResolutionReason.EXECUTED
+            else ArbitrationResolutionReason.MARKET_CLOSED
+        )
+        events.append(
+            _emit(
+                game,
+                now,
+                EventType.ARBITRATION_RESOLVED,
+                actor=resolved_by,
+                payload={
+                    "proposal_id": proposal.proposal_id,
+                    "reason": arb_reason.value,
+                    "base_weights": pending.base_weights,
+                    "final_weights": None,  # no draw happened -- nothing to normalize
+                    "votes": dict(pending.votes),
+                },
+            )
+        )
+
     # The single place active_proposal_id ever gets cleared -- every
     # proposal resolution, of any reason, funnels through here. Never set
     # or cleared anywhere else in the engine.
     if game.active_proposal_id == proposal.proposal_id:
         game.active_proposal_id = None
-    return _emit(game, now, EventType.PROPOSAL_RESOLVED, actor=resolved_by, payload={"proposal_id": proposal.proposal_id, "reason": reason.value})
+
+    events.append(
+        _emit(game, now, EventType.PROPOSAL_RESOLVED, actor=resolved_by, payload={"proposal_id": proposal.proposal_id, "reason": reason.value})
+    )
+    return events
 
 
 def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved_by: str | None, now: datetime) -> GameEvent:
@@ -857,6 +1083,86 @@ def _resolve_pool(game: Game, pool: Pool, reason: PoolResolutionReason, resolved
         actor=resolved_by,
         payload={"pool_id": pool.pool_id, "reason": reason.value},
     )
+
+
+def _final_arbitration_weights(config: GameConfig, pending: PendingArbitration) -> dict[str, int]:
+    """Each juror's secret vote is additive and cumulative, independent of
+    every other juror's: +bonus to the voted choice, -penalty to each of
+    the OTHER legal choices, floored at zero as it goes. Normalized only
+    once, at draw time (by the caller) -- never here, so intermediate
+    weights stay in the same "deliberately weights, not percentages"
+    space the base weights are already in. Worked example matching the
+    locked design exactly: base_weights 30/40/40 (base/pool/neither), one
+    vote for "base" -> 40/35/35; a second vote for "pool" on top of that
+    -> 35/45/30."""
+    weights = dict(pending.base_weights)
+    for vote in pending.votes.values():
+        if vote not in weights:
+            continue  # defensive only -- CAST_ARBITRATION_VOTE never lets an illegal choice in
+        weights[vote] += config.arbitration_vote_bonus
+        for choice in weights:
+            if choice != vote:
+                weights[choice] = max(0, weights[choice] - config.arbitration_vote_penalty)
+    return weights
+
+
+def _resolve_arbitration_via_machine(game: Game, proposal: Proposal, now: datetime, rng: random.Random) -> list[GameEvent]:
+    """Fires once the 20-second window elapses with neither Accept having
+    settled it normally (see apply_due_time_transitions). Influential,
+    never determinative -- the jury can lean on the machine, never become
+    it: normalization happens exactly once, right here, at the moment of
+    the actual draw."""
+    pending = proposal.pending_arbitration
+    assert pending is not None
+    weights = _final_arbitration_weights(game.config, pending)
+
+    choices = list(weights.keys())
+    outcome = rng.choices(choices, weights=[weights[c] for c in choices], k=1)[0]
+
+    # Cleared BEFORE resolving -- so _resolve_proposal's own
+    # pending_arbitration auto-detection (SETTLED_NORMALLY / MARKET_CLOSED)
+    # never double-fires for this, already-machine-resolved, path.
+    proposal.pending_arbitration = None
+
+    events: list[GameEvent] = []
+    if outcome == ArbitrationChoice.BASE:
+        events += _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id)
+        events += _resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, None, now)
+        arb_reason = ArbitrationResolutionReason.MACHINE_BASE
+    elif outcome == ArbitrationChoice.POOL:
+        assert pending.eligible_pool_id is not None
+        pool = game.pools[pending.eligible_pool_id]
+        events += _execute_swap(game, proposal.swap, now, exclude_proposal_id=proposal.proposal_id, exclude_pool_id=pool.pool_id)
+        events += _execute_swap(game, pool.swap, now, exclude_proposal_id=proposal.proposal_id, exclude_pool_id=pool.pool_id)
+        events += _resolve_proposal(game, proposal, ProposalResolutionReason.EXECUTED, None, now)
+        events.append(_resolve_pool(game, pool, PoolResolutionReason.EXECUTED, None, now))
+        arb_reason = ArbitrationResolutionReason.MACHINE_POOL
+    else:
+        events += _resolve_proposal(game, proposal, ProposalResolutionReason.ARBITRATION_NEITHER, None, now)
+        arb_reason = ArbitrationResolutionReason.MACHINE_NEITHER
+
+    # Nobody "chose" a machine outcome -- resolving_actor=None means any
+    # surviving sibling (the eligible Pool, if outcome wasn't "pool")
+    # falls through to PREEMPTED_BY_OTHER_ACTION, never
+    # INVALIDATED_BY_INITIATOR_ACTION.
+    events += resolve_sibling_pools(game, proposal, None, now)
+
+    events.append(
+        _emit(
+            game,
+            now,
+            EventType.ARBITRATION_RESOLVED,
+            actor=None,
+            payload={
+                "proposal_id": proposal.proposal_id,
+                "reason": arb_reason.value,
+                "base_weights": pending.base_weights,
+                "final_weights": weights,
+                "votes": dict(pending.votes),
+            },
+        )
+    )
+    return events
 
 
 def _execute_swap(
@@ -911,7 +1217,7 @@ def _invalidate_crossed_negotiations(
         if proposal.status != ResolutionStatus.OPEN or proposal.proposal_id == exclude_proposal_id:
             continue
         if {proposal.swap.entity_a, proposal.swap.entity_b} & moved and _direction_crossed(game, proposal.swap):
-            events.append(_resolve_proposal(game, proposal, ProposalResolutionReason.VOIDED_MARKET_SWUNG, None, now))
+            events += _resolve_proposal(game, proposal, ProposalResolutionReason.VOIDED_MARKET_SWUNG, None, now)
             for pool in list(game.pools.values()):
                 if pool.base_proposal_id == proposal.proposal_id and pool.status == ResolutionStatus.OPEN:
                     events.append(_resolve_pool(game, pool, PoolResolutionReason.BASE_PROPOSAL_VOIDED, None, now))
