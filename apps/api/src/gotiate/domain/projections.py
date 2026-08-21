@@ -5,17 +5,19 @@ caller (api/routes.py) derives it from the verified JWT and game.phase.
 
 Cadence/economy redesign (prototype branch): checkpoint 1 stripped every
 Influence, Market Correction, gameplay-clock, Accept Lock, multi-accept
--threshold, and old Reserve/Pickup field/branch out of the projection (the
-pending-pickup frozen-view short-circuit is removed along with it -- its
-*pattern* returns in a later checkpoint for Boosts, under a different
-name). Checkpoint 2 makes Pass fully public: a passed proposal/pool is no
+-threshold, and old Reserve/Pickup field/branch out of the projection.
+Checkpoint 2 makes Pass fully public: a passed proposal/pool is no
 longer omitted from the passer's own view, and passed_player_ids is now
 exposed to everyone, not just an anonymous count to the proposer.
 Checkpoint 3 adds Arbitration: a pending arbitration's existence, caller,
 and timing are public, but its weights and its jury's votes are never
 shown to any live audience -- not even the two active participants --
 only that a given juror *has* voted. ReplayAudience unlocks all of it,
-same "postgame reveals everything" precedent as Pool contents.
+same "postgame reveals everything" precedent as Pool contents. Checkpoint
+4 brings the old pending-pickup frozen-view short-circuit back under a
+new name: a player mid their own Draw/Refresh decision (PendingBoostDraw)
+is served their own cached snapshot verbatim, taken the instant the Boost
+was used, for as long as the decision stays open.
 """
 
 from __future__ import annotations
@@ -62,6 +64,17 @@ Audience = PlayerAudience | PublicAudience | ReplayAudience
 def project(game: Game, audience: Audience) -> dict:
     if isinstance(audience, ReplayAudience) and game.phase != GamePhase.SCORED:
         raise PermissionError("replay is only available once the game is scored")
+
+    # Frozen-view short-circuit (checkpoint 4): a player mid their own
+    # Draw/Refresh decision is served the exact snapshot taken when the
+    # Boost was used, verbatim, for the whole decision window -- never a
+    # live board that's moved on underneath a choice they haven't made
+    # yet. Entirely self-only; nobody else's view is affected by another
+    # player's pending draw. Mirrors the old pending-pickup pattern.
+    if isinstance(audience, PlayerAudience):
+        player = game.player_by_id(audience.game_player_id)
+        if player.pending_boost_draw is not None:
+            return player.pending_boost_draw.cached_view
 
     scored = game.phase == GamePhase.SCORED
     lookup = _theme_lookup(game)
@@ -221,6 +234,15 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     # non-insiders, the two active participants included -- unlocked only
     # for ReplayAudience.
     EventType.ARBITRATION_RESOLVED: EventVisibility.PUBLIC,
+    # Boosts (checkpoint 4): a unilateral, private action with no public
+    # market-visible symptom of its own except Force Swap's own
+    # SWAP_EXECUTED (which already carries the public half separately) --
+    # all five stay actor-only live, full detail survives for Replay.
+    EventType.BOOST_CONCENTRATE_USED: EventVisibility.ACTOR_ONLY,
+    EventType.BOOST_FORCE_SWAP_USED: EventVisibility.ACTOR_ONLY,
+    EventType.BOOST_DRAW_STARTED: EventVisibility.ACTOR_ONLY,
+    EventType.BOOST_DRAW_COMPLETED: EventVisibility.ACTOR_ONLY,
+    EventType.BOOST_DRAW_FAILED: EventVisibility.ACTOR_ONLY,
     # Payload carries entity_c/entity_d directly -- the actual swap.
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,

@@ -36,7 +36,11 @@ migration drops them — never edit an applied migration, see DATABASE.md.
 Checkpoint 3 adds `proposal_arbitration`, a dedicated FastAPI-only table
 (not a jsonb column on the direct-read `proposals` table -- it holds secret
 jury votes, which must never be reachable through Supabase's direct-read
-RLS path at all, only through project()'s own redaction).
+RLS path at all, only through project()'s own redaction). Checkpoint 4
+adds `game_player_private.pending_boost_draw`, a jsonb column on that
+already-FastAPI-only table -- a pending Draw/Refresh decision is
+single-player-private the same way the old (now-unused) pending_pickup
+column was, so it gets a fresh column there rather than its own table.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ from gotiate.domain.entities import (
     HoldingZone,
     MarketEntity,
     PendingArbitration,
+    PendingBoostDraw,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -345,16 +350,18 @@ class PostgresGameRepository:
         )
         await cur.execute(
             """
-            insert into game_player_private (game_player_id, game_id, auth_user_id, ready_to_close)
-            values (%s, %s, %s, %s)
+            insert into game_player_private (game_player_id, game_id, auth_user_id, ready_to_close, pending_boost_draw)
+            values (%s, %s, %s, %s, %s)
             on conflict (game_player_id) do update set
-                ready_to_close = excluded.ready_to_close
+                ready_to_close = excluded.ready_to_close,
+                pending_boost_draw = excluded.pending_boost_draw
             """,
             (
                 player.game_player_id,
                 game_id,
                 player.auth_user_id,
                 player.ready_to_close,
+                Json(player.pending_boost_draw.model_dump(mode="json")) if player.pending_boost_draw is not None else None,
             ),
         )
 
@@ -594,6 +601,9 @@ def _to_game(
                 moves_remaining=pr["moves_remaining"],
                 boosts_remaining=pr["boosts_remaining"],
                 ready_to_close=priv.get("ready_to_close", False),
+                pending_boost_draw=(
+                    PendingBoostDraw.model_validate(priv["pending_boost_draw"]) if priv.get("pending_boost_draw") is not None else None
+                ),
             )
         )
 

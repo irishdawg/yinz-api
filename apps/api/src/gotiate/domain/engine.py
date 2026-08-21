@@ -18,8 +18,12 @@ exhaustion, not just Ready-to-Close. Checkpoint 3 adds Arbitration: once a
 negotiation has narrowed to exactly two active participants (the opener
 plus one remaining responder), either may call it, starting an irreversible
 20-second last-chance window with a weighted machine draw at the end,
-secretly influenced by the jury of already-passed players. Boosts remain
-scaffolded for checkpoint 4 -- see the redesign plan artifact.
+secretly influenced by the jury of already-passed players. Checkpoint 4
+wires up Boosts: Concentrate (duplicate an owned entity up to the x3
+cap), Force Swap (an unlimited unilateral market move, reusing
+_execute_swap directly), and Draw/Refresh (a private, timed decision
+window revealing one uniformly-random zero-owned entity, spent
+regardless of whether the player keeps it).
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from datetime import datetime, timedelta
 from gotiate.domain.entities import (
     ArbitrationChoice,
     ArbitrationResolutionReason,
+    BoostDrawFailureReason,
     CancellationReason,
     CloseReason,
     Game,
@@ -44,6 +49,7 @@ from gotiate.domain.entities import (
     HoldingZone,
     MarketEntity,
     PendingArbitration,
+    PendingBoostDraw,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -143,11 +149,11 @@ def join_game(
 # Command dispatch
 # --------------------------------------------------------------------------
 
-# NOTE (cadence/economy redesign): DISCARD_HOLDING/DECLINE_PICKUP are gone
-# along with the old Reserve mechanic. A later checkpoint's Boost decision
-# commands will need the same version-exemption treatment for the same
-# reason (a frozen client can't know the live version).
-_VERSION_EXEMPT_COMMANDS: frozenset[str] = frozenset()
+# RESOLVE_BOOST_DRAW/DECLINE_BOOST_DRAW mirror the old DISCARD_HOLDING/
+# DECLINE_PICKUP exemption: a client frozen on PendingBoostDraw.cached_view
+# for the length of the decision window can't know the live version, so
+# these two are exempt from the optimistic-concurrency check the same way.
+_VERSION_EXEMPT_COMMANDS: frozenset[str] = frozenset({"RESOLVE_BOOST_DRAW", "DECLINE_BOOST_DRAW"})
 
 
 def handle_command(
@@ -214,11 +220,12 @@ def handle_command(
 
 def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     """NOTE (cadence/economy redesign): there is no gameplay clock. The
-    lobby reminder/grace auto-cancel and Arbitration's own 20-second
-    last-chance window are the only two time-driven transitions in this
-    game -- every other trigger (Boost expiry, the Haircut reveal, the
-    Move-exhaustion endgame) is a direct, synchronous consequence of a
-    command, not something that needs polling to notice."""
+    lobby reminder/grace auto-cancel, Arbitration's own 20-second
+    last-chance window, and each player's own short Draw/Refresh decision
+    window are the only time-driven transitions in this game -- every
+    other trigger (Boost expiry, the Haircut reveal, the Move-exhaustion
+    endgame) is a direct, synchronous consequence of a command, not
+    something that needs polling to notice."""
     events: list[GameEvent] = []
 
     if game.phase == GamePhase.LOBBY:
@@ -246,6 +253,11 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
         proposal = game.proposals[game.active_proposal_id]  # type: ignore[index]
         events += _resolve_arbitration_via_machine(game, proposal, now, random.Random())
 
+    for player in game.players:
+        pending_draw = player.pending_boost_draw
+        if pending_draw is not None and now >= pending_draw.decision_deadline_at:
+            events += _fail_pending_boost_draw(game, player, BoostDrawFailureReason.DECISION_TIMEOUT, now)
+
     return events
 
 
@@ -262,7 +274,11 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
     if game.phase != GamePhase.NEGOTIATION:
         return False
     pending = _pending_arbitration(game)
-    return pending is not None and now >= pending.resolves_at
+    if pending is not None and now >= pending.resolves_at:
+        return True
+    return any(
+        p.pending_boost_draw is not None and now >= p.pending_boost_draw.decision_deadline_at for p in game.players
+    )
 
 
 # --------------------------------------------------------------------------
@@ -348,6 +364,13 @@ def close_market(game: Game, reason: CloseReason, now: datetime) -> list[GameEve
     for pool in list(game.pools.values()):
         if pool.status == ResolutionStatus.OPEN:
             events.append(_resolve_pool(game, pool, PoolResolutionReason.MARKET_CLOSED, None, now))
+
+    # Any player still mid-Draw/Refresh-decision when the market closes
+    # never gets to choose -- the drawn entity never lands, same as a
+    # decline/timeout. The Boost was already spent when the draw started.
+    for player in game.players:
+        if player.pending_boost_draw is not None:
+            events += _fail_pending_boost_draw(game, player, BoostDrawFailureReason.MARKET_CLOSED, now)
 
     events.append(_emit(game, now, EventType.PORTFOLIOS_REVEALED, actor=None, payload={}))
 
@@ -563,6 +586,36 @@ def _require_no_active_arbitration_on_pool(game: Game, pool: Pool) -> None:
 
 
 # --------------------------------------------------------------------------
+# Boosts (checkpoint 4) -- shared helpers.
+# --------------------------------------------------------------------------
+
+
+def _require_no_pending_boost_draw(game: Game, actor_game_player_id: str | None) -> None:
+    """Self-scoped, unlike _require_no_active_arbitration: a player mid
+    their own Draw/Refresh decision is served a frozen view (see
+    PendingBoostDraw), so they specifically can't be trusted to act on
+    live state until they resolve it -- but this never blocks anyone
+    else. Mirrors the old pending-pickup-blocks-most-commands pattern."""
+    player = game.player_by_id(actor_game_player_id)
+    if player.pending_boost_draw is not None:
+        raise IllegalCommandError("resolve your pending Draw/Refresh decision first")
+
+
+def _require_boosts_active(game: Game) -> None:
+    if game.boosts_expired:
+        raise IllegalCommandError("Boosts have expired")
+    if _pending_arbitration(game) is not None:
+        raise IllegalCommandError("Boosts are unavailable during Arbitration")
+
+
+def _owns(game: Game, player_id: str, entity_id: str) -> bool:
+    return any(
+        h.owner_player_id == player_id and h.zone == HoldingZone.PORTFOLIO and h.entity_id == entity_id
+        for h in game.holdings.values()
+    )
+
+
+# --------------------------------------------------------------------------
 # Command handlers
 # --------------------------------------------------------------------------
 
@@ -652,6 +705,7 @@ def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str |
 
 def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     # Single-active-negotiation constraint: at most one bare negotiation
     # open table-wide at any time. This also makes the old auto-withdraw
     # -your-own-open-proposal path and the cross-player same-pair dedup
@@ -708,6 +762,7 @@ def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: st
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
     _require_no_active_arbitration(proposal)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("the proposer cannot pass their own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
@@ -742,6 +797,7 @@ def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: st
 def _handle_accept_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("cannot accept your own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
@@ -758,6 +814,7 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
     _require_no_active_arbitration(proposal)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if proposal.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("the proposer cannot pool their own proposal")
     if actor_game_player_id in proposal.passed_player_ids:
@@ -818,6 +875,7 @@ def _handle_withdraw_pool(game: Game, *, payload: dict, actor_game_player_id: st
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
     _require_no_active_arbitration_on_pool(game, pool)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if pool.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the pool's initiator can withdraw it")
     return [_resolve_pool(game, pool, PoolResolutionReason.WITHDRAWN_BY_INITIATOR, actor_game_player_id, now)]
@@ -827,6 +885,7 @@ def _handle_make_pool_public(game: Game, *, payload: dict, actor_game_player_id:
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
     _require_no_active_arbitration_on_pool(game, pool)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if pool.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the pool's initiator can make it public")
     if pool.visibility is PoolVisibility.PUBLIC:
@@ -842,6 +901,7 @@ def _handle_decline_pool(game: Game, *, payload: dict, actor_game_player_id: str
         raise IllegalCommandError("only a private pool can be declined")
     base = _require_open_proposal(game, pool.base_proposal_id)
     _require_no_active_arbitration(base)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if base.swap.initiator_player_id != actor_game_player_id:
         raise IllegalCommandError("only the base proposer may decline a private pool")
     return [_resolve_pool(game, pool, PoolResolutionReason.DECLINED_BY_TARGET, actor_game_player_id, now)]
@@ -851,6 +911,7 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
     base = _require_open_proposal(game, pool.base_proposal_id)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
 
     if pool.swap.initiator_player_id == actor_game_player_id:
         raise IllegalCommandError("cannot accept your own pool")
@@ -880,6 +941,7 @@ def _handle_call_arbitration(game: Game, *, payload: dict, actor_game_player_id:
         raise IllegalCommandError("no active negotiation")
     proposal = game.proposals[game.active_proposal_id]
     _require_no_active_arbitration(proposal)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
 
     active_responders = _active_responder_ids(game, proposal)
     if len(active_responders) != 1:
@@ -943,6 +1005,7 @@ def _handle_cast_arbitration_vote(game: Game, *, payload: dict, actor_game_playe
     pending = proposal.pending_arbitration
     if pending is None:
         raise IllegalCommandError("no arbitration in progress")
+    _require_no_pending_boost_draw(game, actor_game_player_id)
     if actor_game_player_id not in proposal.passed_player_ids:
         raise IllegalCommandError("only players who have passed this negotiation may serve on its jury")
     if actor_game_player_id in pending.votes:
@@ -959,6 +1022,214 @@ def _handle_cast_arbitration_vote(game: Game, *, payload: dict, actor_game_playe
     return [
         _emit(
             game, now, EventType.ARBITRATION_VOTE_CAST, actor=actor_game_player_id, payload={"proposal_id": proposal.proposal_id, "vote": vote}
+        )
+    ]
+
+
+def _handle_use_boost(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """Single command, `boost_type`-discriminated (concentrate / force_swap
+    / draw) -- matches the existing generic-envelope style (cf.
+    CREATE_POOL's own `visibility` field). Concentrate and Force Swap
+    resolve immediately; draw only *starts* a decision (see
+    RESOLVE_BOOST_DRAW/DECLINE_BOOST_DRAW below) but the Boost itself is
+    spent right here regardless of how that decision eventually goes."""
+    _require_negotiation(game)
+    _require_no_pending_boost_draw(game, actor_game_player_id)
+    _require_boosts_active(game)
+    player = game.player_by_id(actor_game_player_id)
+    if player.boosts_remaining < 1:
+        raise IllegalCommandError("no Boosts remaining")
+
+    boost_type = payload["boost_type"]
+    if boost_type == "concentrate":
+        return _use_boost_concentrate(game, player, payload, now)
+    if boost_type == "force_swap":
+        return _use_boost_force_swap(game, player, payload, now)
+    if boost_type == "draw":
+        return _use_boost_draw(game, player, now)
+    raise IllegalCommandError(f"unknown boost_type {boost_type!r}")
+
+
+def _use_boost_concentrate(game: Game, player: GamePlayer, payload: dict, now: datetime) -> list[GameEvent]:
+    """Deliberately increase an existing holding, up to the x3 cap
+    (GameConfig.concentrate_max_copies): discard one holding, duplicate an
+    entity the player already owns at least one copy of. Discarding and
+    duplicating the SAME entity is legal and nets to no change in copy
+    count -- not a cap violation just because it names the same entity
+    twice."""
+    discard_id = payload["holding_id_to_discard"]
+    duplicate_entity_id = payload["entity_id_to_duplicate"]
+
+    discard_holding = game.holdings.get(discard_id)
+    if (
+        discard_holding is None
+        or discard_holding.owner_player_id != player.game_player_id
+        or discard_holding.zone != HoldingZone.PORTFOLIO
+    ):
+        raise IllegalCommandError("not a holding you own")
+    if not _owns(game, player.game_player_id, duplicate_entity_id):
+        raise IllegalCommandError("you don't own that entity")
+
+    current_count = sum(
+        1
+        for h in game.holdings.values()
+        if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.PORTFOLIO and h.entity_id == duplicate_entity_id
+    )
+    resulting_count = current_count - (1 if discard_holding.entity_id == duplicate_entity_id else 0) + 1
+    if resulting_count > game.config.concentrate_max_copies:
+        raise IllegalCommandError(f"would exceed the x{game.config.concentrate_max_copies} concentration cap")
+
+    player.boosts_remaining -= 1
+    discard_holding.zone = HoldingZone.DISCARDED
+    new_holding = Holding(
+        holding_id=new_id(), entity_id=duplicate_entity_id, owner_player_id=player.game_player_id, zone=HoldingZone.PORTFOLIO
+    )
+    game.holdings[new_holding.holding_id] = new_holding
+    return [
+        _emit(
+            game,
+            now,
+            EventType.BOOST_CONCENTRATE_USED,
+            actor=player.game_player_id,
+            payload={"discarded_holding_id": discard_id, "duplicated_entity_id": duplicate_entity_id},
+        )
+    ]
+
+
+def _use_boost_force_swap(game: Game, player: GamePlayer, payload: dict, now: datetime) -> list[GameEvent]:
+    """Alter the market unilaterally -- Boost-gated, otherwise identical to
+    a negotiated swap: reuses _execute_swap directly, so it correctly
+    triggers crossing-invalidation against every other open negotiation."""
+    entity_a, entity_b = payload["entity_a"], payload["entity_b"]
+    if entity_a == entity_b:
+        raise IllegalCommandError("must name two different entities")
+    _require_entities_exist(game, entity_a, entity_b)
+
+    player.boosts_remaining -= 1
+    swap = SwapIntent(
+        entity_a=entity_a,
+        entity_b=entity_b,
+        initiator_player_id=player.game_player_id,
+        rising_entity_id=_rising_entity(game, entity_a, entity_b),
+    )
+    events = _execute_swap(game, swap, now)
+    events.append(
+        _emit(game, now, EventType.BOOST_FORCE_SWAP_USED, actor=player.game_player_id, payload={"entity_a": entity_a, "entity_b": entity_b})
+    )
+    return events
+
+
+def _use_boost_draw(game: Game, player: GamePlayer, now: datetime) -> list[GameEvent]:
+    """Introduce a genuinely new entity into the portfolio. Eligibility --
+    every current market entity this player owns zero copies of -- is
+    computed once, right here, and never recomputed once the decision is
+    pending: see PendingBoostDraw's own docstring for why (discarding a
+    holding during the decision must never retroactively make some other
+    entity "the draw"). The Boost is spent the instant this succeeds,
+    whether the player ultimately keeps the draw or not."""
+    eligible = [entity_id for entity_id in game.market if not _owns(game, player.game_player_id, entity_id)]
+    if not eligible:
+        raise IllegalCommandError("no eligible entities to draw")
+
+    player.boosts_remaining -= 1
+    drawn_entity_id = random.Random().choice(eligible)
+    original_holding_ids = [
+        h.holding_id for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.PORTFOLIO
+    ]
+    deadline = now + timedelta(seconds=game.config.boost_draw_decision_seconds)
+    pending = PendingBoostDraw(
+        pending_boost_draw_id=new_id(),
+        revealed_entity_id=drawn_entity_id,
+        original_portfolio_holding_ids=original_holding_ids,
+        started_at=now,
+        decision_deadline_at=deadline,
+    )
+    # Frozen-view pattern (same as the old Pick Up flow): render this
+    # player's own view BEFORE attaching the pending decision, then patch
+    # in the reveal -- every read for the rest of the window serves this
+    # exact snapshot back, rather than a live board moving on underneath
+    # an undecided choice. Import kept local to dodge the projections <->
+    # engine import cycle (projections already imports from entities/
+    # events, not engine).
+    from gotiate.domain.projections import PlayerAudience, project
+
+    cached_view = project(game, PlayerAudience(player.game_player_id))
+    cached_view["pending_boost_draw"] = {
+        "pending_boost_draw_id": pending.pending_boost_draw_id,
+        "revealed_entity_id": drawn_entity_id,
+        "decision_deadline_at": deadline,
+    }
+    pending.cached_view = cached_view
+    player.pending_boost_draw = pending
+
+    return [
+        _emit(
+            game,
+            now,
+            EventType.BOOST_DRAW_STARTED,
+            actor=player.game_player_id,
+            payload={
+                "pending_boost_draw_id": pending.pending_boost_draw_id,
+                "revealed_entity_id": drawn_entity_id,
+                "decision_deadline_at": deadline.isoformat(),
+            },
+        )
+    ]
+
+
+def _handle_resolve_boost_draw(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    _require_negotiation(game)
+    player = game.player_by_id(actor_game_player_id)
+    pending = player.pending_boost_draw
+    if pending is None or pending.pending_boost_draw_id != payload["pending_boost_draw_id"]:
+        raise IllegalCommandError("no matching pending boost draw")
+
+    discard_id = payload["holding_id_to_discard"]
+    if discard_id not in pending.original_portfolio_holding_ids:
+        raise IllegalCommandError("must discard one of your original holdings")
+
+    game.holdings[discard_id].zone = HoldingZone.DISCARDED
+    new_holding = Holding(
+        holding_id=new_id(), entity_id=pending.revealed_entity_id, owner_player_id=player.game_player_id, zone=HoldingZone.PORTFOLIO
+    )
+    game.holdings[new_holding.holding_id] = new_holding
+    player.pending_boost_draw = None
+
+    return [
+        _emit(
+            game,
+            now,
+            EventType.BOOST_DRAW_COMPLETED,
+            actor=player.game_player_id,
+            payload={
+                "pending_boost_draw_id": pending.pending_boost_draw_id,
+                "discarded_holding_id": discard_id,
+                "revealed_entity_id": pending.revealed_entity_id,
+            },
+        )
+    ]
+
+
+def _handle_decline_boost_draw(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    _require_negotiation(game)
+    player = game.player_by_id(actor_game_player_id)
+    pending = player.pending_boost_draw
+    if pending is None or pending.pending_boost_draw_id != payload["pending_boost_draw_id"]:
+        raise IllegalCommandError("no matching pending boost draw")
+    return _fail_pending_boost_draw(game, player, BoostDrawFailureReason.DECLINED_BY_PLAYER, now)
+
+
+def _fail_pending_boost_draw(game: Game, player: GamePlayer, reason: BoostDrawFailureReason, now: datetime) -> list[GameEvent]:
+    pending = player.pending_boost_draw
+    assert pending is not None
+    player.pending_boost_draw = None
+    return [
+        _emit(
+            game,
+            now,
+            EventType.BOOST_DRAW_FAILED,
+            actor=player.game_player_id,
+            payload={"pending_boost_draw_id": pending.pending_boost_draw_id, "reason": reason.value},
         )
     ]
 
@@ -996,6 +1267,9 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "ACCEPT_POOL": _handle_accept_pool,
     "CALL_ARBITRATION": _handle_call_arbitration,
     "CAST_ARBITRATION_VOTE": _handle_cast_arbitration_vote,
+    "USE_BOOST": _handle_use_boost,
+    "RESOLVE_BOOST_DRAW": _handle_resolve_boost_draw,
+    "DECLINE_BOOST_DRAW": _handle_decline_boost_draw,
     "SET_READY_TO_CLOSE": _handle_set_ready_to_close,
 }
 

@@ -78,6 +78,23 @@ class EventType(StrEnum):
     # redaction shape is modeled on.
     ARBITRATION_RESOLVED = "ARBITRATION_RESOLVED"
 
+    # Boosts (checkpoint 4) -- see engine._handle_use_boost and its three
+    # sub-handlers. All five are ACTOR_ONLY: a Boost is a unilateral,
+    # private action with no public market-visible symptom of its own
+    # (Force Swap's own SWAP_EXECUTED already carries the public half of
+    # that one), so only the acting player sees these in their own
+    # activity log live; full detail survives for Replay regardless.
+    BOOST_CONCENTRATE_USED = "BOOST_CONCENTRATE_USED"
+    BOOST_FORCE_SWAP_USED = "BOOST_FORCE_SWAP_USED"
+    # Draw/Refresh's three-event lifecycle -- STARTED fires the instant
+    # USE_BOOST(draw) is submitted (the Boost is already spent at this
+    # point, see PendingBoostDraw), then exactly one of COMPLETED
+    # (RESOLVE_BOOST_DRAW) or FAILED (DECLINE_BOOST_DRAW, timeout, or a
+    # market close forcing every pending decision closed) follows.
+    BOOST_DRAW_STARTED = "BOOST_DRAW_STARTED"
+    BOOST_DRAW_COMPLETED = "BOOST_DRAW_COMPLETED"
+    BOOST_DRAW_FAILED = "BOOST_DRAW_FAILED"
+
     # Close & scoring
     CLOSE_THRESHOLD_REACHED = "CLOSE_THRESHOLD_REACHED"
     MARKET_CLOSED = "MARKET_CLOSED"

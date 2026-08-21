@@ -121,6 +121,16 @@ class ArbitrationResolutionReason(StrEnum):
     MARKET_CLOSED = "market_closed"
 
 
+class BoostDrawFailureReason(StrEnum):
+    """Why a Draw/Refresh decision ended without the drawn entity landing
+    in the player's portfolio -- the Boost itself is spent regardless (see
+    PendingBoostDraw), these only distinguish *why* nothing was kept."""
+
+    DECLINED_BY_PLAYER = "declined_by_player"
+    DECISION_TIMEOUT = "decision_timeout"
+    MARKET_CLOSED = "market_closed"
+
+
 class CloseReason(StrEnum):
     READY_THRESHOLD = "READY_THRESHOLD"
     # NOTE (cadence/economy redesign): TIME_EXPIRED is gone -- there is no
@@ -257,6 +267,10 @@ class GameConfig(BaseModel):
     starting_moves: int = 5
     starting_boosts: int = 2
     concentrate_max_copies: int = 3
+    # Draw/Refresh's own short local decision window -- distinct from, and
+    # much shorter than, the Arbitration window; both are the deliberate
+    # exceptions to an otherwise clockless negotiation cadence.
+    boost_draw_decision_seconds: float = 20.0
 
     # --- Cadence/economy redesign: Arbitration (checkpoint 3) ---
     arbitration_window_seconds: float = 20.0
@@ -398,6 +412,31 @@ class Proposal(BaseModel):
     pending_arbitration: PendingArbitration | None = None
 
 
+class PendingBoostDraw(BaseModel):
+    """A single player's own frozen Draw/Refresh decision window --
+    entirely private to them (never a jury, unlike PendingArbitration).
+    `revealed_entity_id` was drawn uniformly from the set of entities this
+    player owned zero copies of *at the moment USE_BOOST(draw) was
+    submitted*; that eligibility set is never recomputed, so discarding a
+    holding during the decision can't retroactively make some other
+    entity "the draw" (see engine._handle_boost_draw). The Boost itself
+    is already spent the instant this is created -- declining or timing
+    out never refunds it, only RESOLVE_BOOST_DRAW's discard choice
+    differs from DECLINE_BOOST_DRAW/timeout in whether the drawn entity
+    actually lands in the portfolio. `cached_view` is this player's own
+    project() output, snapshotted before this was attached, and served
+    back verbatim for every read while pending -- the same frozen-view
+    pattern the old Pick Up flow used, so a client mid-decision can never
+    observe a live board state it hasn't been asked to react to yet."""
+
+    pending_boost_draw_id: str
+    revealed_entity_id: str
+    original_portfolio_holding_ids: list[str]
+    started_at: datetime
+    decision_deadline_at: datetime
+    cached_view: dict = Field(default_factory=dict)
+
+
 class Pool(BaseModel):
     pool_id: str
     base_proposal_id: str
@@ -435,6 +474,10 @@ class GamePlayer(BaseModel):
     # `not Game.boosts_expired` and no Arbitration currently active on the
     # game's active negotiation -- see engine.py once checkpoint 4 lands.
     boosts_remaining: int
+    # None except during this player's own Draw/Refresh decision window --
+    # see PendingBoostDraw. Entirely private; never surfaced to any other
+    # audience, live or Replay-adjacent, beyond "this player used a Boost."
+    pending_boost_draw: PendingBoostDraw | None = None
     # Connection/presence deliberately NOT here — that's Supabase Realtime
     # Presence, infrastructure, never authoritative state.
 
