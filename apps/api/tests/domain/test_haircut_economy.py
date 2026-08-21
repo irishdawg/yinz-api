@@ -7,7 +7,6 @@ and find_active_game_seated_in."""
 from __future__ import annotations
 
 import random
-from datetime import timedelta
 
 import pytest
 
@@ -286,34 +285,9 @@ def test_compute_final_scores_is_pure_and_idempotent():
 
 
 # --------------------------------------------------------------------------
-# Halftime reveal -- apply_due_time_transitions / is_time_transition_due
+# Halftime reveal -- wired up in a later checkpoint (Moves don't exist yet
+# in checkpoint 1, so there's nothing to trigger a live reveal against).
 # --------------------------------------------------------------------------
-
-
-def test_haircut_risk_revealed_fires_exactly_at_the_configured_fraction():
-    game = make_started_game(2)
-    assert game.haircut_profile_revealed_at is None
-    assert game.haircut_reveal_at is not None
-
-    just_before = game.haircut_reveal_at - timedelta(seconds=1)
-    events = engine.apply_due_time_transitions(game, just_before)
-    assert not any(e.type.value == "HAIRCUT_RISK_REVEALED" for e in events)
-    assert game.haircut_profile_revealed_at is None
-
-    events = engine.apply_due_time_transitions(game, game.haircut_reveal_at)
-    assert any(e.type.value == "HAIRCUT_RISK_REVEALED" for e in events)
-    assert game.haircut_profile_revealed_at == game.haircut_reveal_at
-
-
-def test_haircut_risk_revealed_does_not_refire_once_already_revealed():
-    game = make_started_game(2)
-    engine.apply_due_time_transitions(game, game.haircut_reveal_at)
-    revealed_at = game.haircut_profile_revealed_at
-    assert revealed_at is not None
-
-    events = engine.apply_due_time_transitions(game, game.haircut_reveal_at + timedelta(minutes=5))
-    assert not any(e.type.value == "HAIRCUT_RISK_REVEALED" for e in events)
-    assert game.haircut_profile_revealed_at == revealed_at
 
 
 def test_ready_threshold_close_before_halfway_never_live_reveals_but_project_exposes_once_scored():

@@ -1,7 +1,14 @@
 """project(state, audience) — domain model §03/§06. The one place visibility
 rules get enforced; every client view, live or replay, is this same function
 called with a different audience. Audience is never client-supplied — the
-caller (api/routes.py) derives it from the verified JWT and game.phase."""
+caller (api/routes.py) derives it from the verified JWT and game.phase.
+
+Cadence/economy redesign (prototype branch), checkpoint 1: strips every
+Influence, Market Correction, gameplay-clock, Accept Lock, multi-accept
+-threshold, and old Reserve/Pickup field/branch out of the projection. The
+pending-pickup frozen-view short-circuit is removed along with it -- its
+*pattern* returns in a later checkpoint for Boosts, under a different name.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +24,6 @@ from gotiate.domain.entities import (
     GamePlayer,
     Holding,
     HoldingZone,
-    MarketCorrectionResolutionReason,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -51,14 +57,6 @@ def project(game: Game, audience: Audience) -> dict:
     if isinstance(audience, ReplayAudience) and game.phase != GamePhase.SCORED:
         raise PermissionError("replay is only available once the game is scored")
 
-    if isinstance(audience, PlayerAudience):
-        player = game.player_by_id(audience.game_player_id)
-        if player.pending_pickup is not None:
-            # Frozen view: rendered once at PICK_UP_RESERVE time, re-served
-            # verbatim until the pickup resolves. Not recomputed against
-            # current state — see domain model §03.
-            return player.pending_pickup.cached_view
-
     scored = game.phase == GamePhase.SCORED
     lookup = _theme_lookup(game)
 
@@ -74,35 +72,16 @@ def project(game: Game, audience: Audience) -> dict:
         # matching some other identifier, just handed over directly.
         "you": audience.game_player_id if isinstance(audience, PlayerAudience) else None,
         # LOBBY-only. Raw deadline + the grace duration, not a precomputed
-        # countdown -- same pattern as started_at/max_duration_s below, the
-        # client derives its own display from authoritative timestamps.
+        # countdown -- same pattern as started_at below, the client derives
+        # its own display from authoritative timestamps.
         "lobby_reminder_deadline_at": game.lobby_reminder_deadline_at,
         "lobby_reminder_grace_seconds": game.config.lobby_reminder_grace_seconds,
-        # Set together at START_GAME (engine._handle_start_game) -- all
-        # three are always non-null once phase is NEGOTIATION or later.
-        # Public: the clock and the unilateral-window cutoff are shared
-        # facts about the match, not private state.
         "started_at": game.started_at,
-        "max_duration_s": game.max_duration_s,
-        "unilateral_cutoff_at": game.unilateral_cutoff_at,
-        # Public once offered, but only {correction_id, expires_at} --
-        # never the moves/displacement. See the Market Correction design
-        # writeup: the constitutional rule is public, the contents aren't
-        # until it triggers.
-        "pending_market_correction": (
-            {"correction_id": game.pending_market_correction.correction_id, "expires_at": game.pending_market_correction.expires_at}
-            if game.pending_market_correction is not None
-            else None
-        ),
-        # Public once set (same tier as unilateral_cutoff_at) -- the
-        # deadline itself isn't a secret, only the profile's contents are
-        # until it passes. See the Haircut-risk design writeup.
-        "haircut_reveal_at": game.haircut_reveal_at,
         # The profile's contents: hidden until haircut_profile_revealed_at,
         # or unconditionally once scored (a game that closes via the
-        # ready-threshold before the halfway mark never lives to see the
-        # live reveal fire -- this is the fallback that still exposes it,
-        # since compute_final_scores' result depends on it being knowable).
+        # ready-threshold before the live reveal trigger fires never sees
+        # it live -- this is the fallback that still exposes it, since
+        # compute_final_scores' result depends on it being knowable).
         "haircut_profile": (
             {"depth_probabilities": game.haircut_profile.depth_probabilities}
             if game.haircut_profile is not None and (game.haircut_profile_revealed_at is not None or scored)
@@ -112,19 +91,9 @@ def project(game: Game, audience: Audience) -> dict:
         # itself -- computed straight from config (round(market_size *
         # risk_depth_fraction), the same formula
         # engine._generate_random_haircut_profile targets), deliberately
-        # NOT game.haircut_profile.max_depth. The two used to always agree
-        # when profiles came from a curated list validated against this
-        # exact formula, but a randomly generated profile's own effective
-        # depth (highest nonzero index) can land earlier than the
-        # structural slot count -- see _generate_random_haircut_profile's
-        # docstring. Reading the profile's own shape here would leak
-        # exactly how deep the real risk goes before the reveal; this
-        # value must stay pure config, so "the top K positions carry some
-        # risk" is structural, not profile-specific information. Lets the
-        # client render a payout-chance row keyed by *position*, not by
-        # whichever entity currently occupies it -- positions beyond this
-        # depth are 100% safe from the very first render, not just after
-        # reveal.
+        # NOT game.haircut_profile.max_depth. Reading the profile's own
+        # shape here would leak exactly how deep the real risk goes before
+        # the reveal.
         "haircut_risk_band_depth": (
             round(len(game.market) * game.config.risk_depth_fraction) if game.haircut_profile is not None else None
         ),
@@ -134,9 +103,7 @@ def project(game: Game, audience: Audience) -> dict:
         # instant it actually happens -- not a leading indicator. Distinct
         # from ready_to_close itself, which stays strictly self-only with
         # no aggregate anywhere (see _project_player) -- deliberately kept
-        # a secret trigger, not a public countdown. MARKET_CLOSED's event
-        # payload already carries this reason publicly; this just exposes
-        # the same already-public fact as a current-state field too.
+        # a secret trigger, not a public countdown.
         "close_reason": game.close_reason.value if game.close_reason else None,
         "closed_at": game.closed_at,
         "market": _project_market(game, lookup),
@@ -147,7 +114,7 @@ def project(game: Game, audience: Audience) -> dict:
         # "this negotiation ceases to exist in my world"; the engine-side
         # legality checks (can't accept/pool after passing) are the
         # backstop, this is what makes it true even before a player tries
-        # to act. See the Pass design writeup.
+        # to act.
         "proposals": [_project_proposal(game, p, audience) for p in game.proposals.values() if not _proposal_passed_by(p, audience)],
         "pools": [
             _project_pool(game, pool, audience)
@@ -162,30 +129,21 @@ def project(game: Game, audience: Audience) -> dict:
         # Reads the already-persisted realized_haircut_depth, never draws a
         # fresh one -- compute_final_scores is pure/rng-free specifically so
         # this call and the one that built the original GAME_SCORED payload
-        # always agree (see the Haircut-risk design writeup's invariant).
-        # realized_haircut_depth is None for any game that reached SCORED
-        # under the retired waterline_baseline_v1 model (before this field
-        # existed) -- that data is gone, not recoverable, so this merge is
-        # skipped entirely rather than asserted/crashed on, same as before
-        # results/winners existed in the projection at all. Real production
-        # incident, not a hypothetical: a live pre-migration SCORED game hit
-        # exactly this path and 500'd on every poll until this guard landed.
+        # always agree. realized_haircut_depth is None for any game that
+        # reached SCORED under the retired waterline_baseline_v1 model
+        # (before this field existed) -- that data is gone, not
+        # recoverable, so this merge is skipped entirely rather than
+        # asserted/crashed on.
         if game.realized_haircut_depth is not None:
             view.update(compute_final_scores(game, game.realized_haircut_depth))
         view["holdings"] = [_holding_view(h, lookup) for h in game.holdings.values()]
     elif isinstance(audience, PlayerAudience):
-        # Live, to the owner themselves: a reserve's identity is redacted
-        # until it's actually been revealed to them (Pick Up, or a failed
-        # pickup that already showed it) -- "you don't know your reserve
-        # until you Pick Up" is a rule enforced here, not left to the
-        # frontend's discretion. A curious player's own devtools shouldn't
-        # be able to see what a burned-unseen or still-unrevealed reserve
-        # is before the mechanic reveals it. Portfolio holdings are always
-        # known, always shown.
+        # Live, to the owner themselves: portfolio holdings are always
+        # known, always shown. (There is no unrevealed-to-owner zone left
+        # in checkpoint 1 -- that redaction returns in a later checkpoint
+        # once Boosts introduce a new frozen-decision holding.)
         view["holdings"] = [
-            _holding_view(h, lookup, reveal=h.zone not in _UNREVEALED_TO_OWNER_ZONES)
-            for h in game.holdings.values()
-            if h.owner_player_id == audience.game_player_id
+            _holding_view(h, lookup) for h in game.holdings.values() if h.owner_player_id == audience.game_player_id
         ]
 
     return view
@@ -227,58 +185,32 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     # path to this information, so a future payload addition here doesn't
     # silently start leaking through the event log instead.
     EventType.PORTFOLIO_DEALT: EventVisibility.SERVER_ONLY,
-    EventType.RESERVES_DEALT: EventVisibility.SERVER_ONLY,
-    # Hidden until haircut_reveal_at, same treatment the old WATERLINE_SELECTED
-    # got -- the live reveal itself is HAIRCUT_RISK_REVEALED below, not this.
+    # Hidden until the live reveal trigger (wired up in a later checkpoint).
     EventType.HAIRCUT_PROFILE_SELECTED: EventVisibility.SERVER_ONLY,
     EventType.PROPOSAL_CREATED: EventVisibility.PUBLIC,
     EventType.PROPOSAL_RESOLVED: EventVisibility.PUBLIC,
-    # Accepting is already fully public everywhere else (contrast
-    # PROPOSAL_PASSED below) -- a pledge toward accepters_required is no
-    # different, actor included.
-    EventType.PROPOSAL_ACCEPT_PLEDGED: EventVisibility.PUBLIC,
-    EventType.POOL_ACCEPT_PLEDGED: EventVisibility.PUBLIC,
     # Own pass only, in the passer's own history -- the proposer's only
     # channel to Pass feedback is the anonymous, aggregate passed_count on
     # the live proposal (project()/_project_proposal), never this event.
+    #
+    # NOTE (cadence/economy redesign): flips to PUBLIC in a later
+    # checkpoint alongside the rest of the Pass/narrowing rework.
     EventType.PROPOSAL_PASSED: EventVisibility.ACTOR_ONLY,
     # Payload carries entity_c/entity_d directly -- the actual swap.
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
     EventType.POOL_MADE_PUBLIC: EventVisibility.PUBLIC,
     # Checked against the real payload, not assumed: POOL_RESOLVED only ever
-    # carries pool_id/reason/influence, never entity_c/entity_d -- and
-    # influence is already unconditionally public via _project_player. PUBLIC
-    # is correct here, not POOL_INSIDERS (nothing to redact).
+    # carries pool_id/reason, nothing to redact.
     EventType.POOL_RESOLVED: EventVisibility.PUBLIC,
     EventType.SWAP_EXECUTED: EventVisibility.PUBLIC,
-    # PICKUP_STARTED's payload reveals revealed_entity_id; COMPLETED/FAILED
-    # don't carry an entity_id but are kept ACTOR_ONLY too for a consistent
-    # policy across the whole pickup family rather than splitting hairs
-    # field-by-field.
-    EventType.PICKUP_STARTED: EventVisibility.ACTOR_ONLY,
-    EventType.PICKUP_COMPLETED: EventVisibility.ACTOR_ONLY,
-    EventType.PICKUP_FAILED: EventVisibility.ACTOR_ONLY,
-    EventType.RESERVE_BURNED_FOR_SWAP: EventVisibility.SERVER_ONLY,
     EventType.READY_TO_CLOSE_CHANGED: EventVisibility.ACTOR_ONLY,
-    EventType.HAIRCUT_RISK_REVEALED: EventVisibility.PUBLIC,
-    # Both PUBLIC -- OFFERED's payload is minimal by construction (never
-    # entities/displacement), and RESOLVED gets a bespoke special-case in
-    # project_events (below) redacting `moves` unless reason=="triggered",
-    # same shape as PROPOSAL_RESOLVED's EXPIRED_ALL_PASSED masking. See
-    # the Market Correction design writeup.
-    EventType.MARKET_CORRECTION_OFFERED: EventVisibility.PUBLIC,
-    EventType.MARKET_CORRECTION_RESOLVED: EventVisibility.PUBLIC,
-    EventType.UNILATERAL_WINDOW_CLOSED: EventVisibility.PUBLIC,
     EventType.CLOSE_THRESHOLD_REACHED: EventVisibility.PUBLIC,
     EventType.MARKET_CLOSED: EventVisibility.PUBLIC,
     EventType.PORTFOLIOS_REVEALED: EventVisibility.PUBLIC,
     EventType.GAME_SCORED: EventVisibility.PUBLIC,
     EventType.GAME_ENDED: EventVisibility.PUBLIC,
     EventType.GAME_CANCELLED: EventVisibility.PUBLIC,
-    # Applies identically to every player -- nothing per-player to redact,
-    # same reasoning as MARKET_CLOSED.
-    EventType.INFLUENCE_TOPPED_UP: EventVisibility.PUBLIC,
 }
 
 _POOL_CONTENT_KEYS = frozenset({"entity_c", "entity_d"})
@@ -318,22 +250,11 @@ def project_events(game: Game, events: Iterable[GameEvent], audience: Audience) 
             # Same masking _public_resolution_reason applies to the live
             # proposal projection -- EXPIRED_ALL_PASSED must never appear
             # live, in the event log any more than in the proposal's own
-            # current-state view. See the Pass design writeup.
+            # current-state view.
             view = _event_view(event)
             if view["payload"].get("reason") == ProposalResolutionReason.EXPIRED_ALL_PASSED.value:
                 view = {**view, "payload": {**view["payload"], "reason": ProposalResolutionReason.WITHDRAWN_BY_INITIATOR.value}}
             views.append(view)
-            continue
-        if event.type is EventType.MARKET_CORRECTION_RESOLVED:
-            # The payload always carries the full `moves` detail
-            # internally (so a future Replay build gets full transparency
-            # for free -- same "postgame reveals everything" precedent as
-            # burned-unseen reserves), but a live audience only ever sees
-            # it once reason == "triggered" -- the hidden contents of an
-            # expired/invalidated/still-resuming correction are never
-            # revealed live. See the Market Correction design writeup.
-            reveal_moves = is_replay or event.payload.get("reason") == MarketCorrectionResolutionReason.TRIGGERED.value
-            views.append(_event_view(event, redact=() if reveal_moves else {"moves"}))
             continue
         views.append(_event_view(event))  # PUBLIC
     return views
@@ -386,9 +307,11 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
         # as any other roster fact. The entire point of it being rare is
         # that other players can see it, not just the player themselves.
         "is_golden_name": player.is_golden_name,
-        "reserve_count_remaining": sum(
-            1 for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.RESERVE_UNREVEALED
-        ),
+        # Public roster facts -- same tier as reserve_count_remaining used
+        # to be: players need to see who can still seize initiative
+        # (Moves) or still has a unilateral card to play (Boosts).
+        "moves_remaining": player.moves_remaining,
+        "boosts_remaining": player.boosts_remaining,
     }
 
     # Ready-to-close: owner-only live, never the aggregate — see visibility §06.
@@ -397,22 +320,11 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
     elif is_replay and game.config.ready_to_close_revealed_in_replay:
         out["ready_to_close"] = player.ready_to_close
 
-    # Influence balance is self-only, full stop -- once cost depends on
-    # real ownership (private Influence economy), a visible balance or a
-    # visible balance-delta becomes a hand-reconstruction oracle ("proposal
-    # executed, Hanky's balance dropped -> Hanky must own A"). Whether
-    # replay ever reveals it is deliberately undecided; defaults to still
-    # private there too, flippable via config without a schema change.
-    if is_self:
-        out["influence"] = {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}
-    elif is_replay and game.config.influence_revealed_in_replay:
-        out["influence"] = {"available": player.influence_available, "committed": player.influence_committed, "spent": player.influence_spent}
-
     if is_self or is_replay:
         out["projected_value"] = _portfolio_value(game, player.game_player_id)
-        # safe_value only means anything once the profile is visible -- see
-        # the Haircut-risk design writeup. Derived structurally from the
-        # profile's max_depth, not a certainty == 1.0 float comparison.
+        # safe_value only means anything once the profile is visible.
+        # Derived structurally from the profile's max_depth, not a
+        # certainty == 1.0 float comparison.
         if _haircut_visible(game):
             out["safe_value"] = _safe_value(game, player.game_player_id)
 
@@ -432,28 +344,6 @@ def _safe_value(game: Game, game_player_id: str) -> int:
     return sum(n - positions[h.entity_id] + 1 for h in holdings if positions[h.entity_id] > max_depth)
 
 
-def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:
-    """Mirrors engine._rising_entity -- duplicated rather than imported to
-    avoid a projections -> engine dependency; see the private Influence
-    economy design writeup."""
-    a, b = game.market[entity_a], game.market[entity_b]
-    return entity_a if a.position > b.position else entity_b
-
-
-def _owns(game: Game, player_id: str, entity_id: str) -> bool:
-    return any(
-        h.owner_player_id == player_id and h.entity_id == entity_id and h.zone == HoldingZone.PORTFOLIO
-        for h in game.holdings.values()
-    )
-
-
-def liability_for(game: Game, player_id: str, entity_a: str, entity_b: str) -> int:
-    """1 iff player_id owns the rising entity of this swap, else 0 -- the
-    read-only twin of engine._liability_for, exposed here (not underscored)
-    since routes.py's propose-cost preview endpoint needs it too."""
-    return 1 if _owns(game, player_id, _rising_entity(game, entity_a, entity_b)) else 0
-
-
 def _proposal_passed_by(proposal: Proposal | None, audience: Audience) -> bool:
     return proposal is not None and isinstance(audience, PlayerAudience) and audience.game_player_id in proposal.passed_player_ids
 
@@ -463,9 +353,10 @@ def _public_resolution_reason(reason: ProposalResolutionReason | None, audience:
     every live audience -- publicly indistinguishable from an ordinary
     withdrawal, by design. If we reported "no takers" live, we'd have
     reconstructed the exact public stigma Pass exists to avoid, one level
-    removed. ReplayAudience sees the true reason, same "revealed once
-    scored" precedent as everything else post-game. See the Pass design
-    writeup."""
+    removed. ReplayAudience sees the true reason.
+
+    NOTE (cadence/economy redesign): this masking is removed in a later
+    checkpoint once Pass becomes fully public."""
     if reason is None:
         return None
     if reason is ProposalResolutionReason.EXPIRED_ALL_PASSED and not isinstance(audience, ReplayAudience):
@@ -480,45 +371,19 @@ def _project_proposal(game: Game, proposal: Proposal, audience: Audience) -> dic
         "entity_b": proposal.swap.entity_b,
         # Locked at authoring time, unconditionally public -- bare
         # proposal entities are always public, so their locked direction
-        # is too. See the market-direction-reversal design writeup: the
-        # frontend must pin Visualize's arrows to this, never recompute
-        # from current positions.
+        # is too. The frontend must pin Visualize's arrows to this, never
+        # recompute from current positions.
         "rising_entity_id": proposal.swap.rising_entity_id,
         "proposer_id": proposal.swap.initiator_player_id,
         "status": proposal.status.value,
         "resolution_reason": _public_resolution_reason(proposal.resolution_reason, audience),
-        # Raw timestamp, not a precomputed countdown -- same pattern as
-        # haircut_reveal_at/decision_deadline_at, the client derives its own
-        # display. Public and unconditional: every viewer needs it to know
-        # whether Accept is still locked, not just the proposer. Also what
-        # a public pool's own accept-lock is gated to -- see
-        # engine._require_accept_unlocked.
-        "accept_locked_until": proposal.created_at + timedelta(seconds=game.config.accept_lock_seconds),
-        # Public and unconditional, same tier as who proposed it -- accepting
-        # is already fully public everywhere else (contrast Pass). Lets the
-        # client render "2/3 accepted" progress and know whether the viewer
-        # themselves has already pledged, without a second per-audience field.
-        # Empty except at accepters_required > 1 (5-6 players) -- below that,
-        # the one accept that exists also always resolves the proposal in the
-        # same instant, so there's nothing here to ever observe live.
-        "pending_accepter_ids": sorted(proposal.pending_accepters),
-        "accepters_required": game.config.accepters_required(len(game.players)),
     }
-    if isinstance(audience, PlayerAudience):
-        if audience.game_player_id == proposal.swap.initiator_player_id:
-            # The proposer's own locked liability -- must survive a page
-            # reload, since the "the number never changes after you press
-            # it" promise is only meaningful if it's still visible later.
-            out["my_influence_liability"] = proposal.initiator_influence_liability
-            # Anonymous, aggregate-only -- never identities. This is the
-            # proposer's one and only channel to Pass feedback; PROPOSAL_PASSED
-            # itself is ACTOR_ONLY in EVENT_VISIBILITY, so there's no live
-            # event stream of individual passes to correlate against timing.
-            out["passed_count"] = len(proposal.passed_player_ids)
-        elif proposal.status == ResolutionStatus.OPEN:
-            # A live, fresh preview of what accepting would cost *this*
-            # viewer right now -- never stored, recomputed on every read.
-            out["my_accept_liability"] = liability_for(game, audience.game_player_id, proposal.swap.entity_a, proposal.swap.entity_b)
+    if isinstance(audience, PlayerAudience) and audience.game_player_id == proposal.swap.initiator_player_id:
+        # Anonymous, aggregate-only -- never identities. This is the
+        # proposer's one and only channel to Pass feedback; PROPOSAL_PASSED
+        # itself is ACTOR_ONLY in EVENT_VISIBILITY, so there's no live
+        # event stream of individual passes to correlate against timing.
+        out["passed_count"] = len(proposal.passed_player_ids)
     return out
 
 
@@ -540,13 +405,6 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
         "initiator_id": pool.swap.initiator_player_id,
         "status": pool.status.value,
         "resolution_reason": pool.resolution_reason.value if pool.resolution_reason else None,
-        # Same "who's pledged" transparency as _project_proposal, and same
-        # reasoning for staying unconditional (not gated behind
-        # can_see_contents) -- accepting is already public, and this
-        # doesn't reveal entity_c/entity_d. Always [] / 1 for a private
-        # pool -- see GameConfig.accepters_required's own exemption.
-        "pending_accepter_ids": sorted(pool.pending_accepters),
-        "accepters_required": 1 if pool.visibility is PoolVisibility.PRIVATE else game.config.accepters_required(len(game.players)),
     }
     if can_see_contents:
         out["entity_c"] = pool.swap.entity_a
@@ -554,24 +412,6 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
         # Same visibility tier as entity_c/entity_d -- direction is
         # content, not metadata, for a still-private pool.
         out["rising_entity_id"] = pool.swap.rising_entity_id
-    if isinstance(audience, PlayerAudience) and can_see_contents:
-        if audience.game_player_id == pool.swap.initiator_player_id:
-            out["my_influence_liability"] = pool.initiator_influence_liability
-        elif pool.status == ResolutionStatus.OPEN:
-            # Mirrors engine._handle_accept_pool's combine rule: base-leg
-            # bit (locked, if this viewer authored the base proposal;
-            # fresh otherwise) OR pool-leg bit (always fresh), capped at 1.
-            base = game.proposals.get(pool.base_proposal_id)
-            base_leg_liability = 0
-            if base is not None:
-                is_base_author = audience.game_player_id == base.swap.initiator_player_id
-                base_leg_liability = (
-                    base.initiator_influence_liability
-                    if is_base_author
-                    else liability_for(game, audience.game_player_id, base.swap.entity_a, base.swap.entity_b)
-                )
-            pool_leg_liability = liability_for(game, audience.game_player_id, pool.swap.entity_a, pool.swap.entity_b)
-            out["my_accept_liability"] = 1 if (base_leg_liability == 1 or pool_leg_liability == 1) else 0
     return out
 
 
@@ -592,12 +432,6 @@ def _pool_insiders(game: Game, pool: Pool) -> set[str]:
     if base is not None:
         insiders.add(base.swap.initiator_player_id)
     return insiders
-
-
-# Zones where even the owner hasn't actually seen the entity yet, live --
-# the `scored` branch above never consults this, everything's revealed at
-# game end regardless of zone.
-_UNREVEALED_TO_OWNER_ZONES = frozenset({HoldingZone.RESERVE_UNREVEALED, HoldingZone.BURNED_UNSEEN, HoldingZone.SURRENDERED_UNUSED})
 
 
 def _holding_view(h: Holding, lookup: dict[str, ThemeEntityDefinition], *, reveal: bool = True) -> dict:

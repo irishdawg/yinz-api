@@ -60,10 +60,6 @@ def _accept_pool(game, pool_id, actor):
     )
 
 
-def _reserve_of(game, player_id):
-    return next(h for h in game.holdings.values() if h.owner_player_id == player_id and h.zone.value == "reserve_unrevealed")
-
-
 # --------------------------------------------------------------------------
 # Locking + non-crossing movement leaves a negotiation valid
 # --------------------------------------------------------------------------
@@ -108,7 +104,6 @@ def test_crossing_voids_the_proposal_and_cascades_to_attached_pools():
 
     d, e = [eid for eid in game.market if eid not in (a, b, c)][:2]
     pool_id = _pool(game, hanky, proposal_id, d, e)
-    initiator_committed_before = game.player_by_id(hanky).influence_committed
 
     # An unrelated b<->c swap: b takes c's (better-than-a) position, so
     # b now sits BETTER than a -- the a<->b relationship has crossed.
@@ -122,12 +117,6 @@ def test_crossing_voids_the_proposal_and_cascades_to_attached_pools():
     pool = game.pools[pool_id]
     assert pool.status == ResolutionStatus.RESOLVED
     assert pool.resolution_reason == PoolResolutionReason.BASE_PROPOSAL_VOIDED
-
-    # No Influence spent by the voided cascade -- if the pool had a
-    # committed liability, it refunds to available, never to spent.
-    hanky_player = game.player_by_id(hanky)
-    if initiator_committed_before == 1:
-        assert hanky_player.influence_committed == 0
 
     reasons = [ev.payload.get("reason") for ev in events if ev.type.value in ("PROPOSAL_RESOLVED", "POOL_RESOLVED")]
     assert "voided_market_swung" in reasons
@@ -158,35 +147,6 @@ def test_pool_only_leg_crossing_voids_just_the_pool():
     proposal = game.proposals[proposal_id]
     assert proposal.status == ResolutionStatus.OPEN
     assert proposal.resolution_reason is None
-
-
-# --------------------------------------------------------------------------
-# Same rule, triggered via Stage 5's unilateral path -- one shared choke point
-# --------------------------------------------------------------------------
-
-
-def test_burn_reserve_for_swap_also_triggers_invalidation():
-    game = make_started_game(2)
-    tedy, mortia = [p.game_player_id for p in game.players]
-    a, b, c = list(game.market.keys())[:3]
-    _force_order(game, c, a, b)  # c best, a middle, b worst -- b rises against a
-
-    proposal_id = _propose(game, tedy, a, b)
-    assert game.proposals[proposal_id].swap.rising_entity_id == b
-
-    reserve = _reserve_of(game, mortia)
-    engine.handle_command(
-        game,
-        command_type="BURN_RESERVE_FOR_SWAP",
-        payload={"reserve_holding_id": reserve.holding_id, "entity_a": b, "entity_b": c},
-        actor_game_player_id=mortia,
-        expected_version=None,
-        now=now(),
-    )
-
-    proposal = game.proposals[proposal_id]
-    assert proposal.status == ResolutionStatus.RESOLVED
-    assert proposal.resolution_reason == ProposalResolutionReason.VOIDED_MARKET_SWUNG
 
 
 # --------------------------------------------------------------------------

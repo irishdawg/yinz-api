@@ -1,5 +1,10 @@
 """The event vocabulary — domain model §05. Every event is stored unredacted
-in the ledger; visibility is applied at projection time, not at write time."""
+in the ledger; visibility is applied at projection time, not at write time.
+
+Cadence/economy redesign (prototype branch), checkpoint 1: removes every
+event exclusive to Influence, Market Correction, the gameplay clock, and the
+old Reserve/Pickup/unilateral-burn mechanic. Arbitration, Boost, and
+Move-driven events are added in later checkpoints, not here."""
 
 from __future__ import annotations
 
@@ -17,58 +22,27 @@ class EventType(StrEnum):
     GAME_STARTED = "GAME_STARTED"
     MARKET_INITIALIZED = "MARKET_INITIALIZED"
     PORTFOLIO_DEALT = "PORTFOLIO_DEALT"
-    RESERVES_DEALT = "RESERVES_DEALT"
     HAIRCUT_PROFILE_SELECTED = "HAIRCUT_PROFILE_SELECTED"
 
     # Negotiation
     PROPOSAL_CREATED = "PROPOSAL_CREATED"
     PROPOSAL_RESOLVED = "PROPOSAL_RESOLVED"
-    # Fired instead of PROPOSAL_RESOLVED/SWAP_EXECUTED when an accept
-    # doesn't yet reach GameConfig.accepters_required (5-6 players only --
-    # below that, the first accept always executes immediately, same as
-    # ever). Fully public, actor included -- accepting is an affirmative,
-    # already-public act everywhere else in this game (contrast PASS_PROPOSAL,
-    # which stays anonymous by design), so a pledge toward it is no
-    # different. See engine._handle_accept_proposal.
-    PROPOSAL_ACCEPT_PLEDGED = "PROPOSAL_ACCEPT_PLEDGED"
-    POOL_ACCEPT_PLEDGED = "POOL_ACCEPT_PLEDGED"
     PRIVATE_POOL_CREATED = "PRIVATE_POOL_CREATED"
     PUBLIC_POOL_CREATED = "PUBLIC_POOL_CREATED"
     POOL_MADE_PUBLIC = "POOL_MADE_PUBLIC"
     POOL_RESOLVED = "POOL_RESOLVED"
     SWAP_EXECUTED = "SWAP_EXECUTED"
-    PICKUP_STARTED = "PICKUP_STARTED"
-    PICKUP_COMPLETED = "PICKUP_COMPLETED"
-    PICKUP_FAILED = "PICKUP_FAILED"
-    RESERVE_BURNED_FOR_SWAP = "RESERVE_BURNED_FOR_SWAP"
     READY_TO_CLOSE_CHANGED = "READY_TO_CLOSE_CHANGED"  # ledger only, actor-visible live
     # ledger only, actor-visible live -- see PASS_PROPOSAL. Never shown to
     # the proposer or anyone else; the proposer's only channel is the
     # aggregate passed_count on the live proposal projection.
+    #
+    # NOTE (cadence/economy redesign): this stays ACTOR_ONLY in checkpoint 1
+    # only because the visibility flip to PUBLIC is scoped to a later
+    # checkpoint alongside the rest of the Pass/narrowing rework.
     PROPOSAL_PASSED = "PROPOSAL_PASSED"
-    # Fired by apply_due_time_transitions once haircut_reveal_fraction of
-    # the clock has elapsed -- see the Haircut-risk design writeup. A game
-    # that closes via the ready-threshold before this fires never sees it
-    # live; project() reveals the profile anyway once phase is SCORED.
-    HAIRCUT_RISK_REVEALED = "HAIRCUT_RISK_REVEALED"
-    # 2-player-only anti-stagnation mechanic -- see the Market Correction
-    # design writeup. OFFERED's payload is deliberately minimal
-    # ({correction_id, expires_at}, never entities/displacement).
-    # RESOLVED's payload always carries the full `moves` detail
-    # internally (so a future Replay build gets full transparency for
-    # free) but project_events redacts `moves` live unless
-    # reason == "triggered", the same bespoke-special-case treatment
-    # PROPOSAL_RESOLVED's EXPIRED_ALL_PASSED masking already uses.
-    MARKET_CORRECTION_OFFERED = "MARKET_CORRECTION_OFFERED"
-    MARKET_CORRECTION_RESOLVED = "MARKET_CORRECTION_RESOLVED"
-    # Fired the instant every seated player's influence_available hits 0 at
-    # once -- see engine._maybe_topup_zero_influence. Payload carries only
-    # {amount}, applied identically to every player; nothing per-player to
-    # redact.
-    INFLUENCE_TOPPED_UP = "INFLUENCE_TOPPED_UP"
 
     # Close & scoring
-    UNILATERAL_WINDOW_CLOSED = "UNILATERAL_WINDOW_CLOSED"
     CLOSE_THRESHOLD_REACHED = "CLOSE_THRESHOLD_REACHED"
     MARKET_CLOSED = "MARKET_CLOSED"
     PORTFOLIOS_REVEALED = "PORTFOLIOS_REVEALED"

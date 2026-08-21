@@ -17,7 +17,7 @@ from gotiate.domain import engine, themes
 from gotiate.domain.entities import CommandReceipt, CommandStatus, Game, GameConfig
 from gotiate.domain.errors import DomainError, IllegalCommandError, StaleVersionError
 from gotiate.domain.errors import NotFoundError as DomainNotFoundError
-from gotiate.domain.projections import PlayerAudience, PublicAudience, liability_for, project, project_events
+from gotiate.domain.projections import PlayerAudience, PublicAudience, project, project_events
 from gotiate.persistence.player_names import NoAvailableNameError, PlayerNameRepository
 from gotiate.persistence.repository import GameRepository
 
@@ -255,29 +255,6 @@ async def get_game_events(
     return project_events(game, events, audience)
 
 
-@router.get("/{game_id}/propose-cost")
-async def get_propose_cost(
-    game_id: str,
-    entity_a: str,
-    entity_b: str,
-    auth_user_id: str = Depends(get_auth_user_id),
-    repo: GameRepository = Depends(get_repository),
-) -> dict:
-    """Self-only preview of what a not-yet-submitted PROPOSE_SWAP would
-    cost this player, so the frontend never has to reimplement the
-    liability rule (see the private Influence economy design) -- the
-    button just displays whatever this returns."""
-    game = await repo.get(game_id)
-    if game is None:
-        raise HTTPException(status_code=404, detail="no such game")
-    player = game.player_by_auth_id(auth_user_id)
-    if player is None:
-        raise HTTPException(status_code=403, detail="you are not seated in this game")
-    if entity_a == entity_b or entity_a not in game.market or entity_b not in game.market:
-        raise HTTPException(status_code=422, detail="entity_a and entity_b must be two different market entities")
-    return {"liability": liability_for(game, player.game_player_id, entity_a, entity_b)}
-
-
 @router.post("/{game_id}/commands")
 async def submit_command(
     game_id: str,
@@ -292,9 +269,9 @@ async def submit_command(
     async with repo.lock_for(game_id):
         # Re-fetch under the lock, same reasoning as join_game -- and
         # re-derive `player` from this fresh game, not the pre-lock one,
-        # since it's the same class of staleness (a player's
-        # ready_to_close/influence could equally be stale between the two
-        # reads, even though today's 403 check below doesn't depend on it).
+        # since it's the same class of staleness (a player's own mutable
+        # state could equally be stale between the two reads, even though
+        # today's 403 check below doesn't depend on it).
         game = await repo.get(game_id)
         if game is None:
             raise HTTPException(status_code=404, detail="no such game")

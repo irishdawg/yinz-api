@@ -205,22 +205,6 @@ def test_auto_expires_only_once_every_other_player_has_passed():
     assert any(e.type.value == "PROPOSAL_RESOLVED" for e in events)
 
 
-def test_auto_expiry_refunds_committed_influence():
-    game = make_started_game(3)
-    tedy, mortia, hanky = [p.game_player_id for p in game.players]
-    entity_a, entity_b = find_swap_pair(game, tedy, owned_should_rise=True)
-    before = game.player_by_id(tedy).influence_available
-    proposal_id = _propose(game, tedy, entity_a, entity_b)
-    assert game.player_by_id(tedy).influence_committed == 1
-
-    _pass(game, proposal_id, mortia)
-    _pass(game, proposal_id, hanky)
-
-    tedy_player = game.player_by_id(tedy)
-    assert tedy_player.influence_committed == 0
-    assert tedy_player.influence_available == before
-
-
 # --------------------------------------------------------------------------
 # "Publicly indistinguishable from a withdrawal" -- the whole social contract
 # --------------------------------------------------------------------------

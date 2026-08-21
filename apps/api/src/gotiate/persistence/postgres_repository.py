@@ -25,6 +25,14 @@ a real concurrent store, both handled here rather than left as latent bugs:
    excludes every other writer for this game_id, so a plain sequential read
    on the same connection is already consistent, and psycopg won't let you
    set isolation level mid-transaction anyway.
+
+Cadence/economy redesign (prototype branch), checkpoint 1: stops
+reading/writing every column exclusive to Influence, Market Correction, the
+gameplay clock, and the old Reserve/Pickup mechanic; starts writing the new
+Moves/Boosts/active-negotiation columns. The now-unused legacy columns
+(influence_*, pending_pickup, max_duration_s, unilateral_cutoff_at, ...)
+are left in place on the live schema until a later checkpoint's forward
+migration drops them — never edit an applied migration, see DATABASE.md.
 """
 
 from __future__ import annotations
@@ -51,8 +59,6 @@ from gotiate.domain.entities import (
     Holding,
     HoldingZone,
     MarketEntity,
-    PendingMarketCorrection,
-    PendingPickup,
     Pool,
     PoolResolutionReason,
     PoolVisibility,
@@ -128,7 +134,7 @@ class PostgresGameRepository:
                     ),
                 )
                 for player in game.players:
-                    await self._upsert_player(cur, game.id, player, game.holdings)
+                    await self._upsert_player(cur, game.id, player)
                 if game.host_player_id is not None:
                     await cur.execute("update games set host_player_id = %s where id = %s", (game.host_player_id, game.id))
 
@@ -140,12 +146,10 @@ class PostgresGameRepository:
                     update games set
                         version = %s, next_seq_no = %s, phase = %s, host_player_id = %s,
                         config = %s, lobby_reminder_deadline_at = %s, started_at = %s,
-                        max_duration_s = %s, unilateral_cutoff_at = %s, unilateral_window_closed_at = %s,
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
-                        haircut_profile = %s, haircut_reveal_at = %s, haircut_profile_revealed_at = %s,
+                        haircut_profile = %s, haircut_profile_revealed_at = %s,
                         realized_haircut_depth = %s, cancellation_reason = %s,
-                        pending_market_correction = %s, last_negotiated_execution_at = %s,
-                        market_correction_cooldown_until = %s
+                        active_proposal_id = %s, boosts_expired = %s
                     where id = %s
                     """,
                     (
@@ -156,26 +160,21 @@ class PostgresGameRepository:
                         Json(game.config.model_dump(mode="json")),
                         game.lobby_reminder_deadline_at,
                         game.started_at,
-                        game.max_duration_s,
-                        game.unilateral_cutoff_at,
-                        game.unilateral_window_closed_at,
                         game.close_threshold,
                         game.closed_at,
                         game.close_reason.value if game.close_reason else None,
                         game.scored_at,
                         Json(game.haircut_profile.model_dump(mode="json")) if game.haircut_profile else None,
-                        game.haircut_reveal_at,
                         game.haircut_profile_revealed_at,
                         game.realized_haircut_depth,
                         game.cancellation_reason.value if game.cancellation_reason else None,
-                        Json(game.pending_market_correction.model_dump(mode="json")) if game.pending_market_correction else None,
-                        game.last_negotiated_execution_at,
-                        game.market_correction_cooldown_until,
+                        game.active_proposal_id,
+                        game.boosts_expired,
                         game.id,
                     ),
                 )
                 for player in game.players:
-                    await self._upsert_player(cur, game.id, player, game.holdings)
+                    await self._upsert_player(cur, game.id, player)
                 for entity in game.market.values():
                     # theme_set_id/version live on game.config, not on
                     # MarketEntity itself — a denormalization footgun caught
@@ -192,15 +191,12 @@ class PostgresGameRepository:
                     await cur.execute(
                         """
                         insert into proposals (id, game_id, entity_a, entity_b, rising_entity_id, initiator_player_id,
-                                                initiator_influence_liability, created_at,
-                                                status, resolved_at_seq_no, resolved_by_player_id, resolution_reason,
-                                                pending_accepters)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                created_at, status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
-                            resolution_reason = excluded.resolution_reason,
-                            pending_accepters = excluded.pending_accepters
+                            resolution_reason = excluded.resolution_reason
                         """,
                         (
                             proposal.proposal_id,
@@ -209,13 +205,11 @@ class PostgresGameRepository:
                             proposal.swap.entity_b,
                             proposal.swap.rising_entity_id,
                             proposal.swap.initiator_player_id,
-                            proposal.initiator_influence_liability,
                             proposal.created_at,
                             proposal.status.value,
                             proposal.resolved_at_seq_no,
                             proposal.resolved_by_player_id,
                             proposal.resolution_reason.value if proposal.resolution_reason else None,
-                            Json(proposal.pending_accepters),
                         ),
                     )
                     # Add-only, never removed -- a plain insert-or-ignore per
@@ -234,16 +228,13 @@ class PostgresGameRepository:
                     await cur.execute(
                         """
                         insert into pools (id, game_id, base_proposal_id, initiator_player_id, visibility,
-                                           initiator_influence_liability,
-                                           status, resolved_at_seq_no, resolved_by_player_id, resolution_reason,
-                                           pending_accepters)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                           status, resolved_at_seq_no, resolved_by_player_id, resolution_reason)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         on conflict (id) do update set
                             visibility = excluded.visibility,
                             status = excluded.status, resolved_at_seq_no = excluded.resolved_at_seq_no,
                             resolved_by_player_id = excluded.resolved_by_player_id,
-                            resolution_reason = excluded.resolution_reason,
-                            pending_accepters = excluded.pending_accepters
+                            resolution_reason = excluded.resolution_reason
                         """,
                         (
                             pool.pool_id,
@@ -251,12 +242,10 @@ class PostgresGameRepository:
                             pool.base_proposal_id,
                             pool.swap.initiator_player_id,
                             pool.visibility.value,
-                            pool.initiator_influence_liability,
                             pool.status.value,
                             pool.resolved_at_seq_no,
                             pool.resolved_by_player_id,
                             pool.resolution_reason.value if pool.resolution_reason else None,
-                            Json(pool.pending_accepters),
                         ),
                     )
                     await cur.execute(
@@ -290,14 +279,8 @@ class PostgresGameRepository:
                             holding.revealed_at_seq_no,
                         ),
                     )
-    async def _upsert_player(self, cur: psycopg.AsyncCursor, game_id: str, player: GamePlayer, holdings: dict[str, Holding]) -> None:
-        # reserve_count_remaining has no corresponding GamePlayer field —
-        # it's derived today only in projections.py, and the schema comment
-        # says as much ("FastAPI's obligation to keep in sync"). Recomputed
-        # here from the same holdings collection every write.
-        reserve_count_remaining = sum(
-            1 for h in holdings.values() if h.owner_player_id == player.game_player_id and h.zone == HoldingZone.RESERVE_UNREVEALED
-        )
+
+    async def _upsert_player(self, cur: psycopg.AsyncCursor, game_id: str, player: GamePlayer) -> None:
         # display_name stored as text, deliberately not a name_seed_id FK --
         # player_name_seeds is reference/catalog data, and a game's roster
         # must stay frozen at assignment time even if a seed name is later
@@ -305,16 +288,13 @@ class PostgresGameRepository:
         # versioning already exists for elsewhere in this schema.
         await cur.execute(
             """
-            insert into game_players (id, game_id, seat, display_name, is_golden_name, influence_available,
-                                       influence_committed, influence_spent, reserve_count_remaining)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            insert into game_players (id, game_id, seat, display_name, is_golden_name, moves_remaining, boosts_remaining)
+            values (%s, %s, %s, %s, %s, %s, %s)
             on conflict (id) do update set
                 seat = excluded.seat, display_name = excluded.display_name,
                 is_golden_name = excluded.is_golden_name,
-                influence_available = excluded.influence_available,
-                influence_committed = excluded.influence_committed,
-                influence_spent = excluded.influence_spent,
-                reserve_count_remaining = excluded.reserve_count_remaining
+                moves_remaining = excluded.moves_remaining,
+                boosts_remaining = excluded.boosts_remaining
             """,
             (
                 player.game_player_id,
@@ -322,26 +302,22 @@ class PostgresGameRepository:
                 player.seat,
                 player.display_name,
                 player.is_golden_name,
-                player.influence_available,
-                player.influence_committed,
-                player.influence_spent,
-                reserve_count_remaining,
+                player.moves_remaining,
+                player.boosts_remaining,
             ),
         )
         await cur.execute(
             """
-            insert into game_player_private (game_player_id, game_id, auth_user_id, ready_to_close, pending_pickup)
-            values (%s, %s, %s, %s, %s)
+            insert into game_player_private (game_player_id, game_id, auth_user_id, ready_to_close)
+            values (%s, %s, %s, %s)
             on conflict (game_player_id) do update set
-                ready_to_close = excluded.ready_to_close,
-                pending_pickup = excluded.pending_pickup
+                ready_to_close = excluded.ready_to_close
             """,
             (
                 player.game_player_id,
                 game_id,
                 player.auth_user_id,
                 player.ready_to_close,
-                Json(player.pending_pickup.model_dump(mode="json")) if player.pending_pickup else None,
             ),
         )
 
@@ -554,7 +530,6 @@ def _to_game(
     for pr in player_rows:
         gpid = str(pr["id"])
         priv: dict[str, Any] = private_rows.get(gpid, {})
-        pending_pickup_json = priv.get("pending_pickup")
         players.append(
             GamePlayer(
                 game_player_id=gpid,
@@ -566,11 +541,9 @@ def _to_game(
                 seat=pr["seat"],
                 display_name=pr["display_name"],
                 is_golden_name=pr["is_golden_name"],
-                influence_available=pr["influence_available"],
-                influence_committed=pr["influence_committed"],
-                influence_spent=pr["influence_spent"],
+                moves_remaining=pr["moves_remaining"],
+                boosts_remaining=pr["boosts_remaining"],
                 ready_to_close=priv.get("ready_to_close", False),
-                pending_pickup=PendingPickup.model_validate(pending_pickup_json) if pending_pickup_json else None,
             )
         )
 
@@ -592,14 +565,12 @@ def _to_game(
                 initiator_player_id=str(pr["initiator_player_id"]),
                 rising_entity_id=pr["rising_entity_id"],
             ),
-            initiator_influence_liability=pr["initiator_influence_liability"],
             created_at=pr["created_at"],
             status=ResolutionStatus(pr["status"]),
             resolved_at_seq_no=pr["resolved_at_seq_no"],
             resolved_by_player_id=str(pr["resolved_by_player_id"]) if pr["resolved_by_player_id"] else None,
             resolution_reason=ProposalResolutionReason(pr["resolution_reason"]) if pr["resolution_reason"] else None,
             passed_player_ids=passed_player_ids_by_proposal.get(pid, set()),
-            pending_accepters=pr["pending_accepters"],
         )
 
     pools: dict[str, Pool] = {}
@@ -615,13 +586,11 @@ def _to_game(
                 initiator_player_id=str(por["initiator_player_id"]),
                 rising_entity_id=contents.get("rising_entity_id", ""),
             ),
-            initiator_influence_liability=por["initiator_influence_liability"],
             visibility=PoolVisibility(por["visibility"]),
             status=ResolutionStatus(por["status"]),
             resolved_at_seq_no=por["resolved_at_seq_no"],
             resolved_by_player_id=str(por["resolved_by_player_id"]) if por["resolved_by_player_id"] else None,
             resolution_reason=PoolResolutionReason(por["resolution_reason"]) if por["resolution_reason"] else None,
-            pending_accepters=por["pending_accepters"],
         )
 
     holdings: dict[str, Holding] = {}
@@ -647,9 +616,6 @@ def _to_game(
         config=GameConfig.model_validate(game_row["config"]),
         lobby_reminder_deadline_at=game_row["lobby_reminder_deadline_at"],
         started_at=game_row["started_at"],
-        max_duration_s=game_row["max_duration_s"],
-        unilateral_cutoff_at=game_row["unilateral_cutoff_at"],
-        unilateral_window_closed_at=game_row["unilateral_window_closed_at"],
         close_threshold=game_row["close_threshold"],
         closed_at=game_row["closed_at"],
         close_reason=CloseReason(game_row["close_reason"]) if game_row["close_reason"] else None,
@@ -661,16 +627,10 @@ def _to_game(
         proposals=proposals,
         pools=pools,
         haircut_profile=HaircutProfile.model_validate(game_row["haircut_profile"]) if game_row["haircut_profile"] else None,
-        haircut_reveal_at=game_row["haircut_reveal_at"],
         haircut_profile_revealed_at=game_row["haircut_profile_revealed_at"],
         realized_haircut_depth=game_row["realized_haircut_depth"],
-        pending_market_correction=(
-            PendingMarketCorrection.model_validate(game_row["pending_market_correction"])
-            if game_row["pending_market_correction"]
-            else None
-        ),
-        last_negotiated_execution_at=game_row["last_negotiated_execution_at"],
-        market_correction_cooldown_until=game_row["market_correction_cooldown_until"],
+        active_proposal_id=str(game_row["active_proposal_id"]) if game_row["active_proposal_id"] else None,
+        boosts_expired=game_row["boosts_expired"],
     )
 
 

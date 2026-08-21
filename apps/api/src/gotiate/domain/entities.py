@@ -2,6 +2,12 @@
 
 Pure data. No I/O, no FastAPI, no persistence. `Game` is the authoritative
 aggregate: one instance per match, mutated only by `domain.engine`.
+
+Cadence/economy redesign (prototype branch): Influence, the gameplay clock,
+Market Correction, Accept Lock, and the old Reserve/Pickup/unilateral-burn
+mechanic are removed here (checkpoint 1). Moves, Boosts, and Arbitration are
+scaffolded as inert fields in this checkpoint and wired up for real in later
+checkpoints -- see the redesign plan artifact for the full sequence.
 """
 
 from __future__ import annotations
@@ -32,13 +38,8 @@ class GamePhase(StrEnum):
 
 
 class HoldingZone(StrEnum):
-    RESERVE_UNREVEALED = "reserve_unrevealed"
-    PICKUP_PENDING = "pickup_pending"
     PORTFOLIO = "portfolio"
     DISCARDED = "discarded"
-    PICKUP_SURRENDERED = "pickup_surrendered"  # revealed via Pick Up, then failed
-    SURRENDERED_UNUSED = "surrendered_unused"  # never touched, forced at close
-    BURNED_UNSEEN = "burned_unseen"  # unilateral swap, never revealed to owner
 
 
 class ResolutionStatus(StrEnum):
@@ -48,6 +49,10 @@ class ResolutionStatus(StrEnum):
 
 class ProposalResolutionReason(StrEnum):
     EXECUTED = "executed"
+    # NOTE (cadence/economy redesign): WITHDRAW_PROPOSAL itself is removed
+    # from the rules in a later checkpoint (rule 4) -- this reason survives
+    # until then since engine._handle_withdraw_proposal is still present in
+    # checkpoint 1.
     WITHDRAWN_BY_INITIATOR = "withdrawn_by_initiator"
     MARKET_CLOSED = "market_closed"
     # Every other seated player has PASS_PROPOSAL'd -- mathematically dead,
@@ -55,6 +60,10 @@ class ProposalResolutionReason(StrEnum):
     # _public_resolution_reason masks it back to WITHDRAWN_BY_INITIATOR for
     # every live audience, so Pass never becomes a public signal. See the
     # Pass design writeup.
+    #
+    # NOTE (cadence/economy redesign): Pass anonymity/masking is retired in
+    # a later checkpoint (Pass becomes fully public), at which point this
+    # reason becomes directly public too. Left unchanged in checkpoint 1.
     EXPIRED_ALL_PASSED = "expired_all_passed"
     # The market moved under this proposal's locked direction (see
     # SwapIntent.rising_entity_id) -- the opposite of EXPIRED_ALL_PASSED:
@@ -85,18 +94,11 @@ class PoolVisibility(StrEnum):
     PUBLIC = "public"
 
 
-class PickupFailureReason(StrEnum):
-    DECISION_TIMEOUT = "decision_timeout"
-    MARKET_CLOSED = "market_closed"
-    # Player-triggered "Skip" -- same _fail_pending_pickup machinery as a
-    # timeout, distinct reason so replay/analytics can tell "chose to
-    # skip" from "ran out of time". See DECLINE_PICKUP.
-    DECLINED_BY_PLAYER = "declined_by_player"
-
-
 class CloseReason(StrEnum):
-    TIME_EXPIRED = "TIME_EXPIRED"
     READY_THRESHOLD = "READY_THRESHOLD"
+    # NOTE (cadence/economy redesign): TIME_EXPIRED is gone -- there is no
+    # gameplay clock. MOVES_EXHAUSTED is added in a later checkpoint once
+    # the Move economy itself exists.
     # No OPTIONALITY_EXHAUSTED for V1 — deliberately deferred, see decision log §10.
 
 
@@ -211,88 +213,19 @@ class GameConfig(BaseModel):
             6: SetupQualityConfig(max_pair_overlap=2, reject_isolated_player=True),
         }
     )
-    # Flat 9 minutes regardless of player count -- was previously scaled
-    # per count (8/12/16/20/24 min), deliberately flattened; every other
-    # clock-relative pacing point (haircut_reveal_fraction,
-    # unilateral_cutoff_fraction, ...) stays a pure fraction of this, so
-    # larger games now get proportionally less time per trade, by design.
-    max_clock_seconds_by_players: dict[int, int] = Field(default_factory=lambda: {n: 540 for n in range(2, 7)})
-    # Retires waterline_baseline_v1 entirely -- see the Haircut-risk design
-    # writeup. A fresh profile is generated at random per game (see
-    # engine._generate_random_haircut_profile), not chosen from a fixed
-    # list of curated shapes -- an earlier version used 5 named curves per
-    # player count (Cliff/Deep burn/Brutal plateau/Moderate/Mild), retired
-    # once real playtesting confirmed players were starting to recognize
-    # and play around specific named shapes rather than treat the risk as
-    # genuinely unknown each game. The generator still targets the same
-    # structural depth (round(market_size_by_players[n] * risk_depth_fraction)
-    # for that n) and the same rough per-position bounds those curves
-    # embodied, just drawn fresh instead of picked.
-    #
-    # The profile is chosen and locked at START_GAME but stays hidden until
-    # this fraction of the negotiation clock has elapsed -- see
-    # engine._handle_start_game / apply_due_time_transitions.
-    haircut_reveal_fraction: float = 0.5
     # Target risky depth = round(market_size * risk_depth_fraction) -- see
     # the worked table in the design writeup (11->4, 13->5, 15->5, 17->6).
     risk_depth_fraction: float = 0.35
-    starting_influence: int = 10
-    unilateral_cutoff_fraction: float = 0.10
     portfolio_shape: list[int] = Field(default_factory=lambda: [2, 1, 1, 1])
-    reserve_count: int = 2
-    # 5s was too short to read and decide, especially on a phone -- real
-    # playtest feedback. See the Stage 5 Reserve UX overhaul design writeup.
-    pickup_decision_seconds: float = 12.0
-    pickup_transport_grace_ms: int = 500
-    # Blocks ACCEPT_PROPOSAL (and ACCEPT_POOL on a public pool, gated to
-    # the base proposal's own lock) for this long after PROPOSAL_CREATED --
-    # gives the room a moment to actually read a new proposal before
-    # someone already at the keyboard snap-accepts it. Nothing else is
-    # blocked -- withdraw/pass/pool/private-pool-accept all still work
-    # immediately, see engine._handle_accept_proposal / _handle_accept_pool.
-    # Was 4.0 -- real playtest feedback: in-person, the view poll's own
-    # lag ate a couple of seconds off the top, so 4s landed more like 2s
-    # in practice. 7s gives real margin against that lag, not just the
-    # bare reading time.
-    accept_lock_seconds: float = 7.0
-    # Applied once, flat, the instant every seated player's
-    # influence_available hits 0 at the same time -- see
-    # engine._maybe_topup_zero_influence. Keeps the negotiation from
-    # stalling out entirely once Influence is fully spent everywhere.
-    zero_influence_topup_amount: int = 2
     allow_public_pools: bool = True
     allow_private_pools: bool = True
     ready_to_close_revealed_in_replay: bool = False
-    # Undecided on purpose (see private Influence economy discussion) --
-    # defaults to still-private in replay, trivially flippable later
-    # without a schema change.
-    influence_revealed_in_replay: bool = False
 
-    # 2-player-only anti-stagnation mechanic -- flat, not player-count
-    # -keyed, since this never applies to any other count; a per-count
-    # dict would be premature. Grounded in the real 2p clock/market
-    # (480s, 11-slot -- widened from 9 specifically to give the
-    # correction's mutually-unowned-destination search more room; see
-    # the Market Correction market-size writeup) -- see the Market
-    # Correction design writeup. 90s ~= 18.75% of the 480s 2p clock --
-    # long enough that active negotiation never trips it, short enough
-    # to matter within an 8-minute game.
-    market_correction_stagnation_seconds: float = 90.0
-    # 15s, not the originally-drafted 45s -- "that turns the grenade
-    # into patio furniture."
-    market_correction_offer_seconds: float = 15.0
-    # Prevents a permanently-stalled game from re-offering the instant
-    # the last one lapses -- without this, "time since last negotiated
-    # deal" alone would regenerate a correction continuously once
-    # crossed once.
-    market_correction_cooldown_seconds: float = 90.0
-    # Severity formula (see engine._market_correction_target_displacements):
-    # spread = max_spread * min(1, gap / gap_saturation); leader gets
-    # base - spread/2, trailer gets base + spread/2, both clamped to
-    # [1, market_size - 1].
-    market_correction_base_displacement_fraction: float = 0.5
-    market_correction_max_spread_fraction: float = 0.4
-    market_correction_gap_saturation_fraction: float = 1.0
+    # --- Cadence/economy redesign: Moves & Boosts (checkpoint 1 schema,
+    # checkpoint 2/4 wire up the actual gating logic) ---
+    starting_moves: int = 5
+    starting_boosts: int = 2
+    concentrate_max_copies: int = 3
 
     join_code_length: int = 7
     # Bounds the brute-force window on a live join code independent of how
@@ -300,16 +233,6 @@ class GameConfig(BaseModel):
     # locked number — flagged for confirmation, easy to tighten (e.g. to 5)
     # or loosen with a one-line config change.
     join_code_lifetime_minutes: int = 30
-
-    # The only way LOBBY -> NEGOTIATION happens is the host hitting Start --
-    # no auto-start, no headcount target. This pair exists purely so an
-    # abandoned lobby doesn't sit open forever: once lobby_reminder_seconds
-    # elapses, the host sees a "start now or ask for more time" prompt
-    # (EXTEND_LOBBY_TIMER pushes the deadline out by this same amount
-    # again, uncapped); if lobby_reminder_grace_seconds passes after that
-    # with no response, the game auto-cancels (CancellationReason.LOBBY_TIMEOUT).
-    lobby_reminder_seconds: int = 180
-    lobby_reminder_grace_seconds: int = 60
 
     # The only way LOBBY -> NEGOTIATION happens is the host hitting Start --
     # no auto-start, no headcount target. This pair exists purely so an
@@ -332,20 +255,6 @@ class GameConfig(BaseModel):
         if player_count <= 3:
             return player_count
         return math.ceil(0.75 * player_count)
-
-    def accepters_required(self, player_count: int) -> int:
-        """How many *distinct* players (not counting the proposer/pool
-        initiator) must accept before a bare proposal or public pool
-        actually executes -- 1 (today's ordinary single-accept-executes
-        behavior) at 2-4 players, 2 at 5-6. A single 1:1 deal has an
-        outsized effect on a market meant to reflect 5-6 people's
-        collective read; requiring a second accepter makes deals need
-        real consensus rather than any two players being able to move it
-        alone. Private pools are exempt regardless of player count --
-        only the base proposer is ever eligible to accept one, so there's
-        structurally never a second distinct accepter to gather. See
-        engine._handle_accept_proposal / _handle_accept_pool."""
-        return 2 if player_count >= 5 else 1
 
 
 # --------------------------------------------------------------------------
@@ -385,18 +294,8 @@ class SwapIntent(BaseModel):
 class Proposal(BaseModel):
     proposal_id: str
     swap: SwapIntent
-    # PROPOSAL_CREATED's own timestamp, duplicated onto the proposal itself
-    # -- project() only ever sees the current Game snapshot, never the
-    # event ledger, so the accept-lock (GameConfig.accept_lock_seconds)
-    # needs this stored here to be checkable/displayable at all.
+    # PROPOSAL_CREATED's own timestamp, duplicated onto the proposal itself.
     created_at: datetime
-    # Locked once, at PROPOSE_SWAP time, from the proposer's holdings at
-    # that moment -- 1 iff they own the swap's rising entity. Never
-    # recomputed later, even if their holdings or the market change before
-    # this resolves -- see domain model discussion on private Influence
-    # economy. Settled (committed->spent or committed->available) by
-    # _resolve_proposal, not mutated directly by any handler.
-    initiator_influence_liability: int = 0
     status: ResolutionStatus = ResolutionStatus.OPEN
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
@@ -405,94 +304,17 @@ class Proposal(BaseModel):
     # set never sees this proposal (or any Pool on it) in their own live
     # view again; see projections.project()'s omission filter.
     passed_player_ids: set[str] = Field(default_factory=set)
-    # player_id -> their own locked liability (0 or 1) for accepting THIS
-    # proposal, fresh at the moment they accepted -- populated once
-    # GameConfig.accepters_required(player_count) is more than 1 (5-6
-    # players). Below that threshold, the first (and only) accept settles
-    # and executes in the same instant, same as always, so this stays
-    # empty for its entire lifetime in a 2-4 player game. A liability of
-    # 1 here already moved available->committed; _resolve_proposal
-    # settles every entry here (committed->spent or committed->available)
-    # alongside the proposer's own bit, on whichever resolution reason
-    # this proposal eventually reaches -- so a pledge that never reaches
-    # threshold before the proposal is withdrawn/closed/voided is
-    # refunded, never spent. See engine._handle_accept_proposal.
-    pending_accepters: dict[str, int] = Field(default_factory=dict)
 
 
 class Pool(BaseModel):
     pool_id: str
     base_proposal_id: str
     swap: SwapIntent
-    # Same locking rule as Proposal.initiator_influence_liability, but
-    # against the pool's own swap (entity_c/entity_d) and the pooler's
-    # holdings at CREATE_POOL time.
-    initiator_influence_liability: int = 0
     visibility: PoolVisibility
     status: ResolutionStatus = ResolutionStatus.OPEN
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
     resolution_reason: PoolResolutionReason | None = None
-    # Same shape and settlement rule as Proposal.pending_accepters, but
-    # always empty for a PRIVATE pool -- only the base proposer is ever
-    # eligible to accept one, so GameConfig.accepters_required's >1
-    # threshold never applies to it regardless of player count. See
-    # engine._handle_accept_pool.
-    pending_accepters: dict[str, int] = Field(default_factory=dict)
-
-
-class PendingPickup(BaseModel):
-    pending_pickup_id: str
-    reserve_holding_id: str
-    original_portfolio_holding_ids: list[str]
-    revealed_entity_id: str
-    started_at: datetime
-    decision_deadline_at: datetime  # the pure pickup_decision_seconds figure — grace applied at check time only
-    market_version_at_start: int
-    cached_view: dict = Field(default_factory=dict)
-
-
-class MarketCorrectionMove(BaseModel):
-    """One corrective leg -- the targeted player's own holding (falling)
-    swapped against a mutually-unowned neutral entity (rising). `swap` is
-    a real SwapIntent with its own locked rising_entity_id, exactly like
-    a proposal's -- routed through the same engine._execute_swap ->
-    _invalidate_crossed_negotiations choke point, so an intervening
-    action that crosses it is caught by the exact infrastructure that
-    already protects ordinary proposals. See the Market Correction
-    design writeup."""
-
-    target_player_id: str
-    swap: SwapIntent
-
-
-class MarketCorrectionResolutionReason(StrEnum):
-    TRIGGERED = "triggered"
-    EXPIRED = "expired"
-    # Any negotiated deal (accepted proposal/pool) executed while this was
-    # pending -- unconditional, regardless of whether that deal touched
-    # either move's entities. Distinct from INVALIDATED below: the market
-    # resuming is sufficient on its own, it's not "this got structurally
-    # broken." See _handle_accept_proposal/_handle_accept_pool.
-    MARKET_RESUMED = "market_resumed"
-    # A move's locked direction crossed, or a move's source/destination
-    # ownership changed -- burns and DISCARD_HOLDING only, never
-    # negotiated deals (which always resolve as MARKET_RESUMED instead).
-    # See _market_correction_still_valid.
-    INVALIDATED = "invalidated"
-
-
-class PendingMarketCorrection(BaseModel):
-    """Hidden until triggered or resolved -- see projections.project(),
-    which exposes only {correction_id, expires_at} while this is pending,
-    never `moves`. Constructed once, in full, before either player
-    chooses; never recomputed underneath an acceptance -- see the
-    invalidation rules in engine.py. 2-player-only mechanic."""
-
-    correction_id: str
-    offered_at: datetime
-    expires_at: datetime
-    moves: list[MarketCorrectionMove]  # always exactly 2, one per player
 
 
 # --------------------------------------------------------------------------
@@ -513,11 +335,14 @@ class GamePlayer(BaseModel):
     # free-preview/reroll stage, so farming it means actually consuming one
     # of a game's <=6 seats, not just reloading a page. See player_names.py.
     is_golden_name: bool = False
-    influence_available: int
-    influence_committed: int = 0
-    influence_spent: int = 0
     ready_to_close: bool = False
-    pending_pickup: PendingPickup | None = None
+    # --- Cadence/economy redesign ---
+    # Decremented only by opening a new bare negotiation, never refunded.
+    moves_remaining: int
+    # Decremented only by USE_BOOST. Boost legality also requires
+    # `not Game.boosts_expired` and no Arbitration currently active on the
+    # game's active negotiation -- see engine.py once checkpoint 4 lands.
+    boosts_remaining: int
     # Connection/presence deliberately NOT here — that's Supabase Realtime
     # Presence, infrastructure, never authoritative state.
 
@@ -543,21 +368,16 @@ class Game(BaseModel):
     lobby_reminder_deadline_at: datetime | None = None
 
     started_at: datetime | None = None
-    max_duration_s: int | None = None
-    unilateral_cutoff_at: datetime | None = None
-    unilateral_window_closed_at: datetime | None = None
     close_threshold: int | None = None
 
-    # 2-player-only anti-stagnation mechanic -- see the Market Correction
-    # design writeup. last_negotiated_execution_at is set at START_GAME
-    # to started_at and updated only by an accepted proposal/pool
-    # (never a burn, never the correction itself); market_correction_cooldown_until
-    # is also set to started_at initially (no extra grace beyond the
-    # stagnation threshold itself), then pushed forward every time a
-    # correction is offered.
-    pending_market_correction: PendingMarketCorrection | None = None
-    last_negotiated_execution_at: datetime | None = None
-    market_correction_cooldown_until: datetime | None = None
+    # --- Cadence/economy redesign ---
+    # At most one bare negotiation open table-wide at any time. Wired up in
+    # a later checkpoint; PROPOSE_SWAP is not yet gated on it in checkpoint 1.
+    active_proposal_id: str | None = None
+    # Flips False -> True exactly once, the instant any single player's own
+    # moves_remaining first hits zero, and never resets. Wired up once
+    # Moves themselves are gating PROPOSE_SWAP (later checkpoint).
+    boosts_expired: bool = False
 
     # Chosen and locked at START_GAME, hidden until haircut_reveal_at (or
     # until the game is SCORED, whichever comes first -- see project()) --
@@ -565,8 +385,12 @@ class Game(BaseModel):
     # exactly once, at close_market, and persisted immediately; nothing
     # downstream (GAME_SCORED, project() at SCORED, replay) ever redraws
     # it, only reads it.
+    #
+    # NOTE (cadence/economy redesign): the live reveal trigger was
+    # previously a fraction of the gameplay clock; the clock is gone. A
+    # later checkpoint re-triggers this at 50% of total Move allocation
+    # consumed. Until then the profile only becomes visible once SCORED.
     haircut_profile: HaircutProfile | None = None
-    haircut_reveal_at: datetime | None = None
     haircut_profile_revealed_at: datetime | None = None
     realized_haircut_depth: int | None = None
 

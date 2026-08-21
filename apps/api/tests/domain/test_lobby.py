@@ -92,15 +92,13 @@ def test_start_game_sizes_market_and_deals_by_player_count():
 
     assert game.phase == GamePhase.NEGOTIATION
     assert len(game.market) == game.config.market_size_by_players[4]
-    assert game.max_duration_s == game.config.max_clock_seconds_by_players[4]
     for player in game.players:
         portfolio = [h for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone.value == "portfolio"]
-        reserves = [h for h in game.holdings.values() if h.owner_player_id == player.game_player_id and h.zone.value == "reserve_unrevealed"]
         assert len(portfolio) == sum(game.config.portfolio_shape)
-        assert len(reserves) == game.config.reserve_count
+        assert player.moves_remaining == game.config.starting_moves
+        assert player.boosts_remaining == game.config.starting_boosts
     assert game.haircut_profile is not None
     expected_depth = round(game.config.market_size_by_players[4] * game.config.risk_depth_fraction)
     # +1 -- one slot past the risk band itself, see
     # engine._generate_random_haircut_profile's own docstring.
     assert len(game.haircut_profile.depth_probabilities) == expected_depth + 1
-    assert game.haircut_reveal_at == game.started_at + timedelta(seconds=game.max_duration_s * game.config.haircut_reveal_fraction)

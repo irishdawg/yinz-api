@@ -11,10 +11,9 @@ def now() -> datetime:
 
 
 def later(seconds: float = 8) -> datetime:
-    """now() pushed past GameConfig.accept_lock_seconds's default (7s) --
-    pass as `now` to an ACCEPT_PROPOSAL/ACCEPT_POOL call in a test that
-    proposes and accepts back-to-back, so the accept-lock grace period
-    (engine._require_accept_unlocked) doesn't reject it."""
+    """now() pushed a few seconds forward -- pass as `now` to a command
+    that logically follows an earlier one in the same test, so timestamps
+    stay monotonic even when the two calls happen in the same instant."""
     return now() + timedelta(seconds=seconds)
 
 
