@@ -4,9 +4,10 @@
 `apps/api/src/gotiate/domain/` and verified by `apps/api/tests/`.** It is
 authoritative for *current* rules and invariants. It intentionally contains
 no history, no rationale for why a rule changed over time, and no
-description of retired mechanics (there is no "Waterline" scoring model in
-this codebase anymore; if you find a reference to it anywhere, that
-reference is stale).
+description of retired mechanics (there is no "Waterline" scoring model,
+no Influence economy, no Market Correction, no gameplay clock, and no
+Reserve/Pickup mechanic in this codebase anymore; if you find a reference
+to any of them anywhere, that reference is stale).
 
 **If this document and the code/tests ever disagree, the code and tests
 win.** Domain logic lives in `apps/api/src/gotiate/domain/engine.py`
@@ -27,18 +28,25 @@ today.
 
 ## 1. What Gotiate is
 
-A real-time, 2–6 player negotiation game. A shared "market" of themed
-entities (fictional companies, dragons, cats — see `theme_data/`) is
-arranged on a linear scale from position 1 (best) to position N (worst).
-Each player secretly owns some entities (their **portfolio**) and holds a
-small number of secret **reserves**. Players negotiate swaps to move their
-own holdings toward better positions, using a scarce private currency
-(**Influence**) that only costs something when a swap actually benefits the
-mover. At the end of the game, the top few positions on the market carry a
-random chance of being wiped to zero (**Haircut risk**) — a public
-probability distribution, revealed partway through the clock, that turns
-"climb as high as possible" into a real risk/reward decision rather than a
-dominant strategy.
+A 2–6 player negotiation game, clockless except for two short local
+decision windows. A shared "market" of themed entities (fictional
+companies, dragons, cats — see `theme_data/`) is arranged on a linear
+scale from position 1 (best) to position N (worst). Each player secretly
+owns some entities (their **portfolio**). Players negotiate swaps to move
+their own holdings toward better positions — each player gets a fixed
+number of **Moves** (default 5), spent only to open a new negotiation and
+never refunded, with **at most one negotiation open table-wide at any
+time**: propose, then everyone else responds (Accept, counter with a
+Pool, or Pass) until it resolves or narrows down to its final two active
+participants, who may then force a resolution via **Arbitration**. Each
+player also gets a small number of **Boosts** (default 2) — unilateral,
+non-negotiated actions (Concentrate, Draw/Refresh, Force Swap) that expire
+table-wide the instant any one player spends their last Move. At the end
+of the game, the top few positions on the market carry a random chance of
+being wiped to zero (**Haircut risk**) — a public probability
+distribution, revealed once cumulative Moves spent crosses the halfway
+mark, that turns "climb as high as possible" into a real risk/reward
+decision rather than a dominant strategy.
 
 ---
 
@@ -78,8 +86,8 @@ minimal "Closing the market…" message for it and nothing more.
   (`CancellationReason.LOBBY_TIMEOUT`). `CANCEL_GAME` (host-only,
   `CancellationReason.HOST_INITIATED`) is legal **only** in `LOBBY` — once
   real gameplay starts, the host loses the unilateral power to end it; an
-  abandoned `NEGOTIATION`-phase game only ever ends via its own negotiation
-  clock.
+  abandoned `NEGOTIATION`-phase game only ever ends once Moves run out (see
+  below) or via `SET_READY_TO_CLOSE`.
 - Time-based lobby transitions are re-checked cheaply on every
   `GET /games/{id}` poll (`is_time_transition_due` → `apply_due_time_transitions`),
   not only inside command handling — an abandoned lobby has nobody left to
@@ -90,56 +98,56 @@ minimal "Closing the market…" message for it and nothing more.
 1. Validates: phase is `LOBBY`, actor is the host, player count is 2–6.
 2. `setup.generate_starting_state(...)` produces a market order and a
    portfolio assignment for every player (see §3). Emits `MARKET_INITIALIZED`.
-3. Deals: every player's portfolio holdings land in `HoldingZone.PORTFOLIO`;
-   `reserve_count` (default 2) reserve holdings per player land in
-   `HoldingZone.RESERVE_UNREVEALED`, each an independently random entity
-   (not necessarily from the player's own portfolio). Emits `PORTFOLIO_DEALT`
-   (payload carries the full setup-quality diagnostics, `SERVER_ONLY`) and
-   `RESERVES_DEALT`.
-4. Sets `max_duration_s` (`max_clock_seconds_by_players[n]` — flat 540s/9
-   minutes at every player count, deliberately not scaled by n; every
-   other clock-relative pacing point below stays a pure fraction of this,
-   so a larger game gets proportionally less time per trade, by design),
-   `started_at`, `unilateral_cutoff_at` (`started_at + max_duration_s * (1 -
-   unilateral_cutoff_fraction)`), `close_threshold` (`close_threshold(n)`).
-5. (2-player games only) `last_negotiated_execution_at` and
-   `market_correction_cooldown_until` both set to `started_at` — see §9.
-6. A `HaircutProfile` is generated fresh, at random (`_generate_random_haircut_profile`
-   — not chosen from a fixed list, see §8) and locked onto the game;
-   `haircut_reveal_at = started_at + max_duration_s * haircut_reveal_fraction`
-   (default 50% of the clock). Emits `HAIRCUT_PROFILE_SELECTED`
-   (`SERVER_ONLY` — nobody sees this live, not even the reveal timing's
-   contents).
-7. `phase = NEGOTIATION`. Emits `GAME_STARTED`.
+3. Deals: every player's portfolio holdings land in `HoldingZone.PORTFOLIO`
+   — there is no reserve zone anymore. Emits `PORTFOLIO_DEALT` (payload
+   carries the full setup-quality diagnostics, `SERVER_ONLY`).
+4. Sets `moves_remaining = starting_moves` (default 5) and
+   `boosts_remaining = starting_boosts` (default 2) for every player,
+   `started_at`, `close_threshold` (`close_threshold(n)`). There is no
+   gameplay clock and nothing derived from one — `started_at` is
+   elapsed-time telemetry only.
+5. A `HaircutProfile` is generated fresh, at random (`_generate_random_haircut_profile`
+   — not chosen from a fixed list, see §9) and locked onto the game. There
+   is no fixed reveal deadline; the live reveal trigger is Move-driven
+   (see §4). Emits `HAIRCUT_PROFILE_SELECTED` (`SERVER_ONLY` — nobody sees
+   this live, not even the fact that it happened).
+6. `phase = NEGOTIATION`. Emits `GAME_STARTED`.
 
 ### Negotiation
-The bulk of gameplay — see §4–§9 below. Ends via `close_market()`, triggered
+The bulk of gameplay — see §4–§8 below. Ends via `close_market()`, triggered
 by either:
-- **`TIME_EXPIRED`**: `now >= started_at + max_duration_s`, detected by
-  `apply_due_time_transitions`.
 - **`READY_THRESHOLD`**: enough players have `SET_READY_TO_CLOSE(ready=true)`
   to reach `close_threshold` (see §10).
+- **`MOVES_EXHAUSTED`**: every seated player's own `moves_remaining` has hit
+  zero **and** there is no active negotiation left to resolve
+  (`engine._maybe_close_on_moves_exhausted`, checked generically after
+  every command). Deliberately not the same instant as the table-wide
+  Boosts expiry (§4), which fires on the *first* player to hit zero — the
+  table can keep spending its last few Moves, opening and resolving
+  negotiations, for a while after Boosts have already expired.
 
 ### close_market() — exact sequence
-1. `phase = CLOSING`; sets `closed_at`/`close_reason`; emits `MARKET_CLOSED`
-   (payload carries `reason`).
-2. Every still-`OPEN` proposal resolves `MARKET_CLOSED` (committed Influence
-   refunds to available — a market close is a non-execution, same as a
-   withdrawal). Every still-`OPEN` pool resolves `MARKET_CLOSED` the same way.
-3. An offered-but-unresolved Market Correction (2-player only) resolves
-   `EXPIRED` — the closest existing fit ("this opportunity is now gone").
-4. Every player with a still-pending reserve pickup has it forcibly resolved
-   `MARKET_CLOSED` via the same machinery a timeout uses.
-5. Every still-`RESERVE_UNREVEALED` holding becomes `SURRENDERED_UNUSED`.
-   Emits `PORTFOLIOS_REVEALED`.
-6. The **one and only** random Haircut-depth draw for this game happens now
+1. `phase = CLOSING`; sets `closed_at`/`close_reason`; nulls
+   `active_proposal_id` (defense-in-depth); emits `MARKET_CLOSED` (payload
+   carries `reason`).
+2. Every still-`OPEN` proposal resolves `MARKET_CLOSED`. Every still-`OPEN`
+   pool resolves `MARKET_CLOSED` the same way. A pending Arbitration on the
+   resolving proposal, if any, resolves with `ArbitrationResolutionReason
+   .MARKET_CLOSED` at the same moment — Ready-to-Close (or Move exhaustion)
+   always preempts a pending Arbitration draw outright; no draw ever runs.
+3. Every player with a still-pending Draw/Refresh decision (§7) has it
+   forcibly resolved — the drawn entity never lands in their portfolio; the
+   Boost was already spent when the draw started, same as a decline or
+   timeout.
+4. Emits `PORTFOLIOS_REVEALED`.
+5. The **one and only** random Haircut-depth draw for this game happens now
    (`draw_haircut_depth`, a single correlated pick from `haircut_profile`,
    never independent per-position rolls) and is persisted immediately onto
    `realized_haircut_depth`. `compute_final_scores` (pure, `rng`-free) then
    computes the result from that persisted depth. Emits `GAME_SCORED`
    (payload: `realized_haircut_depth`, `wiped_entity_ids`, `results`,
    `winners`).
-7. `scored_at` set, `phase = SCORED`. Emits `GAME_ENDED`.
+6. `scored_at` set, `phase = SCORED`. Emits `GAME_ENDED`.
 
 `compute_final_scores` is called again, idempotently, from `project()`
 every time a `SCORED` game is read — it never redraws, only reads the
@@ -193,139 +201,38 @@ player about themselves.
 
 ---
 
-## 4. The private Influence economy
+## 4. Moves & the single active negotiation
 
-Every player starts with `starting_influence` (default 10) Influence,
-tracked as `available` / `committed` / `spent` — **self-only**, never shown
-to any other live audience (a visible balance or balance-delta would be a
-hand-reconstruction oracle: "proposal executed, Hanky's balance dropped →
-Hanky must own the rising entity").
+Every player starts with `starting_moves` (default 5) Moves — a public
+roster fact (`GamePlayer.moves_remaining`), not a private currency. A Move
+is spent **only** by successfully opening a new negotiation
+(`PROPOSE_SWAP`) and is **never refunded**, regardless of how that
+negotiation eventually resolves — accepted, expired, voided, or resolved
+by Arbitration, the Move is gone either way.
 
-**The one rule**: a player's liability for a swap is **1 iff they own the
-entity that would rise** out of it, else **0** — never more than 1 per
-resolved package, never based on quantity owned or movement magnitude.
-"Rising" (`engine._rising_entity`) is whichever of the two entities
-currently holds the *worse* (higher) position — it would take the other's
-better position if swapped.
+**At most one bare negotiation is open table-wide at any time**
+(`Game.active_proposal_id`, cleared centrally the instant the matching
+proposal resolves, any reason — see `engine._resolve_proposal`, the single
+chokepoint every resolution path funnels through). `PROPOSE_SWAP` is
+illegal whenever `active_proposal_id` is already set, and illegal if the
+actor has zero `moves_remaining`. This single constraint replaced the old
+Influence economy's whole cost-gating job: since nobody can open a second
+negotiation while one is in flight, and nobody can simply wait the current
+one out (Pass is public and permanent — see §5), a negotiation now plays
+out as a real, forced conversation with a shrinking cast of active
+participants.
 
-- **Authoring** (`PROPOSE_SWAP`, `CREATE_POOL`): liability is computed once,
-  from the actor's holdings *at that exact moment*, and locked onto the
-  `Proposal`/`Pool` (`initiator_influence_liability`) — never recomputed
-  later even if holdings or the market change before it resolves. A
-  0-liability proposal/pool is always legal regardless of balance (Influence
-  is a tax on *benefiting*, not a toll on speaking); a 1-liability one
-  requires `available >= 1` and moves `available → committed`.
-- **Settlement** (`_resolve_proposal`/`_resolve_pool`): a locked liability of
-  1 resolves `committed → spent` if the reason is `executed`, else
-  `committed → available` (withdrawal, market-closed, voided, preempted, etc.
-  — any non-execution refunds).
-- **Accepting** (`ACCEPT_PROPOSAL`): the accepter's liability is computed
-  fresh, right now, against their *own* current holdings, and charged
-  straight `available → spent` — no commit interval, since accepting
-  executes synchronously. **Zero available Influence never blocks
-  accepting** — only originating (`PROPOSE_SWAP`/`CREATE_POOL`) requires
-  affordability. If the fresh liability is 1 and `available` is already 0,
-  the accept still goes through, just for free (nothing is charged, nothing
-  goes negative). A broke player can always say yes to someone else's deal;
-  there's simply nothing left to charge them.
-- **Accepting a Pool** (`ACCEPT_POOL`) — the one genuinely tricky case: the
-  accepter's total liability is the OR of two bits, capped at 1:
-  - **base-leg bit**: the base proposal's own *locked* value, but only if
-    the accepter is that proposal's author (true for every private-pool
-    accept, since only the base proposer may accept a private pool);
-    otherwise computed fresh against the base proposal's own swap.
-  - **pool-leg bit**: always computed fresh against the pool's own swap (the
-    pool's initiator can never be its own accepter).
-  - If the base-leg liability was *already* committed at propose time, no
-    *new* Influence is required even if the pool-leg bit is also 1 — the
-    package's max-1 charge is already reserved.
-  - Same zero-Influence waiver as a bare proposal: if the combined charge
-    would be 1 and `available` is 0, the accept still executes, free.
-- **One open bare proposal per player, auto-withdrawing** — not a hard cap.
-  A second `PROPOSE_SWAP` while one is still `OPEN` silently withdraws the
-  old one first (`WITHDRAWN_BY_INITIATOR`, same cascade to attached open
-  Pools as an explicit `WITHDRAW_PROPOSAL`) before creating the new one, as
-  long as the new proposal itself is otherwise legal — an illegal new
-  proposal (duplicate pair, unaffordable) leaves the old one untouched, no
-  partial effect. Pools are **not** further capped beyond the existing "one
-  open pool per player per base proposal" rule.
-- **Accept-lock grace period** (`accept_lock_seconds`, default 7s — was
-  4s, bumped after real playtesting showed the view poll's own lag ate a
-  couple of seconds off the top, landing more like 2s in practice): blocks
-  only `ACCEPT_PROPOSAL`, and `ACCEPT_POOL` on a **public** pool, for this
-  long after the *base proposal's* own `PROPOSAL_CREATED` — gives the room
-  a moment to actually read a new proposal before someone already at the
-  keyboard snap-accepts it. `Proposal.created_at` is what's checked; a
-  public pool created well after its base proposal simply inherits
-  whatever's left of the base's own lock (often already elapsed). Nothing
-  else is gated by it — `WITHDRAW_PROPOSAL`, `PASS_PROPOSAL`, `CREATE_POOL`,
-  and accepting a **private** pool (always the base proposer, the one
-  person structurally guaranteed to have already read it) all work
-  immediately regardless. The unlock timestamp
-  (`Proposal.accept_locked_until` in the projected view) is public and
-  unconditional so every viewer can render the same countdown.
-- **All-zero Influence top-up**: the instant every seated player's
-  `available` hits 0 at the same time, the whole table gets a flat
-  `+zero_influence_topup_amount` (default 2), publicly (`INFLUENCE_TOPPED_UP`,
-  same amount for everyone, nothing per-player to redact). Checked once
-  after every command (`engine._maybe_topup_zero_influence`), not just
-  Influence-spending ones — cheap, and only spending can ever newly zero
-  everyone out. No cooldown, no cap: firing again the next time the table
-  goes fully broke is intended, not a bug.
-- **Accept threshold at 5-6 players** (`GameConfig.accepters_required`):
-  a bare proposal, and a **public** pool, needs 2 distinct accepters (not
-  just 1) before it actually executes at 5 or 6 players — at 2-4, the
-  first accept still executes immediately, exactly as always. A single
-  1:1 deal has an outsized effect on a market meant to reflect 5-6
-  people's collective read; requiring a second accepter makes deals need
-  real consensus rather than any two players being able to move it alone.
-  **Private pools are exempt at every player count** — only the base
-  proposer is ever eligible to accept one, so there's structurally never
-  a second distinct accepter to gather.
-  - Below threshold, an accept registers as a *pledge*: the accepter's own
-    liability locks fresh (`available → committed`, exactly like an
-    author's own liability locks at authoring time — free if they can't
-    afford it, same zero-Influence waiver as above), `PROPOSAL_ACCEPT_PLEDGED`
-    / `POOL_ACCEPT_PLEDGED` fires (fully public, actor included — accepting
-    is already public everywhere else, unlike Pass), and the proposal/pool
-    stays `OPEN`. The same player can't pledge twice on the same object.
-  - Once the required count is reached, every pending accepter's locked
-    liability settles to `spent` and the swap executes exactly as the
-    single-accept case always has (`_resolve_proposal`/`_resolve_pool` now
-    settle every pending accepter alongside the author's own bit, on
-    whichever resolution reason the object eventually reaches).
-  - If the object resolves any other way first (withdrawn, market closed,
-    voided, preempted by a sibling pool, ...) before reaching threshold,
-    every pending accepter's locked liability refunds to `available` — a
-    pledge that never executes never costs anything, no matter how far it
-    got.
-  - `pending_accepter_ids`/`accepters_required` in the projected view are
-    public and unconditional (for a pool, even when the contents
-    themselves aren't) — "who's pledged" doesn't reveal anything the
-    Pass-anonymity model protects.
-- **No two open bare proposals for the same pair, across players**:
-  `PROPOSE_SWAP` also rejects if *any* player already has an `OPEN`
-  proposal naming the same two entities (order-independent), not just a
-  check against the actor's own proposals. Accepting either one would
-  already void the other via the ordinary crossing-invalidation scan the
-  instant the first swap lands (§6), so a duplicate never offered a
-  meaningfully different outcome — just a confusing, easy-to-misread
-  second entry in the open-proposals list. This check is pair-scoped only;
-  Pools and `BURN_RESERVE_FOR_SWAP` are unaffected — targeting a pair that
-  already has an open bare proposal is still legal for those.
-- **Reserve actions are not blocked by an open proposal/pool of your own.**
-  `PICK_UP_RESERVE` and `BURN_RESERVE_FOR_SWAP` are both legal even while
-  you currently author an `OPEN` proposal or pool — a locked liability is
-  immune to a later holdings change by construction (it's computed once,
-  at authoring time, and never recomputed), and a later swap crossing your
-  own open negotiation's locked direction already voids it loudly via the
-  ordinary crossing-invalidation scan (§6) regardless of who caused the
-  crossing. An earlier version of this game blocked reserve actions in
-  this state defensively; removed once both of those existing mechanisms
-  were confirmed to already cover the actual risk independently.
-- A self-only, server-authoritative preview is available at
-  `GET /games/{id}/propose-cost?entity_a=&entity_b=` — the frontend never
-  reimplements this rule.
+**Boosts expire table-wide, once, the instant any single player's own
+`moves_remaining` first hits zero** (`Game.boosts_expired`, flips
+`False → True` exactly once, checked generically after every command —
+`engine._maybe_expire_boosts`) — not when everyone's does. This is the
+unilateral cutoff, expressed as game state rather than a wall-clock timer.
+
+**Haircut's live reveal is Move-driven**: `HAIRCUT_RISK_REVEALED` fires the
+instant cumulative Moves consumed across the whole table first reaches or
+crosses 50% of the table's total initial Move allocation
+(`len(players) * starting_moves`, checked generically after every command
+— `engine._maybe_reveal_haircut`) — see §9.
 
 ---
 
@@ -333,77 +240,82 @@ better position if swapped.
 
 ### PROPOSE_SWAP → Proposal
 Payload `{entity_a, entity_b}` (distinct, both must exist in the market).
-Locks `rising_entity_id` (see §6) and `initiator_influence_liability` at
-creation. Public immediately: `PROPOSAL_CREATED` is `PUBLIC`, and a
-`Proposal`'s `entity_a`/`entity_b`/`rising_entity_id`/`proposer_id` are
-always visible to everyone.
+Illegal whenever a negotiation is already active table-wide (§4), or the
+actor has no Moves remaining. Locks `rising_entity_id` (see §6) at
+creation; consumes one Move, never refunded. Public immediately:
+`PROPOSAL_CREATED` is `PUBLIC`, and a `Proposal`'s
+`entity_a`/`entity_b`/`rising_entity_id`/`proposer_id`/`passed_player_ids`
+are always visible to everyone. **There is no `WITHDRAW_PROPOSAL`** —
+spending a Move commits the table to that negotiation; the opener cannot
+change their mind.
 
 ### ACCEPT_PROPOSAL
-Executes the swap (§6), settles both the proposer's locked liability and
-the accepter's fresh one (free if the accepter is at 0 available — see §4),
-resolves the proposal `EXECUTED`, cascades any still-`OPEN` pools attached
-to it (`resolve_sibling_pools` — the pool's own author gets
-`INVALIDATED_BY_INITIATOR_ACTION` if they're the one who just accepted
-directly, everyone else's sibling pool gets `PREEMPTED_BY_OTHER_ACTION`).
-Cannot accept your own proposal, or one you've `PASS`'d, or one still
-inside its accept-lock grace period (§4).
+Executes the swap (§6), resolves the proposal `EXECUTED`, cascades any
+still-`OPEN` pools attached to it (`resolve_sibling_pools` — the Agency
+Principle: the pool's own author gets `INVALIDATED_BY_INITIATOR_ACTION` if
+they're the one who just accepted directly, everyone else's sibling pool
+gets `PREEMPTED_BY_OTHER_ACTION`). Cannot accept your own proposal, or one
+you've `PASS`'d. **Legal even while Arbitration is active** on this
+negotiation — settling normally during the 20-second window is the
+intended way out, see §8.
 
-### WITHDRAW_PROPOSAL
-Proposer-only. Resolves `WITHDRAWN_BY_INITIATOR` (refunds committed
-Influence); cascades attached open pools to `BASE_PROPOSAL_WITHDRAWN`.
-
-### PASS_PROPOSAL — a non-binding, permanent per-player exit
+### PASS_PROPOSAL — public, permanent, and drives narrowing
 Any non-proposer may `PASS_PROPOSAL` on an open proposal they haven't
-already passed, **provided they don't currently hold an open Pool of their
-own on it** ("you can't leave the hand while your own chips are in the
+already passed, provided they don't currently hold an open Pool of their
+own on it ("you can't leave the hand while your own chips are in the
 pot" — only the actor's *own* pool blocks this; other players' pools never
-do). Once passed:
-- The proposal (and every pool attached to it, present and future) is
-  **omitted entirely** from that player's own live `project()` view — not
-  hidden client-side, actually absent from the response — and they can
-  never accept/pool/accept-a-pool on it again.
+do), and provided Arbitration hasn't already been called on it (§8 — the
+candidate set locks the instant Arbitration starts). Once passed:
+- **Fully public and permanent** — the opposite of anonymity. Every
+  audience, live, sees `passed_player_ids` on the proposal, and
+  `PROPOSAL_PASSED` itself is `PUBLIC`. A passed player keeps seeing this
+  exact negotiation in their own view (never omitted the way it once was)
+  but can no longer Accept/Pool/Pass it again.
+- **Narrows the active participant set**: the active responders are every
+  seated player except the proposer, minus everyone who's passed.
+  Arbitration (§8) becomes callable the instant that set narrows to
+  exactly one remaining responder — the opener plus that one player are
+  "the final two."
 - **Auto-expiry**: once every seated player except the proposer has passed,
-  the proposal auto-resolves internally as `EXPIRED_ALL_PASSED`. This is
-  **masked to `WITHDRAWN_BY_INITIATOR` for every live audience** (public
-  view, player view, and the live event log) — Pass is designed to give the
-  proposer only a private, anonymous signal, never a public "nobody wanted
-  this" stigma. `ReplayAudience` (post-`SCORED` only) sees the true reason.
-- The proposer sees a live, self-only, anonymous `passed_count` on their own
-  proposal — never identities, never visible to anyone else including the
-  players who passed. `PROPOSAL_PASSED` itself is `ACTOR_ONLY` (a passer
-  sees their own pass in their own history; nobody else ever sees the event
-  at all — this is the proposer's *only* channel to Pass feedback).
-- **Explicit non-goal**: Pass only ever filters the live *current-state*
-  projection. It never touches the event log — if a passed proposal later
-  executes via someone else's accept, the passer still sees the resulting
-  `SWAP_EXECUTED`/`PROPOSAL_RESOLVED` events normally, same as any public
-  fact.
+  the proposal auto-resolves `EXPIRED_ALL_PASSED` — publicly, truthfully,
+  with no masking.
+- **Drives jury eligibility**: everyone who has passed this negotiation
+  becomes its secret jury the instant Arbitration is called on it (§8).
+- **Explicit non-goal, unchanged**: Pass only ever filters/narrows the
+  live active-participant status of *this* negotiation. It never touches
+  the event log — a passed player still sees the resulting
+  `SWAP_EXECUTED`/`PROPOSAL_RESOLVED` events normally if it later executes.
 
 ### Pools — a private or public counter-offer against someone else's proposal
 `CREATE_POOL` (payload `{proposal_id, entity_c, entity_d, visibility}`):
 names a *second*, disjoint entity pair (no overlap with the base proposal's
 own two entities) to bundle with the base proposal. Not legal for the base
-proposer or anyone who's passed it. `visibility` is `private` or `public`
-(each independently toggleable via `allow_private_pools`/`allow_public_pools`).
-At most one open pool per player per base proposal.
+proposer, anyone who's passed it, or while Arbitration is active on the
+base proposal. `visibility` is `private` or `public` (each independently
+toggleable via `allow_private_pools`/`allow_public_pools`). **At most one
+open pool per player per base proposal** — this single-pool-per-player rule
+is also what guarantees Arbitration never faces a "which Pool" ambiguity:
+by the time a negotiation has narrowed to its final two, every *other*
+responder was already forced to withdraw their own Pool before passing (see
+below), so only the one remaining responder could possibly still hold one —
+at most one Pool can ever be eligible.
 
 - **`ACCEPT_POOL`**: executes *both* legs (base proposal's swap, then the
   pool's own swap — sequentially, each excluding the other from its own
   crossing-invalidation scan, see §6), resolves both `EXECUTED`, cascades
   sibling pools on the same base proposal. Legal for the base proposer
   (private or public pool) or, for a public pool only, any other
-  non-passed, non-initiator player.
+  non-passed, non-initiator player. **Legal even while Arbitration is
+  active** — settling normally, same as `ACCEPT_PROPOSAL`.
 - **`DECLINE_POOL`**: private pools only, base-proposer-only. Resolves
-  `DECLINED_BY_TARGET`.
+  `DECLINED_BY_TARGET`. Illegal while Arbitration is active.
 - **`WITHDRAW_POOL`**: the pool's own initiator only. Resolves
-  `WITHDRAWN_BY_INITIATOR`, refunding committed Influence to available —
-  same rule as `WITHDRAW_PROPOSAL` (`_resolve_pool(...,
-  WITHDRAWN_BY_INITIATOR, ..., spend=False)`). An earlier version of this
-  charged the withdrawer instead (`spend=True`); confirmed unintentional
-  and fixed — see `test_withdraw_pool_refunds_committed_liability` in
-  `test_influence_economy.py`.
+  `WITHDRAWN_BY_INITIATOR`. Illegal while Arbitration is active. A player
+  holding an open Pool cannot `PASS_PROPOSAL` until they withdraw it first
+  — this is also what guarantees a passed player never carries a live Pool
+  into jury eligibility.
 - **`MAKE_POOL_PUBLIC`**: the pool's own initiator only, private → public,
-  one-way.
+  one-way. Illegal while Arbitration is active.
 - **Private-pool-reveal-on-execution**: a private pool's contents
   (`entity_c`/`entity_d`/`rising_entity_id`) stay hidden from everyone but
   its initiator and the base proposal's own author (`_pool_insiders`) —
@@ -411,7 +323,10 @@ At most one open pool per player per base proposal.
   executes. The **instant** it executes, its contents become public as part
   of that transaction (`_pool_executed`), both in the live view and in the
   event log (`PRIVATE_POOL_CREATED`'s `POOL_INSIDERS` visibility flips to
-  fully visible once `_pool_executed(pool)` is true).
+  fully visible once `_pool_executed(pool)` is true). **Also**: a still
+  -private eligible Pool is forced public the instant Arbitration is called
+  on its base proposal (§8) — jurors need to know what's actually on the
+  table before voting.
 
 ---
 
@@ -419,20 +334,18 @@ At most one open pool per player per base proposal.
 
 **A swap's "rising" direction is locked once, at authoring time** —
 `SwapIntent.rising_entity_id`, computed via `_rising_entity` at the moment a
-bare proposal, pool leg, unilateral burn, or Market Correction move is
-created — and **never recomputed** while it's pending. The frontend must
-pin its own Visualize UI to this locked value, never to a live position
-comparison.
+bare proposal, pool leg, or unilateral Force Swap Boost is created — and
+**never recomputed** while it's pending. The frontend must pin its own
+Visualize UI to this locked value, never to a live position comparison.
 
 **`_execute_swap`** is the *sole* choke point where two entities' positions
-ever change (all 4 call sites: `ACCEPT_PROPOSAL`, both legs of
-`ACCEPT_POOL`, `BURN_RESERVE_FOR_SWAP`, and both legs of
-`TRIGGER_MARKET_CORRECTION`). After swapping, it emits `SWAP_EXECUTED` and
-calls `_invalidate_crossed_negotiations`, which scans every *other*
-still-`OPEN` proposal/pool whose own two entities intersect the just-moved
-pair. If a scanned negotiation's live-recomputed `_rising_entity` no longer
-matches its own locked `rising_entity_id`, it's voided **loudly, never
-masked** (the deliberate opposite of Pass):
+ever change (call sites: `ACCEPT_PROPOSAL`, both legs of `ACCEPT_POOL`, a
+Force Swap Boost (§7), and the Arbitration machine draw's own base/pool
+outcome execution (§8)). After swapping, it emits `SWAP_EXECUTED` and calls
+`_invalidate_crossed_negotiations`, which scans every *other* still-`OPEN`
+proposal/pool whose own two entities intersect the just-moved pair. If a
+scanned negotiation's live-recomputed `_rising_entity` no longer matches
+its own locked `rising_entity_id`, it's voided **loudly, never masked**:
 - An open proposal crossed this way resolves `VOIDED_MARKET_SWUNG` and
   cascades any attached open pools to `BASE_PROPOSAL_VOIDED`.
 - An open pool crossed this way (its own leg, independent of its base
@@ -445,75 +358,151 @@ negotiation working as promised, not a violation); `ACCEPT_POOL`'s two
 sequential legs never cross-invalidate each other because a pool's entities
 are always disjoint from its base proposal's entities by construction.
 
-This same infrastructure is what a pending Market Correction's own locked
-moves are checked against too (§9) — one shared choke point covering every
-trigger.
-
 ---
 
-## 7. Reserves — Pick Up, Discard, Skip, unilateral burn
+## 7. Boosts — Concentrate, Draw/Refresh, Force Swap
 
-Each player starts with `reserve_count` (default 2) reserve holdings, dealt
-`RESERVE_UNREVEALED` — the entity is unknown even to its owner. Redaction is
-enforced server-side in `project()` (`_UNREVEALED_TO_OWNER_ZONES`), not left
-to frontend discretion.
+Every player starts with `starting_boosts` (default 2) Boosts — a public
+roster fact (`GamePlayer.boosts_remaining`). A Boost is a unilateral,
+non-negotiated action: no counterparty, no Accept/Decline from anyone else.
+Legal only during `NEGOTIATION`, only while `boosts_remaining >= 1`, only
+while `Game.boosts_expired` is still false (§4), and only while there is no
+active Arbitration on the table's one active negotiation (§8) — all three
+gates are checked by `USE_BOOST`'s shared legality check. All three types
+submit through one command, `USE_BOOST`, discriminated by a `boost_type`
+field (matches `CREATE_POOL`'s own `visibility`-field envelope style).
 
-### PICK_UP_RESERVE
-Payload `{reserve_holding_id}`. Rejected while a pickup is already pending,
-or while the actor authors an open proposal/pool. Reveals the reserve
-(`zone → PICKUP_PENDING`, `revealed_to_owner = true`), starts a
-`PendingPickup` with a `decision_deadline_at = now + pickup_decision_seconds`
-(default 12.0s; `pickup_transport_grace_ms` = 500ms extra grace applied only
-at the timeout check, never shown to the player). Emits `PICKUP_STARTED`
-(`ACTOR_ONLY`).
+### Concentrate
+Payload `{boost_type: "concentrate", holding_id_to_discard,
+entity_id_to_duplicate}`. Discards one owned holding, duplicates an entity
+the player already owns at least one copy of — legal even if the discarded
+holding and the duplicated entity are the same (nets to no change in copy
+count, not a cap violation just because it names the same entity twice).
+The resulting copy count of the duplicated entity may never exceed
+`concentrate_max_copies` (default 3).
 
-**Frozen-view guarantee**: the acting player's entire `project()` response
-is pinned to a `cached_view` snapshot rendered once, at pickup time —
-`market`, `holdings`, `haircut_profile`, everything — until the pickup
-resolves. Other players' own views are completely unaffected. This is
-enforced at the `project()` level (short-circuits before computing anything
-live), not by the frontend choosing not to poll.
+### Draw / Refresh
+Payload `{boost_type: "draw"}` to start; two dedicated follow-up commands
+resolve it. **Eligibility — every current market entity the player owns
+zero copies of — is computed once**, at the moment `USE_BOOST(draw)` is
+submitted, and never recomputed for the rest of the decision (locked,
+exactly like a proposal's `rising_entity_id`): discarding a holding during
+the decision can never retroactively make some other entity eligible as
+"the draw." One entity is drawn uniformly at random from that eligible set
+and revealed privately to the player, who then either:
+- **`RESOLVE_BOOST_DRAW`** (payload `{pending_boost_draw_id,
+  holding_id_to_discard}`, `holding_id_to_discard` must be one of the
+  original five): the discarded holding → `DISCARDED`, the drawn entity
+  becomes a new `PORTFOLIO` holding.
+- **`DECLINE_BOOST_DRAW`** ("Skip", payload `{pending_boost_draw_id}`):
+  keeps the original five untouched.
+- **Timeout**: `apply_due_time_transitions` forces the same outcome as Skip
+  once `boost_draw_decision_seconds` (default 20.0s) elapses.
 
-Resolves one of three ways:
-- **`DISCARD_HOLDING`** (payload `{pending_pickup_id, holding_id_to_discard}`,
-  `holding_id_to_discard` must be one of the original five): the discarded
-  holding → `DISCARDED`, the reserve → `PORTFOLIO`. Emits `PICKUP_COMPLETED`.
-- **`DECLINE_PICKUP`** ("Skip", payload `{pending_pickup_id}`): keeps the
-  original five, reserve → `PICKUP_SURRENDERED`. Reuses the exact same
-  `_fail_pending_pickup` machinery a timeout uses, tagged
-  `PickupFailureReason.DECLINED_BY_PLAYER`.
-- **Timeout**: `apply_due_time_transitions` detects
-  `now > decision_deadline_at + pickup_transport_grace_ms` and forces the
-  same surrender, tagged `DECISION_TIMEOUT`.
+**The Boost is spent the instant `USE_BOOST(draw)` succeeds, regardless of
+the eventual outcome** — declining or timing out never refunds it; only
+whether the drawn entity actually lands in the portfolio differs between
+the three resolutions.
 
-`DISCARD_HOLDING` and `DECLINE_PICKUP` are the **only** two commands exempt
-from the optimistic-concurrency `expected_version` check
+**Frozen-view guarantee**, reused from the retired Reserve/Pickup mechanic
+under a new name: the acting player's entire `project()` response is
+pinned to a `cached_view` snapshot rendered once, at draw time, until the
+decision resolves. Other players' own views are completely unaffected. A
+pending Draw/Refresh decision also blocks that player specifically from
+every other command (`PROPOSE_SWAP`, `PASS_PROPOSAL`, `CREATE_POOL`, ...)
+until it resolves — self-scoped, it never blocks anyone else.
+
+`RESOLVE_BOOST_DRAW` and `DECLINE_BOOST_DRAW` are the **only** two commands
+exempt from the optimistic-concurrency `expected_version` check
 (`_VERSION_EXEMPT_COMMANDS`) — a frozen client genuinely cannot know the
 live game version while the rest of the game keeps moving around it.
 
-A `DISCARD_HOLDING` that changes who owns a pending Market Correction's
-source/destination entity is the one invalidation path that doesn't route
-through `_execute_swap` at all (it only flips holding zones, never moves a
-market position) — see §9.
-
-### BURN_RESERVE_FOR_SWAP — unilateral swap
-Payload `{reserve_holding_id, entity_a, entity_b}`. Legal only before
-`unilateral_cutoff_at` (`started_at + max_duration_s * (1 -
-unilateral_cutoff_fraction)`, i.e. within the first 90% of the clock by
-default), and — same lock as `PICK_UP_RESERVE` — not while the actor
-authors an open proposal/pool. The named entities need not be owned by the
-actor at all. The reserve → `BURNED_UNSEEN` **permanently** — its identity
-is never revealed to its own owner, live or in replay's own event log
-redaction rules, though it *is* fully revealed post-game via the ordinary
-`SCORED`-phase holdings reveal (see §11). No Influence cost. Executes
-through the same `_execute_swap` choke point as any other swap (so it can
-void other open negotiations, and it's the unilateral counterpart to the
-Market Correction's own moves for support-marker purposes — see the
-frontend section).
+### Force Swap
+Payload `{boost_type: "force_swap", entity_a, entity_b}`. Alters the
+market unilaterally — the named entities need not be owned by the actor at
+all. No decision window; resolves synchronously through the same
+`_execute_swap` choke point as any negotiated swap (§6), so it can void
+other open negotiations exactly like an accepted deal would.
 
 ---
 
-## 8. Haircut risk & final scoring
+## 8. Arbitration
+
+Once a negotiation's active participant set (§5) narrows to exactly one
+remaining responder — the opener plus that one player, "the final two" —
+either of them may `CALL_ARBITRATION` (payload `{}`). Irreversible: there
+is no un-call, and once called, nothing may add a new Pool, remove the
+eligible one, or narrow the participant set further until it resolves.
+Settling normally (`ACCEPT_PROPOSAL` or `ACCEPT_POOL`) remains fully legal
+throughout the window — the intended way out if the pair actually agrees
+before time runs out.
+
+Calling Arbitration:
+- Forces the one eligible Pool (§5 — the remaining responder's own, if they
+  have one) public if it was still private — jurors need to know what's
+  actually on the table. Emits `ARBITRATION_POOL_REVEALED` (`PUBLIC`) only
+  when this transition actually happens.
+- Starts an irreversible `arbitration_window_seconds` (default 20.0s)
+  last-chance window. Emits `ARBITRATION_CALLED` (`PUBLIC`) — the final two
+  already know who called it; this is the public starting gun.
+- Locks in caller-role-dependent starting weights
+  (`GameConfig.arbitration_base_weights`, default `{originator: {base: 30,
+  pool: 40, neither: 40}, other: {base: 40, pool: 30, neither: 40}}`) —
+  deliberately weights, not percentages, they don't need to sum to 100. If
+  no Pool is eligible, `"pool"` is dropped from the candidate set entirely
+  (never assigned a weight of zero, never transferred elsewhere) rather
+  than offered as an illegal choice.
+- No Boosts are legal for anyone for the duration of the window (§7).
+
+**The secret jury**: every player who has already passed this negotiation
+becomes its jury the instant Arbitration is called. Each may
+`CAST_ARBITRATION_VOTE` (payload `{vote: "base" | "pool" | "neither"}`,
+`"pool"` only offered if eligible) exactly once. A vote is additive and
+cumulative, independent of every other juror's: `+arbitration_vote_bonus`
+(default 10) to the voted choice, `-arbitration_vote_penalty` (default 5)
+to each of the other legal choices, floored at zero as it accumulates.
+Never shown to any live audience, including the two active participants
+themselves — only "a juror has voted" (never which choice) is ever
+projected live (`Proposal.pending_arbitration.voted_player_ids`).
+Normalization happens exactly once, at the actual draw, from these
+accumulated weights — the jury can lean on the machine, never become it.
+
+**Resolution**, in priority order:
+1. **Settled normally** — an `ACCEPT_PROPOSAL` or `ACCEPT_POOL` lands
+   during the window. `ArbitrationResolutionReason.SETTLED_NORMALLY`; no
+   draw ever runs.
+2. **Preempted** — Ready-to-Close (or Move exhaustion) closes the market
+   before the window elapses. `ArbitrationResolutionReason.MARKET_CLOSED`;
+   no draw ever runs.
+3. **The window elapses with neither of the above** —
+   `apply_due_time_transitions` runs a single weighted random draw
+   (`engine._resolve_arbitration_via_machine`) over the final, jury
+   -adjusted weights. Exactly three possible outcomes, no fourth "chaos"
+   option:
+   - `MACHINE_BASE`: the base proposal executes, exactly as an
+     `ACCEPT_PROPOSAL` would.
+   - `MACHINE_POOL`: both the base proposal and the eligible Pool execute,
+     exactly as an `ACCEPT_POOL` would.
+   - `MACHINE_NEITHER`: the negotiation resolves `ARBITRATION_NEITHER` —
+     no deal, no market change. The Move the opener spent to open it is
+     still never refunded.
+
+`ARBITRATION_RESOLVED` is `PUBLIC` at the policy level (the fact of how it
+ended, and any resulting `SWAP_EXECUTED`, are already publicly observable
+through other events regardless), but `base_weights`/`final_weights`/
+`votes` are stripped from its payload for every live audience — including
+the two active participants. Unlocked in full only for `ReplayAudience`.
+
+**Telemetry**: nothing new is needed to answer "how long did the table sit
+at two active participants before someone called it" — fully
+reconstructable postgame by replaying `PROPOSAL_PASSED` events in order
+against the seated roster (or, in a 2-player game, it's simply the base
+proposal's own `created_at`, since the active set is 2 from the instant it
+opens).
+
+---
+
+## 9. Haircut risk & final scoring
 
 At `START_GAME`, one `HaircutProfile` (`depth_probabilities: list[float]`,
 summing to 1.0) is generated fresh, at random, and locked for the game.
@@ -526,15 +515,15 @@ position `p` (1-indexed) survives.
   start — is computed straight from config (`round(market_size *
   risk_depth_fraction)`, `risk_depth_fraction = 0.35`), deliberately **not**
   `HaircutProfile.max_depth` (the actual profile's own highest nonzero
-  index). The two used to always agree back when profiles came from a
-  curated list validated against this exact formula; a randomly generated
-  profile's own effective depth can land earlier (see below), and reading
-  it here would leak the profile's shape before reveal.
-- **Reveal**: hidden until `haircut_reveal_at` (50% of the clock by
-  default) — `HAIRCUT_RISK_REVEALED` fires live at that instant. A game
-  that closes via `READY_THRESHOLD` before the halfway mark never sees the
-  live event, but `project()` unconditionally reveals the profile once
-  `phase == SCORED` regardless.
+  index) — a randomly generated profile's own effective depth can land
+  earlier (see below), and reading it here would leak the profile's shape
+  before reveal.
+- **Reveal**: hidden until the live Move-driven reveal trigger fires (§4)
+  — `HAIRCUT_RISK_REVEALED` fires the instant cumulative Moves consumed
+  across the table first reaches or crosses 50% of the table's total
+  initial Move allocation. A game that closes before crossing that
+  threshold never sees the live event, but `project()` unconditionally
+  reveals the profile once `phase == SCORED` regardless.
 - **Generated fresh every game, not chosen from a list**
   (`engine._generate_random_haircut_profile`) — an earlier version picked
   one of 5 named curves per player count (Cliff / Deep burn / Brutal
@@ -586,137 +575,6 @@ position `p` (1-indexed) survives.
 
 ---
 
-## 9. Market Correction — 2-player-only anti-stagnation mechanic
-
-Exists **only** when `len(game.players) == 2`. Purpose: the 2-player game
-can otherwise stagnate once neither side sees an obviously good trade. It is
-**never automatic** — inactivity only ever makes a correction *available*;
-a player must affirmatively trigger it.
-
-### Trigger — time-only
-- `last_negotiated_execution_at` updates **only** on an executed
-  `ACCEPT_PROPOSAL`/`ACCEPT_POOL` (never a burn, never the correction
-  itself). Once `market_correction_cooldown_until` has passed *and*
-  `now - last_negotiated_execution_at >= market_correction_stagnation_seconds`
-  (90.0s default), the server attempts to construct a correction.
-- If construction succeeds, it's offered: `game.pending_market_correction`
-  is set, `MARKET_CORRECTION_OFFERED` fires (payload deliberately minimal —
-  `{correction_id, expires_at}`, **never** entities or displacement).
-  `project()` exposes exactly that same minimal shape while pending.
-- If construction fails (see below), **nothing is offered this cycle and
-  the cooldown is deliberately not pushed** — the very next tick retries
-  against whatever the board looks like by then, rather than sitting dark
-  for a full cooldown period.
-- The offer lasts `market_correction_offer_seconds` (15.0s default); if
-  unclaimed, it resolves `EXPIRED`.
-- **Cooldown only pushes forward for `TRIGGERED`/`MARKET_RESUMED`** — both
-  represent genuinely fresh activity (a correction actually firing, or a
-  real negotiated deal landing) that earns the market a real breather.
-  `EXPIRED` and `INVALIDATED` deliberately leave `market_correction_cooldown_until`
-  untouched: nothing changed, the market is exactly as stagnant as when
-  the correction was first offered, so the very next tick re-offers
-  immediately if it's still genuinely stagnant. An earlier version pushed
-  the cooldown unconditionally on every resolution reason, which meant an
-  `EXPIRED`/`INVALIDATED` correction tacked a full extra
-  `market_correction_cooldown_seconds` of silence onto the stagnation that
-  was already there — real playtest feedback: the trigger felt like it
-  fired at "seemingly random times" rather than a clean 90s mark, because
-  the actual re-offer timing depended on how many times one had already
-  expired/invalidated, not on "90s since the last deal."
-
-### Construction — hidden, fixed, built before anyone chooses
-`_construct_market_correction` builds exactly one downward move per player,
-in full, before either player has seen anything ("offer first, outcome
-already fixed" — accepting is a wager on a fixed unknown, never a roll made
-after the fact):
-
-1. **Severity** (`_market_correction_target_displacements`, pure): each
-   player's private, server-internal-only `_projected_value` gap
-   (`gap = |leader − trailer|`, never shown to players in any form) drives a
-   spread: `spread = max_spread * min(1, gap / gap_saturation)`, then
-   `leader_displacement = base − spread/2`, `trailer_displacement = base +
-   spread/2`, both clamped to `[1, market_size − 1]`
-   (`market_correction_base_displacement_fraction=0.5`,
-   `market_correction_max_spread_fraction=0.4`,
-   `market_correction_gap_saturation_fraction=1.0`, all × `market_size`).
-2. **Targeting** (`_construct_one_correction_move`, locked, never relaxed):
-   start from the player's **top two distinct owned entities by position**,
-   after first excluding any entity **both players own** in PORTFOLIO
-   (`_construct_market_correction`'s `mutually_owned` set) — without this,
-   a shared holding could be the *other* player's move target, landing a
-   second, uninvited hit on top of your own already-independently
-   -targeted move; real playtest catch, since the mechanic is supposed to
-   be exactly one downward move per player, never two. A doubled/anchor
-   holding is excluded from eligibility if the player's *other* (non
-   -mutually-owned) top-two entity is singly-owned; only when **both**
-   top-two are doubled does a double become eligible. Selection within
-   the eligible set is uniform-random, never damage-optimized.
-3. **Destination search** (`_find_correction_destination`): must be
-   strictly *worse* (higher position) than the source and unowned by
-   **either** player. Prefers the entity closest to the exact target
-   displacement (nearest-distance wins; ties go to the lower/first-scanned
-   position); if the randomly-drawn top-two candidate has no legal
-   destination, the *other* eligible candidate is tried before giving up.
-   Never chains multiple swaps to force an exact displacement.
-4. If **either** player's move can't find a legal destination this cycle
-   (both eligible candidates exhausted), the whole correction construction
-   returns `None` — a failed construction is a valid, expected outcome,
-   never a partial/one-sided correction.
-5. Destinations are kept disjoint between the two players' own moves
-   (sequential construction, second move's search excludes the first's
-   chosen destination).
-
-### Player choice — `TRIGGER_MARKET_CORRECTION`
-Payload `{correction_id}`. Either player may trigger; there's no veto and
-no Influence cost. **Not** exempt from the `expected_version` check (unlike
-`DISCARD_HOLDING`/`DECLINE_PICKUP`) — this is a normal, live-polled,
-game-level offer visible to both players through the ordinary view, not a
-frozen per-player snapshot. Re-validates `_market_correction_still_valid`
-as defense-in-depth, then **clears `pending_market_correction` to `None`
-before executing either leg** (captures the moves locally first) — this is
-the fix for a self-invalidation bug caught on review: without clearing
-first, `_execute_swap`'s own crossing scan would see the correction still
-pending after its first leg succeeds and incorrectly void it against
-itself, since the first leg's locked direction trivially "crosses" the
-instant it does exactly what it promised. Both captured moves then execute
-through the normal `_execute_swap` choke point, and
-`MARKET_CORRECTION_RESOLVED` fires with `reason=triggered` and the **full**
-`moves` detail — the only resolution reason whose contents are ever
-revealed live (§6's masking-vs-loud precedent: this one is loud).
-
-### Invalidation — two distinct mechanisms, never blended
-1. **"Is the market still frozen?"** — **any** executed negotiated deal
-   (`ACCEPT_PROPOSAL`/`ACCEPT_POOL`) while a correction is pending resolves
-   it `MARKET_RESUMED`, **unconditionally**, regardless of whether that deal
-   structurally touches either move's entities. `_handle_accept_proposal`/
-   `_handle_accept_pool` resolve any pending correction this way **before**
-   running their own `_execute_swap` — ordering caught on review: resolving
-   first means the correction is already gone by the time the deal's own
-   swap runs, so the reason is deterministically `MARKET_RESUMED` even when
-   the deal happens to cross a locked move (never misclassified as
-   `INVALIDATED` by execution-order accident).
-2. **"Is the prepared correction still structurally valid?"**
-   (`_market_correction_still_valid`) — for everything that *isn't* a
-   negotiated deal: a locked move's direction crossing (via the normal
-   `_execute_swap` → `_invalidate_crossed_negotiations` scan — a unilateral
-   burn is the live trigger for this), or `DISCARD_HOLDING` changing who
-   owns a move's source/destination (the one path that never touches
-   `_execute_swap` at all). Resolves `INVALIDATED`.
-
-Both paths mean the offer a player triggers is always exactly the offer
-that was constructed, or it's already gone — never silently recomputed
-underneath a trigger.
-
-### No support markers, ever
-Neither ordinary nor unilateral credit — nobody authored the correction's
-direction. `MARKET_CORRECTION_RESOLVED(reason=triggered)` claims both
-swaps in the frontend's support-marker derivation the same way an executed
-proposal/pool leg claims its own (see the frontend section below), purely
-to keep them out of the "unclaimed = unilateral burn" bucket, with **zero**
-crediting.
-
----
-
 ## 10. Ready-to-close & market close
 
 `SET_READY_TO_CLOSE` (payload `{ready: bool}`) toggles a player's own
@@ -757,25 +615,27 @@ explicit visibility decision fails the test suite, not just review.
 | `SERVER_ONLY` | Never visible live to anyone, including the actor — only `ReplayAudience` (post-`SCORED`) sees it. |
 | `POOL_INSIDERS` | Existence/status/initiator stay public; only `entity_c`/`entity_d` (the pool's contents) are redacted for a non-insider, per `_pool_insiders`/`_pool_executed`. |
 
-Two bespoke, non-table-driven redactions layered on top of the policy
-lookup (both documented inline in `project_events`):
-- `PROPOSAL_RESOLVED` with `reason == expired_all_passed` is rewritten to
-  `withdrawn_by_initiator` for every live audience (§5's Pass masking).
-- `MARKET_CORRECTION_RESOLVED`'s `moves` key is stripped unless
-  `reason == triggered` or the audience is `ReplayAudience` (§9).
+One bespoke, non-table-driven redaction layered on top of the policy
+lookup (documented inline in `project_events`):
+- `ARBITRATION_RESOLVED`'s `base_weights`/`final_weights`/`votes` keys are
+  stripped for every live audience, including the two active participants
+  — never shown live to anyone, only `ReplayAudience` (§8).
 
-**Holdings redaction** (`_holding_view`/`_UNREVEALED_TO_OWNER_ZONES`):
-a player's own view only ever shows `entity_id` for zones they've actually
-seen — `RESERVE_UNREVEALED`, `BURNED_UNSEEN`, and `SURRENDERED_UNUSED` stay
-`entity_id: null` even to their own owner, live. Once `phase == SCORED`,
-**every** holding in **every** zone, for **every** player, is fully
-revealed — the "permanently redacted" guarantee is live-play-only by
-design; postgame is deliberately maximally transparent (the "oh, I burned
-Motorboat" reveal).
+**Holdings redaction**: the cadence/economy redesign removed every
+unrevealed-to-owner zone the old Reserve/Pickup mechanic needed —
+`HoldingZone` now has exactly two members, `PORTFOLIO` and `DISCARDED`,
+and a player's own holdings list is always fully revealed to them, live,
+in every zone. (The one remaining live-play redaction pattern — a frozen
+`cached_view` while a decision is pending — is Draw/Refresh's own, see §7,
+not a holdings-zone redaction at all.) Once `phase == SCORED`, every
+holding, for every player, is fully revealed to everyone — postgame is
+deliberately maximally transparent, there's just less left to reveal than
+there used to be.
 
-**Pending-pickup frozen view** (§7) and **`pending_market_correction`'s
-minimal shape while pending** (§9) are both enforced inside `project()`
-itself, not by the frontend choosing to render less.
+**Pending Draw/Refresh's frozen view** (§7) and **Arbitration's own
+pending state** (`pending_arbitration`'s public fields vs. its always
+-hidden weights/votes, §8) are both enforced inside `project()` itself,
+not by the frontend choosing to render less.
 
 ---
 
@@ -786,36 +646,38 @@ envelope (`{command_id, type, expected_version, payload}`) except
 `create_game`/`join_game`, which have their own dedicated routes since the
 actor isn't seated yet. `expected_version` is checked against
 optimistic-concurrency (`StaleVersionError` → HTTP 409) for every command
-**except** `DISCARD_HOLDING`/`DECLINE_PICKUP` (§7).
+**except** `RESOLVE_BOOST_DRAW`/`DECLINE_BOOST_DRAW` (§7).
 
 | Command | Payload | Notes |
 |---|---|---|
 | `CANCEL_GAME` | `{}` | Host-only, `LOBBY`-only. |
 | `EXTEND_LOBBY_TIMER` | `{}` | Host-only, `LOBBY`-only. |
 | `START_GAME` | `{}` | Host-only, `LOBBY`-only, 2–6 players. See §2. |
-| `PROPOSE_SWAP` | `{entity_a, entity_b}` | See §5. |
-| `WITHDRAW_PROPOSAL` | `{proposal_id}` | Proposer-only. |
-| `PASS_PROPOSAL` | `{proposal_id}` | Non-proposer, non-repeat, no own open pool on it. See §5. |
-| `ACCEPT_PROPOSAL` | `{proposal_id}` | Not your own, not passed. |
+| `PROPOSE_SWAP` | `{entity_a, entity_b}` | Move-gated, single-active-negotiation-gated. See §4–5. |
+| `PASS_PROPOSAL` | `{proposal_id}` | Non-proposer, non-repeat, no own open pool on it, no active Arbitration. See §5. |
+| `ACCEPT_PROPOSAL` | `{proposal_id}` | Not your own, not passed. Legal during Arbitration. |
 | `CREATE_POOL` | `{proposal_id, entity_c, entity_d, visibility}` | See §5. |
-| `WITHDRAW_POOL` | `{pool_id}` | Pool initiator only. |
-| `MAKE_POOL_PUBLIC` | `{pool_id}` | Pool initiator only, private→public. |
-| `DECLINE_POOL` | `{pool_id}` | Base proposer only, private pools only. |
-| `ACCEPT_POOL` | `{pool_id}` | See §5. |
-| `PICK_UP_RESERVE` | `{reserve_holding_id}` | See §7. |
-| `DISCARD_HOLDING` | `{pending_pickup_id, holding_id_to_discard}` | **Version-exempt.** See §7. |
-| `DECLINE_PICKUP` | `{pending_pickup_id}` | **Version-exempt.** See §7. |
-| `BURN_RESERVE_FOR_SWAP` | `{reserve_holding_id, entity_a, entity_b}` | See §7. |
-| `TRIGGER_MARKET_CORRECTION` | `{correction_id}` | 2-player only. See §9. |
+| `WITHDRAW_POOL` | `{pool_id}` | Pool initiator only. Illegal during Arbitration. |
+| `MAKE_POOL_PUBLIC` | `{pool_id}` | Pool initiator only, private→public. Illegal during Arbitration. |
+| `DECLINE_POOL` | `{pool_id}` | Base proposer only, private pools only. Illegal during Arbitration. |
+| `ACCEPT_POOL` | `{pool_id}` | See §5. Legal during Arbitration. |
+| `CALL_ARBITRATION` | `{}` | Either of the final two active participants. See §8. |
+| `CAST_ARBITRATION_VOTE` | `{vote}` | Jury-only (already-passed players). See §8. |
+| `USE_BOOST` | `{boost_type, ...}` | `boost_type`: `concentrate` \| `draw` \| `force_swap`. See §7. |
+| `RESOLVE_BOOST_DRAW` | `{pending_boost_draw_id, holding_id_to_discard}` | **Version-exempt.** See §7. |
+| `DECLINE_BOOST_DRAW` | `{pending_boost_draw_id}` | **Version-exempt.** See §7. |
 | `SET_READY_TO_CLOSE` | `{ready}` | See §10. |
 
-All fifteen apply-time transitions are re-checked ahead of *every* command
-via `apply_due_time_transitions` (`engine.handle_command`'s first step),
-and cheaply mirrored (side-effect-free) by `is_time_transition_due` so
-`GET /games/{id}` can decide whether it's worth acquiring the write lock at
-all: lobby reminder/grace auto-cancel, per-player pending-pickup timeout,
-unilateral-window close, Haircut reveal, (2-player only) Market Correction
-offer/expiry, and the negotiation clock's own `TIME_EXPIRED` close.
+There is no gameplay clock. Time-driven transitions are re-checked ahead
+of *every* command via `apply_due_time_transitions`
+(`engine.handle_command`'s first step), and cheaply mirrored
+(side-effect-free) by `is_time_transition_due` so `GET /games/{id}` can
+decide whether it's worth acquiring the write lock at all: lobby
+reminder/grace auto-cancel, Arbitration's own 20-second window elapsing,
+and each player's own Draw/Refresh decision window elapsing. Every other
+trigger (Boost expiry, the Haircut reveal, the Move-exhaustion endgame) is
+a direct, synchronous consequence of a command, not something that needs
+polling to notice.
 
 ---
 
@@ -831,28 +693,27 @@ from the public event log plus live `view.pools`, which players have
 publicly and successfully pushed each market entity up (rendered as a small
 badge on the market card). Locked invariants, current and verified against
 the code directly (not assumed):
-- **Only an `executed` (or, for Market Correction, `triggered`) resolution
-  may claim a `SWAP_EXECUTED` occurrence.** `claimSwap` is called from
-  exactly three places: `PROPOSAL_RESOLVED && reason === "executed"`,
-  `POOL_RESOLVED && reason === "executed"`, and
-  `MARKET_CORRECTION_RESOLVED && reason === "triggered"`. A `voided_market_swung`,
-  `withdrawn_by_initiator`, `declined_by_target`,
-  `preempted_by_other_action`, `base_proposal_voided`, `market_resumed`,
-  `invalidated`, or `expired` resolution **never** reaches `claimSwap` —
-  those branches all require the exact literal reason string above, nothing
-  else matches. This holds structurally on the backend side too: a voided
+- **Only an `executed` resolution may claim a `SWAP_EXECUTED`
+  occurrence.** `claimSwap` is called from exactly two places:
+  `PROPOSAL_RESOLVED && reason === "executed"` and `POOL_RESOLVED &&
+  reason === "executed"`. A `voided_market_swung`, `expired_all_passed`,
+  `declined_by_target`, `preempted_by_other_action`,
+  `base_proposal_voided`, `withdrawn_by_initiator`, `arbitration_neither`,
+  or `market_closed` resolution **never** reaches `claimSwap` — those
+  branches all require the exact literal reason string above, nothing else
+  matches. This holds structurally on the backend side too: a voided
   negotiation's own entity pair never produces a `SWAP_EXECUTED` in the
   first place (voiding never calls `_execute_swap` — only the *unrelated,
   already-executing* swap that caused the crossing does), so there is
   nothing for a non-executed resolution to wrongly claim even in principle.
 - A `SWAP_EXECUTED` with no matching claim by the end of the event walk is
-  structurally guaranteed to be a unilateral burn or an unclaimed Market
-  Correction leg — tracked via a per-pair LIFO queue (not a flat set), since
-  the same pair can legitimately swap more than once in a game.
+  structurally guaranteed to be a unilateral Force Swap Boost — tracked via
+  a per-pair LIFO queue (not a flat set), since the same pair can
+  legitimately swap more than once in a game.
 - A player's marker (ordinary or unilateral) on an entity is **cleared
   entirely, not decremented**, the moment that same player helps that
   entity fall — regardless of which mechanism created the marker.
-- `unilateralCount` (burn-for-swap) is tracked separately from ordinary
+- `unilateralCount` (Force Swap) is tracked separately from ordinary
   `count` (negotiated support) and can coexist on the same player/entity.
 
 **`useGameView.ts`** — polling with adaptive backoff; stops polling entirely
@@ -889,5 +750,4 @@ a live reorder mid-interaction; it catches up to live state in one
 ordinary reorder transition once closed.
 
 None of the above ever computes a legality decision, a cost, or a score —
-those always come from the server (`project()`'s fields,
-`GET /games/{id}/propose-cost` for the one live preview that exists).
+those always come from the server (`project()`'s fields).

@@ -29,18 +29,18 @@ a real concurrent store, both handled here rather than left as latent bugs:
 Cadence/economy redesign (prototype branch): checkpoint 1 stopped
 reading/writing every column exclusive to Influence, Market Correction, the
 gameplay clock, and the old Reserve/Pickup mechanic; started writing the new
-Moves/Boosts/active-negotiation columns. The now-unused legacy columns
-(influence_*, pending_pickup, max_duration_s, unilateral_cutoff_at, ...)
-are left in place on the live schema until a later checkpoint's forward
-migration drops them — never edit an applied migration, see DATABASE.md.
-Checkpoint 3 adds `proposal_arbitration`, a dedicated FastAPI-only table
-(not a jsonb column on the direct-read `proposals` table -- it holds secret
-jury votes, which must never be reachable through Supabase's direct-read
-RLS path at all, only through project()'s own redaction). Checkpoint 4
-adds `game_player_private.pending_boost_draw`, a jsonb column on that
+Moves/Boosts/active-negotiation columns. Checkpoint 3 adds
+`proposal_arbitration`, a dedicated FastAPI-only table (not a jsonb column
+on the direct-read `proposals` table -- it holds secret jury votes, which
+must never be reachable through Supabase's direct-read RLS path at all,
+only through project()'s own redaction). Checkpoint 4 adds
+`game_player_private.pending_boost_draw`, a jsonb column on that
 already-FastAPI-only table -- a pending Draw/Refresh decision is
-single-player-private the same way the old (now-unused) pending_pickup
-column was, so it gets a fresh column there rather than its own table.
+single-player-private the same way the old pending_pickup column was, so
+it gets a fresh column there rather than its own table. Checkpoint 6 drops
+every column checkpoint 1 had stopped reading/writing (influence_*, the
+old pending_pickup, max_duration_s, unilateral_cutoff_at, ...) via a
+forward migration -- never edit an applied migration, see DATABASE.md.
 """
 
 from __future__ import annotations

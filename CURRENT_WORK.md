@@ -54,23 +54,22 @@ done as part of this change.
 
 ---
 
-## Two pre-existing tests are intermittently flaky in a full suite run
+## One pre-existing test is intermittently flaky in a full suite run
 
-Not caused by any specific feature. Both are 100% reliable run
-individually or in their own file, but each has been observed to fail
-roughly once per several full-suite runs (never both in the same run, no
-consistent repro), across multiple separate sessions now — most recently
-`test_discard_holding_that_changes_source_ownership_resolves_invalidated`,
-confirmed flaky again this way (full-suite fail, isolated-run pass,
-full-suite re-run clean) while adding unrelated features:
-`tests/api/test_lobby_flow.py::test_extend_lobby_timer_pushes_the_deadline_out`
-and `tests/domain/test_market_correction.py::test_discard_holding_that_changes_source_ownership_resolves_invalidated`.
+Not caused by any specific feature. 100% reliable run individually or in
+its own file, but has been observed to fail roughly once per several
+full-suite runs (no consistent repro), across multiple separate sessions:
+`tests/api/test_lobby_flow.py::test_extend_lobby_timer_pushes_the_deadline_out`.
 Suggests real wall-clock timing and/or shared unseeded `random` module
 state leaking across tests, not a logic bug — worth a closer look
-(seed/inject time and rng explicitly in both) before the suite gets
-meaningfully larger (currently 284 tests), but still out of scope to
-chase down opportunistically. If you see either fail, rerun before
-treating it as a regression.
+(seed/inject time explicitly) before the suite gets meaningfully larger
+(currently 259 tests), but still out of scope to chase down
+opportunistically. If you see it fail, rerun before treating it as a
+regression. (A second flaky test formerly tracked here,
+`test_discard_holding_that_changes_source_ownership_resolves_invalidated`,
+no longer exists — it lived in `test_market_correction.py`, deleted whole
+along with the Reserve/Pickup mechanic in the cadence/economy redesign's
+checkpoint 1.)
 
 ---
 
@@ -100,11 +99,13 @@ the curated-catalog approach was originally built to avoid entirely.
   document this repo doesn't contain. Treat every such reference as
   historical color, not a resolvable pointer — see "External references
   that don't resolve" below.
-- **`GameConfig.influence_revealed_in_replay`** (default `False`) —
-  comment: "Undecided on purpose ... defaults to still-private in replay,
-  trivially flippable later without a schema change." Same shape for
-  `ready_to_close_revealed_in_replay`, though that one reads as more
-  settled (defaults false, no "undecided" language attached).
+- **`GameConfig.ready_to_close_revealed_in_replay`** (default `False`) —
+  whether Ready-to-Close's per-player toggle is unmasked once a game
+  reaches Replay. Reads as an intentional default rather than a genuinely
+  open question, but nothing in the code has ever flipped it. (The
+  Influence-era sibling field this bullet used to also track,
+  `influence_revealed_in_replay`, no longer exists — Influence was
+  removed whole in the cadence/economy redesign's checkpoint 1.)
 - **`GameConfig.join_code_lifetime_minutes = 30`** — comment: "30 is a
   placeholder default, not a locked number — flagged for confirmation."
 - **`GamePlayer.auth_user_id`** links straight to a Supabase auth identity;
@@ -129,10 +130,10 @@ the curated-catalog approach was originally built to avoid entirely.
   per the Postgres implementation's own equivalent queries,
   `PostgresGameRepository`) scan/filter without a dedicated index on the
   host/seat → auth_user_id path. Comment: "acceptable at V1 scale."
-- **`get()`/`get_by_join_code()` do 9 sequential per-table SELECTs**
+- **`get()`/`get_by_join_code()` do 10 sequential per-table SELECTs**
   rather than one aggregate query, inside a `REPEATABLE READ READ ONLY`
   snapshot transaction. Fine while most UI-reachable games are early-phase
-  (several of the 9 tables are still empty), a real optimization target
+  (several of the 10 tables are still empty), a real optimization target
   once negotiation-phase games with lots of proposals/pools/holdings are
   the common case.
 - **`SetupQualityConfig`'s `topology_score` vs. `geometry_score` scale**
@@ -156,7 +157,7 @@ the curated-catalog approach was originally built to avoid entirely.
   under a `Gotiate` Project with a `Staging` environment specifically so a
   `Production` environment can join later without restructuring, but that
   hasn't happened.
-- **No integration test suite against real Postgres.** The 284-test
+- **No integration test suite against real Postgres.** The 259-test
   offline suite (`uv run pytest`) exercises the domain engine directly and
   `InMemoryGameRepository` — real-Postgres behavior (constraints, RLS,
   concurrency) has been verified manually/live per feature, not via a
@@ -175,81 +176,50 @@ the curated-catalog approach was originally built to avoid entirely.
   Win32_Process | Where-Object Name -match 'python'` — kill all, start
   exactly one, confirm before proceeding).
 
-## Market Correction — known gaps
+## The cadence/economy redesign hasn't been live-playtested yet
 
-Two real bugs have been found and fixed via live 2-player play since the
-feature shipped (`git log --grep "Market Correction"` /
-`tests/domain/test_market_correction.py`): the cooldown was pushing
-forward unconditionally on *every* resolution reason, including
-`EXPIRED`/`INVALIDATED` where nothing actually changed — this tacked
-extra silence onto an already-stagnant market, so the real trigger
-cadence drifted from "90s since the last deal" into something that felt
-random to the player who reported it. Fixed: cooldown now only extends
-on `TRIGGERED`/`MARKET_RESUMED`. Separately, a shared (mutually-owned)
-holding could be the *other* player's move target, landing a second,
-uninvited hit on top of your own already-independently-targeted move —
-the mechanic is supposed to be exactly one downward move per player.
-Fixed: each player's move source now excludes anything both players own.
-Both fixes are covered by dedicated regression tests. What's still
-genuinely unverified:
+`prototype/cadence-economy-redesign` replaced the entire real-time
+simultaneous-negotiation model (Influence, the gameplay clock, Market
+Correction, Accept Lock, the 5-6 player multi-accept threshold, the old
+Reserve/Pickup mechanic) with a Move-driven, one-negotiation-at-a-time
+cadence culminating in Arbitration, plus Boosts (Concentrate/Draw-Refresh/
+Force Swap) as the new unilateral-action economy — see `GAMEPLAY.md` for
+the current rules. All six checkpoints (domain engine, persistence,
+frontend, schema cleanup) are implemented, offline-test-covered, and
+verified against the real Postgres project script-by-script, and one
+manual pass against a real running instance found nothing broken beyond
+minor UI polish. **No extended live multi-player playtesting cycle has
+happened yet** — the kind that found and fixed the real bugs the old
+system's own punch list (superseded, no longer tracked here) accumulated
+over its own playtesting cycle. In particular, worth watching once real
+play happens:
 
-- **Stagnation-point construction-success rate is not yet instrumented.**
-  The feature's construction-failure rate was measured extensively at
-  `START_GAME` time (led to widening the 2-player market from 9 to 11
-  slots — see `GAMEPLAY.md` §9 and `git log` around
-  `20260815000000_market_correction.sql`), but the rate that actually
-  matters — construction success right when the 90-second stagnation
-  threshold fires, in a genuinely stagnant late-game state — has not been
-  separately measured.
-- **No automated browser verification of the Market Correction banner/
-  ticker UI.** The backend + Postgres persistence path has been
-  live-verified repeatedly (including catching both bugs above); the
-  frontend banner (`MarketCorrectionBanner`), its countdown, and the
-  ticker copy (`describeEvent`'s `MARKET_CORRECTION_*` branches) have
-  only ever been verified via `tsc`/`eslint`/`next build` plus manual
-  playtesting, never an automated Playwright-style pass.
-
----
-
-## Playtest punch list — one item still outstanding
-
-An extended live-playtesting cycle (2-6 player games, real feedback —
-`git log` from `845bf1b` "Fix four playtest-found bugs" through the most
-recent commits) worked through a 23-item punch list. Every item shipped
-except:
-
-- **"Faster pool alternative"** — a lighter-weight way to counter a
-  proposal than the full Pool flow, floated as a possible pacing
-  improvement. Never designed or implemented. If picked back up, start by
-  asking what's actually slow about the current Pool flow in live play
-  (composer steps? Influence-cost preview latency? something else)
-  rather than assuming the fix.
-
-Everything else from that list shipped: the accept-lock grace period
-(now 7s, was 4s — real-play sync lag ate into the original window),
-zero-Influence agency, the all-zero-Influence top-up, private per-card
-notes (with per-player colors and a "Nobody" tag), the multi-accept
-threshold at 5-6 players, the randomized Haircut generator, the flat
-9-minute clock, and auto-withdraw on re-proposing.
-
-Two of the more structurally novel additions have thorough test coverage
-but haven't been exercised in an actual multi-player live game yet:
-
-- **The accept threshold at 5-6 players** (`GameConfig.accepters_required`,
-  `Proposal`/`Pool.pending_accepters`) — a bare proposal or public pool
-  needs 2 distinct accepters before it executes, not just 1, at that
-  headcount. Covered thoroughly by `tests/domain/test_accept_threshold.py`
-  (pledge/refund/settlement paths), but never actually played out live at
-  5 or 6 seats — watch for it feeling right pacing-wise once it does.
+- **Arbitration's weight tuning** (`GameConfig.arbitration_base_weights`,
+  `arbitration_vote_bonus`/`_penalty`) — the 30/40/40 and 40/30/40 starting
+  splits and the +10/-5 per-vote adjustment are the locked design's own
+  numbers, not yet validated against how often Arbitration actually gets
+  called or how the outcomes feel once it does.
+- **Boost pacing** — 2 Boosts per player, expiring table-wide the instant
+  any one player burns their 5th Move — is a first-cut number, not yet
+  seen in real multi-player play.
 - **The randomized Haircut generator**'s two tunable constants —
   `_HAIRCUT_MIN_ADJACENT_GAP` (4 percentage points) and
   `_HAIRCUT_WITHIN_BAND_CEILING` (92%) — are first-cut numbers reasoned
-  from a handful of real games, not a large sample. Both were added
-  reactively to real problems found in play (adjacent positions reading
-  as barely differentiated; the deepest in-band position always showing
-  100% safe, defeating "the top K positions carry some risk"), so
-  they're grounded, not arbitrary — but still worth revisiting if either
-  starts to feel off with more play.
+  from real games under the *old* cadence; worth re-checking once real
+  play happens under the new one, since Haircut itself is otherwise
+  unchanged by the redesign.
+- **No automated browser verification of the new Boosts/Arbitration UI.**
+  The backend + Postgres persistence path has been live-verified
+  repeatedly; the frontend (`BoostControls`, `BoostDrawDecisionView`,
+  `ArbitrationPanel`) has only ever been verified via `tsc`/`eslint`/
+  `next build` plus one manual playtesting pass, never an automated
+  Playwright-style pass.
+- **Frontend componentization was deliberately skipped.** The redesign
+  plan flagged breaking `page.tsx` (2700+ lines) into real component
+  modules as "a worthwhile opportunistic cleanup, not scope creep," since
+  nearly every seam was already being cut open for the rewrite. Checkpoint
+  5 kept the existing single-file structure to bound scope/risk instead —
+  available follow-up work, not started.
 
 ## External references that don't resolve — worth knowing, not fixing
 

@@ -112,9 +112,10 @@ live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
 - **Reads split in two, deliberately, not duplicated.** Data that's
   intrinsically public to every player *seated in that specific game* —
   market order, phase, public proposal/pool fields, existence/status of
-  private pools (not their contents), public Influence balances, reserve
-  counts, clock/cutoff state — may be read and subscribed to (Postgres
-  Changes, V1) directly from Supabase. RLS on those tables is
+  private pools (not their contents), each player's own Moves/Boosts
+  counts, the single active-negotiation pointer — may be read and
+  subscribed to (Postgres Changes, V1) directly from Supabase. RLS on
+  those tables is
   `using (private.is_game_member(game_id))` — one audited `SECURITY
   DEFINER` helper, not a repeated inline subquery. The obvious inline
   version is fine on other tables but a real recursion risk when applied to
@@ -122,13 +123,13 @@ live: connects as `gotiate_backend`, reads all 120 seeded theme entities.
   query); the helper breaks that cycle by design. Never a bare `true` —
   "public" means public to that game's players, not to every authenticated
   Gotiate account.
-  Everything else — holdings, reserve identities, private-pool contents,
-  `ready_to_close`, the frozen pending-pickup view, portfolio values, the
-  Haircut profile pre-reveal, postgame replay — stays exclusively behind
-  FastAPI's `project()`. That logic (§03/§06 of the domain model) is
-  already built and tested; re-expressing it as RLS policies would mean
-  maintaining the same visibility rules in two languages that can drift
-  apart. Never duplicate it.
+  Everything else — holdings, private-pool contents, `ready_to_close`,
+  secret Arbitration jury votes, the frozen pending-Draw/Refresh view,
+  portfolio values, the Haircut profile pre-reveal, postgame replay —
+  stays exclusively behind FastAPI's `project()`. That logic (§03/§06 of
+  the domain model) is already built and tested; re-expressing it as RLS
+  policies would mean maintaining the same visibility rules in two
+  languages that can drift apart. Never duplicate it.
   Non-seated spectator access (`PublicAudience`, already supported by
   `GET /games/{id}`) isn't covered by the direct-read fast path at all —
   it falls back to the FastAPI path, which already handles it.
@@ -196,17 +197,22 @@ schema is still moving weekly.
 
 ## Current schema state
 
-14 tables live on the Gotiate project as of this writing (verified
+15 tables live on the Gotiate project as of this writing (verified
 directly against `information_schema.tables`, not inferred from migration
 file names — some migrations alter existing tables rather than create new
 ones): `command_receipts`, `event_ledger`, `game_player_private`,
 `game_players`, `games`, `holdings`, `market_entities`, `player_name_seeds`,
-`pool_contents`, `pools`, `proposal_passes`, `proposals`, `theme_entities`,
-`theme_sets`. (`waterline` was a 15th table, created with the original
-schema and properly `drop table`'d in `20260813010000_haircut_risk_economy.sql`
-when the Haircut-risk model replaced it — gone, not orphaned, confirmed
-live.) 29 migrations under `supabase/migrations/` as of this writing — run
-`ls supabase/migrations/` for the authoritative current list, don't count
+`pool_contents`, `pools`, `proposal_arbitration`, `proposal_passes`,
+`proposals`, `theme_entities`, `theme_sets`. (`waterline` was created with
+the original schema and properly `drop table`'d in
+`20260813010000_haircut_risk_economy.sql` when the Haircut-risk model
+replaced it — gone, not orphaned, confirmed live.) `proposal_arbitration`
+is the cadence/economy redesign's own FastAPI-only addition (checkpoint
+3) — holds a negotiation's pending Arbitration state, including secret
+jury votes, deliberately its own table rather than a jsonb column on the
+direct-read `proposals` table (see its own migration's comment). 33
+migrations under `supabase/migrations/` as of this writing — run `ls
+supabase/migrations/` for the authoritative current list, don't count
 from prose in this file or in `HISTORY.md`.
 
 **A real bug class to watch for**: `pools.visibility` was live-broken for
@@ -221,8 +227,8 @@ every other upsert in the file (`proposals`, `game_players`,
 `game_player_private`, `pool_contents`, `holdings`, `market_entities`)
 at the same time found no other instance. **Whenever a new mutable
 column is added to an existing table's upsert** (most recently
-`proposals.pending_accepters`/`pools.pending_accepters`, added
-correctly with this lesson already in mind), it must be added to that
+`game_player_private.pending_boost_draw`, added correctly with this
+lesson already in mind — see checkpoint 4), it must be added to that
 table's `ON CONFLICT ... DO UPDATE SET` list too, or it silently never
 persists past the first insert — confirmed correct in every offline
 test (which never touches Postgres) while being live-broken the whole
@@ -235,6 +241,25 @@ enabled, zero policies, grants only to `gotiate_backend`), and global
 -content (public catalog data, no membership question) categorization
 follows the "Rules" section above — check a table's own migration for
 which bucket it's in rather than trusting a stale count anywhere.
+
+**A second lesson from a real deploy attempt, this time about dropping
+columns/CHECK constraints, not adding them**: the cadence/economy
+redesign's own checkpoint 6 cleanup migration
+(`20260823140000_cadence_economy_cleanup.sql`) originally tried to
+*tighten* several CHECK constraints (`games.close_reason`,
+`proposals.resolution_reason`, `pools.resolution_reason`,
+`holdings.zone`) down to only the values the current domain model can
+still produce. The push failed: real pre-redesign SCORED games already
+on this project used the old values (`TIME_EXPIRED`, a base proposal's
+`withdrawn_by_initiator`, `base_proposal_withdrawn`, the old reserve
+zones) — a narrowed CHECK rejected its own historical rows. Fixed by
+*widening* instead: every dropped column is genuinely gone (nothing
+reads or writes them), but every CHECK constraint keeps its old values
+legal alongside the new ones, since no code path can produce the old
+values again but real historical rows still carry them. **Dropping a
+column that's truly unused is safe; narrowing a CHECK/enum against a
+live table is not, unless you've confirmed no existing row uses the
+value being removed** — `select distinct <column> from <table>` first.
 
 `apps/api/scripts/generate_theme_seed.py` reads
 `apps/api/src/gotiate/domain/theme_data/*.json` and generates INSERT

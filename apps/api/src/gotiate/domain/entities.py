@@ -517,8 +517,8 @@ class Game(BaseModel):
     # resets. See engine._maybe_expire_boosts.
     boosts_expired: bool = False
 
-    # Chosen and locked at START_GAME, hidden until haircut_reveal_at (or
-    # until the game is SCORED, whichever comes first -- see project()) --
+    # Chosen and locked at START_GAME, hidden until haircut_profile_revealed_at
+    # (or until the game is SCORED, whichever comes first -- see project()) --
     # see the Haircut-risk design writeup. realized_haircut_depth is drawn
     # exactly once, at close_market, and persisted immediately; nothing
     # downstream (GAME_SCORED, project() at SCORED, replay) ever redraws
