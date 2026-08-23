@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { ensureAnonymousSession } from "@/lib/auth";
-import { useGameView, type GameView, type HoldingView, type PoolView } from "@/lib/useGameView";
+import { useGameView, type GamePlayerView, type GameView, type HoldingView, type PoolView, type ProposalView } from "@/lib/useGameView";
 import { useGameEvents, type EventView } from "@/lib/useGameEvents";
 import { commandErrorMessage, submitCommand } from "@/lib/submitCommand";
 import { computeSupportMarkers, findUnilateralSwaps, formatSupportCount } from "@/lib/supportMarkers";
@@ -77,11 +77,6 @@ function formatCountdownTo(deadlineMs: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-function formatMarketCountdown(startedAt: string | null, maxDurationS: number | null): string {
-  if (!startedAt || maxDurationS === null) return "--:--";
-  return formatCountdownTo(new Date(startedAt).getTime() + maxDurationS * 1000);
-}
-
 // A bare `Date.now()` read directly in a component body trips the
 // react-hooks/purity rule (impure-during-render); routed through a plain
 // helper instead, same as the countdown formatters above never trip it.
@@ -95,10 +90,6 @@ function remainingSeconds(deadlineMs: number): number {
 
 function entityLabel(entityId: string, view: GameView): string {
   return view.market.find((m) => m.entity_id === entityId)?.display_name ?? entityId;
-}
-
-function positionOf(entityId: string, view: GameView): number | null {
-  return view.market.find((m) => m.entity_id === entityId)?.position ?? null;
 }
 
 function playerLabel(playerId: string | null, view: GameView): string {
@@ -151,16 +142,16 @@ const _NOBODY_TAG = "__nobody__";
  * event arrives (view.proposals/view.pools have no such field) -- never to
  * create the entry or decide whether the row is still shown.
  *
- * "everyone_passed" exists because EXPIRED_ALL_PASSED is masked to the
- * identical withdrawn_by_initiator reason as a genuine self-withdraw for
- * every live audience, proposer included (see the Pass design writeup).
- * Only the proposer's own client can even attempt to tell the two apart
- * (via myExplicitWithdrawalsRef, tracking their own Withdraw clicks) --
- * every other player just sees "withdrawn", which is also the correct
- * default for the proposer's own client when it can't prove otherwise.
+ * "expired_all_passed" is a base proposal that every other seated player
+ * has PASS_PROPOSAL'd -- fully public and unmasked (cadence/economy
+ * redesign: Pass carries no anonymity anymore), so unlike the old
+ * withdrawn-by-initiator masking this is shown truthfully to every
+ * audience, proposer included. "withdrawn" only ever applies to a Pool
+ * now -- a base proposal can no longer be withdrawn at all (spending a
+ * Move commits the table).
  *
  * "unilateral_swap" is different from the other three kinds: there's no
- * proposal/pool object behind it at all (BURN_RESERVE_FOR_SWAP is a direct
+ * proposal/pool object behind it at all (a Force Swap Boost is a direct
  * market mutation), so it can't be found by re-checking view.proposals/
  * view.pools the way the others are -- detected instead from the event log
  * via findUnilateralSwaps (see MarketView's own detection effect for this
@@ -170,7 +161,7 @@ const _NOBODY_TAG = "__nobody__";
  * since there's no live row to read entities/actor from. */
 interface LingeringDeal {
   key: string;
-  kind: "accepted" | "everyone_passed" | "withdrawn" | "unilateral_swap";
+  kind: "accepted" | "expired_all_passed" | "withdrawn" | "unilateral_swap";
   accepterLabel?: string; // only ever set for kind "accepted", and only once the enriching event arrives
   unilateralEntityA?: string; // only ever set for kind "unilateral_swap"
   unilateralEntityB?: string;
@@ -178,54 +169,44 @@ interface LingeringDeal {
   fading: boolean;
 }
 
-/** A proposal I just PASS_PROPOSAL'd on -- unlike every other resolution,
- * Pass omits the proposal from *my own* view.proposals entirely, live (see
- * the Pass design writeup), so there's no server-projected row left to
- * overlay the way lingeringDeals does. This snapshots just enough to keep
- * rendering the row myself, client-only, for the same linger-then-fade
- * beat -- captured at the moment of the click, from data OpenProposals
- * already has in scope, no event-log correlation needed (I already know
- * I'm the one who passed). */
-interface PassLingeringEntry {
-  proposalId: string;
-  entityA: string;
-  entityB: string;
-  proposerId: string;
-  fading: boolean;
+/** Moves & Boosts as two glanceable counters (cadence/economy redesign) --
+ * public roster facts, not a private economy, so this always renders a
+ * real number, never a self-only fallback dash. Moves hitting zero is
+ * shown in red (this player can no longer open a negotiation); Boosts
+ * hitting zero, or the table-wide expiry flag, dims that counter instead
+ * -- expiry is a table-wide event with its own banner elsewhere, this is
+ * just this player's own remaining count. */
+function MovesBoostsSummary({ player, boostsExpired }: { player: GamePlayerView; boostsExpired: boolean }) {
+  return (
+    <>
+      <div>
+        <div className="text-xs font-medium text-zinc-500">Moves</div>
+        <div className={`tabular-nums ${player.moves_remaining <= 0 ? "text-red-600" : "text-zinc-900"}`}>{player.moves_remaining}</div>
+      </div>
+      <div>
+        <div className="text-xs font-medium text-zinc-500">Boosts</div>
+        <div className={`tabular-nums ${boostsExpired || player.boosts_remaining <= 0 ? "text-zinc-400" : "text-zinc-900"}`}>
+          {player.boosts_remaining}
+        </div>
+      </div>
+    </>
+  );
 }
 
-/** Influence as a glanceable fuel gauge, not just a number -- the exact
- * count still renders alongside it (transaction costs matter), but the bar
- * is what you read at a glance mid-negotiation. `total` (the gauge's max)
- * is derived, not fetched: available + committed + spent is exactly
- * starting_influence, since nothing ever creates or destroys Influence
- * mid-game, only moves it between those three buckets. */
-function InfluenceGauge({ influence }: { influence: { available: number; committed: number; spent: number } | undefined }) {
-  if (!influence) {
-    return (
-      <div>
-        <div className="text-xs font-medium text-zinc-500">Influence</div>
-        <div className="tabular-nums text-zinc-900">—</div>
-      </div>
-    );
-  }
-  const total = influence.available + influence.committed + influence.spent;
-  const pct = total > 0 ? Math.round((influence.available / total) * 100) : 0;
-  const barColor = pct > 50 ? "bg-emerald-500" : pct > 20 ? "bg-amber-500" : "bg-red-500";
-  return (
-    <div>
-      <div className="text-xs font-medium text-zinc-500">Influence</div>
-      <div className="flex items-center gap-1.5">
-        <div className="h-2 w-14 overflow-hidden rounded-full bg-zinc-200">
-          <div className={`h-full rounded-full transition-[width] duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
-        </div>
-        <span className="tabular-nums text-zinc-900">
-          {influence.available}
-          {influence.committed > 0 ? ` (+${influence.committed}c)` : ""}
-        </span>
-      </div>
-    </div>
+/** One-line state indicator for the six-state negotiation flow (Table
+ * Open / Negotiation Active·3+ / Negotiation Active·2 / Arbitration
+ * Active) -- Arbitration Resolution and Game End are covered by the
+ * CLOSING/SCORED phase screens themselves, not this line. Boosts Expired
+ * isn't a state of its own here either -- it's the separate persistent
+ * banner rendered alongside this. */
+function negotiationStateLabel(view: GameView): string {
+  const proposal = view.proposals.find((p) => p.proposal_id === view.active_proposal_id);
+  if (!proposal) return "Table open";
+  if (proposal.pending_arbitration) return "Arbitration active";
+  const activeResponders = view.players.filter(
+    (p) => p.game_player_id !== proposal.proposer_id && !proposal.passed_player_ids.includes(p.game_player_id),
   );
+  return activeResponders.length <= 1 ? "Negotiation active — narrowed to two" : "Negotiation active";
 }
 
 /** Visualize's ring treatment: green (rising) / red (falling), and for a
@@ -476,11 +457,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // reuses `selected` for card-picking, but the confirm bar's action and
   // labels branch on this instead of always submitting PROPOSE_SWAP.
   const [poolingProposalId, setPoolingProposalId] = useState<string | null>(null);
-  // Non-null while Stage 5's unilateral reserve-for-swap is picking its
-  // two market entities -- same `selected` card-picking reuse as pooling,
-  // a third confirm-bar branch below. Mutually exclusive with
-  // poolingProposalId (starting one clears the other, see cancelSelection).
-  const [burningReserveId, setBurningReserveId] = useState<string | null>(null);
+  // True while Force Swap (a Boost) is picking its two market entities --
+  // same `selected` card-picking reuse as pooling, a third confirm-bar
+  // branch below. Mutually exclusive with poolingProposalId (starting one
+  // clears the other, see cancelSelection).
+  const [forceSwapping, setForceSwapping] = useState(false);
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
@@ -538,8 +519,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // its highlight cut short by the first click's timer.
   const marketScrollRef = useRef<HTMLDivElement>(null);
   // entity_id -> "rising" | "falling", not just a flat highlighted list --
-  // direction is derived the same way support markers and Influence
-  // liability already derive it (compare current positions, higher
+  // direction is derived the same way support markers already derive it
+  // (compare current positions, higher
   // position = worse = rising once swapped), and Pool Visualize highlights
   // both pairs at once. `pairIndex` (0 or 1) lets the market card apply a
   // distinct ring style per pair (dashed vs solid) so a 4-card Pool
@@ -601,11 +582,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // view.proposals/view.pools rather than any separately-positioned ghost
   // entry) freezes under a translucent overlay for a beat, then fades.
   const [lingeringDeals, setLingeringDeals] = useState<LingeringDeal[]>([]);
-  // Populated the instant *this* player clicks Withdraw on their own
-  // proposal (see OpenProposals' onSelfWithdrawProposal) -- the only way to
-  // tell "I withdrew this" apart from "everyone passed and it auto
-  // -expired" once both collapse to the same masked resolution reason.
-  const myExplicitWithdrawalsRef = useRef<Set<string>>(new Set());
 
   function addLingeringDeal(
     key: string,
@@ -615,10 +591,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setLingeringDeals((prev) => (prev.some((d) => d.key === key) ? prev : [...prev, { key, kind, fading: false, ...extra }]));
     setTimeout(() => setLingeringDeals((prev) => prev.map((d) => (d.key === key ? { ...d, fading: true } : d))), 2200);
     setTimeout(() => setLingeringDeals((prev) => prev.filter((d) => d.key !== key)), 2900);
-  }
-
-  function markSelfWithdrawnProposal(proposalId: string) {
-    myExplicitWithdrawalsRef.current.add(proposalId);
   }
 
   // Detection lives on view.proposals/view.pools' own open->resolved
@@ -653,11 +625,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         if (p.resolution_reason === "executed") {
           addLingeringDeal(p.proposal_id, "accepted");
           visualizeProposal([[p.entity_a, p.entity_b, p.rising_entity_id]]);
-        } else if (p.resolution_reason === "withdrawn_by_initiator") {
-          const isMasked = p.proposer_id === view.you && !myExplicitWithdrawalsRef.current.has(p.proposal_id);
-          addLingeringDeal(p.proposal_id, isMasked ? "everyone_passed" : "withdrawn");
+        } else if (p.resolution_reason === "expired_all_passed") {
+          addLingeringDeal(p.proposal_id, "expired_all_passed");
         }
-        // market_closed / voided_market_swung: no lingering treatment, same as before.
+        // market_closed / voided_market_swung / arbitration_neither: no lingering treatment, same as before.
       }
     }
 
@@ -719,7 +690,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view is read fresh each run without re-triggering it themselves; `events` (growing every poll) is the real driver.
   }, [events]);
 
-  // A unilateral BURN_RESERVE_FOR_SWAP has no proposal/pool object at all
+  // A unilateral Force Swap Boost has no proposal/pool object at all
   // (a direct market mutation), so unlike the other three lingering kinds
   // it can't be detected from view.proposals/view.pools -- the event log
   // is the only source. findUnilateralSwaps re-derives the exact same
@@ -750,30 +721,6 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       visualizeProposal([[u.entityA, u.entityB, risingEntityId]]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view.pools/view.you read fresh each run; `events` (growing every poll) is the real driver.
-  }, [events]);
-
-  // Table-wide, system-triggered, no proposal/pool row to anchor to --
-  // same shape as the unilateral-swap detection right above (event log is
-  // the only source, same backlog-on-mount guard), but its own top-of
-  // -page banner rather than a lingering row.
-  const [topupNotice, setTopupNotice] = useState<{ amount: number; fading: boolean } | null>(null);
-  const shownTopupSeqNosRef = useRef<Set<number>>(new Set());
-  const topupInitializedRef = useRef(false);
-  useEffect(() => {
-    const topups = events.filter((e) => e.type === "INFLUENCE_TOPPED_UP");
-    if (!topupInitializedRef.current) {
-      topupInitializedRef.current = true;
-      for (const e of topups) shownTopupSeqNosRef.current.add(e.seq_no);
-      return;
-    }
-    for (const e of topups) {
-      if (shownTopupSeqNosRef.current.has(e.seq_no)) continue;
-      shownTopupSeqNosRef.current.add(e.seq_no);
-      const amount = e.payload.amount as number;
-      setTopupNotice({ amount, fading: false });
-      setTimeout(() => setTopupNotice((prev) => (prev ? { ...prev, fading: true } : prev)), 4000);
-      setTimeout(() => setTopupNotice((prev) => (prev && prev.amount === amount ? null : prev)), 4700);
-    }
   }, [events]);
 
   // Ownership is projected directly onto the scale (a bold border, plus a
@@ -828,71 +775,40 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setProposeError(null);
     setSelected([]);
     setPoolingProposalId(proposalId);
-    setBurningReserveId(null);
+    setForceSwapping(false);
   }
 
   function cancelSelection() {
     setProposeError(null);
     setSelected([]);
     setPoolingProposalId(null);
-    setBurningReserveId(null);
+    setForceSwapping(false);
   }
 
-  function startBurning(holdingId: string) {
+  function startForceSwap() {
     setProposeError(null);
     setSelected([]);
     setPoolingProposalId(null);
-    setBurningReserveId(holdingId);
+    setForceSwapping(true);
   }
 
-  // Server-authoritative preview of what PROPOSE_SWAP would cost -- never
-  // reimplemented client-side (the private Influence economy is deliberate
-  // about this), so this is a real fetch, not a local computation. Keyed
-  // on the pair itself (not raw `selected`) so dropping back below two
-  // selections doesn't re-fire a fetch; the display below only trusts
-  // `proposeCost` while a pair is actually selected, so a stale value left
-  // over from a previous pair is never shown.
-  // Burn-for-swap costs no Influence at all (see engine._handle_burn_reserve_for_swap
-  // -- no liability logic in it whatsoever), so there's nothing to preview.
-  const selectedPair = selected.length === 2 && !burningReserveId ? selected : null;
-  const [proposeCost, setProposeCost] = useState<0 | 1 | null>(null);
-  useEffect(() => {
-    if (!selectedPair) return;
-    let cancelled = false;
-    const query = new URLSearchParams({ entity_a: selectedPair[0], entity_b: selectedPair[1] });
-    fetch(`/api/games/${gameId}/propose-cost?${query.toString()}`)
-      .then((r) => r.json())
-      .then((data: { liability?: 0 | 1 }) => {
-        if (!cancelled) setProposeCost(data.liability ?? null);
-      })
-      .catch(() => {
-        if (!cancelled) setProposeCost(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [gameId, selectedPair]);
-  const displayedProposeCost = selectedPair ? proposeCost : null;
-  const proposeUnaffordable = displayedProposeCost === 1 && (self?.influence?.available ?? 0) < 1;
-  // Mirrors engine._handle_propose_swap's own cross-player duplicate-pair
-  // check (order-independent) -- catches it client-side, before a click
-  // ever round-trips to the server just to bounce off the same rejection.
-  // Without this the confirm bar just sat there disabled with no
-  // explanation why (real playtest feedback).
-  const duplicateOpenProposal = selectedPair
-    ? (view.proposals.find((p) => p.status === "open" && new Set([p.entity_a, p.entity_b, ...selectedPair]).size === 2) ?? null)
-    : null;
+  // A negotiation is at most one, table-wide -- Propose is illegal
+  // whenever one is already active. Mirrors engine._handle_propose_swap's
+  // own check; catches it client-side before a click ever round-trips to
+  // the server just to bounce off the same rejection.
+  const negotiationAlreadyActive = view.active_proposal_id !== null;
+  const noMovesRemaining = (self?.moves_remaining ?? 0) < 1;
 
   // Dedicated decision mode -- every hook above still runs every render
   // (rules of hooks), but nothing below this point ever executes or
-  // renders while a pickup is pending. In particular `events` (from
-  // useGameEvents, a *separate* poll with no concept of freezing) never
-  // reaches the decision view -- it's a fully self-contained component
-  // reading only from `view`/`pending`, so there's nothing live to leak
-  // through the activity ticker or support markers by construction, not
-  // just by discipline. See the Stage 5 Reserve UX design writeup.
-  if (view.pending_pickup) {
-    return <PendingPickupDecisionView gameId={gameId} view={view} pending={view.pending_pickup} onChanged={onChanged} />;
+  // renders while a Draw/Refresh decision is pending. In particular
+  // `events` (from useGameEvents, a *separate* poll with no concept of
+  // freezing) never reaches the decision view -- it's a fully
+  // self-contained component reading only from `view`/`pending`, so
+  // there's nothing live to leak through the activity ticker or support
+  // markers by construction, not just by discipline.
+  if (view.pending_boost_draw) {
+    return <BoostDrawDecisionView gameId={gameId} view={view} pending={view.pending_boost_draw} onChanged={onChanged} />;
   }
 
   // `poolVisibility` is only ever passed by the two explicit Pool
@@ -910,11 +826,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           { proposal_id: poolingProposalId, entity_c: selected[0], entity_d: selected[1], visibility: poolVisibility ?? "private" },
           { expectedVersion: view.version, onSettled: onChanged },
         )
-      : burningReserveId
+      : forceSwapping
         ? await submitCommand(
             gameId,
-            "BURN_RESERVE_FOR_SWAP",
-            { reserve_holding_id: burningReserveId, entity_a: selected[0], entity_b: selected[1] },
+            "USE_BOOST",
+            { boost_type: "force_swap", entity_a: selected[0], entity_b: selected[1] },
             { expectedVersion: view.version, onSettled: onChanged },
           )
         : await submitCommand(
@@ -926,21 +842,27 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setProposing(false);
     if (!result.ok) {
       setProposeError(
-        commandErrorMessage(result.data, poolingProposalId ? "Couldn't create that pool." : burningReserveId ? "Couldn't burn that reserve." : "Couldn't propose that swap."),
+        commandErrorMessage(result.data, poolingProposalId ? "Couldn't create that pool." : forceSwapping ? "Couldn't force swap." : "Couldn't propose that swap."),
       );
       return;
     }
     setSelected([]);
     setPoolingProposalId(null);
-    setBurningReserveId(null);
+    setForceSwapping(false);
   }
 
   return (
     <div className="flex flex-1 flex-col gap-6 bg-zinc-50 px-4 py-6">
       <div className="flex items-center justify-between">
         <Image src="/gotiate-logo.png" alt="Gotiate" width={120} height={87} priority />
-        <span className="font-mono text-2xl font-bold tabular-nums text-zinc-900">{formatMarketCountdown(view.started_at, view.max_duration_s)}</span>
+        <span className="text-sm font-medium text-zinc-500">{negotiationStateLabel(view)}</span>
       </div>
+
+      {view.boosts_expired && (
+        <div className="rounded border border-zinc-300 bg-zinc-100 px-3 py-2 text-center text-sm font-medium text-zinc-700">
+          Boosts have expired for the rest of the game — the first player anywhere burned their fifth Move.
+        </div>
+      )}
 
       {self && (
         <div className="flex gap-4 rounded border border-zinc-200 bg-white p-3 text-sm">
@@ -957,23 +879,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             </div>
           </div>
           <div>
-            <div className="text-xs font-medium text-zinc-500">{view.haircut_profile ? "Safe" : "Risk reveals in"}</div>
-            <div className="tabular-nums text-zinc-900">
-              {view.haircut_profile ? (self.safe_value ?? "—") : formatCountdownTo(new Date(view.haircut_reveal_at ?? 0).getTime())}
-            </div>
+            <div className="text-xs font-medium text-zinc-500">{view.haircut_profile ? "Safe" : "Risk"}</div>
+            <div className="tabular-nums text-zinc-900">{view.haircut_profile ? (self.safe_value ?? "—") : "Hidden"}</div>
           </div>
-          <InfluenceGauge influence={self.influence} />
+          <MovesBoostsSummary player={self} boostsExpired={view.boosts_expired} />
           <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
-        </div>
-      )}
-
-      <MarketCorrectionBanner gameId={gameId} view={view} onChanged={onChanged} />
-
-      {topupNotice && (
-        <div
-          className={`rounded border border-teal-200 bg-teal-50 px-3 py-2 text-center text-sm font-medium text-teal-800 transition-opacity duration-700 ${topupNotice.fading ? "opacity-0" : "opacity-100"}`}
-        >
-          Everyone was out of Influence — the table just topped up +{topupNotice.amount}
         </div>
       )}
 
@@ -1171,9 +1081,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </div>
       )}
 
-      {burningReserveId && selected.length < 2 && (
+      {forceSwapping && selected.length < 2 && (
         <div className="flex items-center justify-between gap-2 rounded border border-purple-300 bg-purple-50 p-2 text-xs text-purple-900">
-          <span>Burning a reserve for a unilateral swap — tap two cards. Never revealed to you either way.</span>
+          <span>Force Swap — tap two cards to swap unilaterally.</span>
           <button type="button" onClick={cancelSelection} className="flex-shrink-0 underline">
             Cancel
           </button>
@@ -1184,7 +1094,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         <div className="flex flex-col gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
           <div className="flex items-center justify-between gap-2">
             <span className="text-blue-900">
-              {poolingProposalId ? "Pool" : burningReserveId ? "Burn for swap" : "Propose"} {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
+              {poolingProposalId ? "Pool" : forceSwapping ? "Force Swap" : "Propose"} {entityLabel(selected[0], view)} ↔ {entityLabel(selected[1], view)}?
             </span>
             <div className="flex flex-shrink-0 gap-2">
               <button type="button" onClick={cancelSelection} className="rounded border border-zinc-300 px-3 py-1 text-zinc-700">
@@ -1196,49 +1106,31 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                 // radios were hard to see/use at the table; this makes the
                 // choice itself the tap.
                 <>
-                  <button
-                    type="button"
-                    onClick={() => handleConfirm("private")}
-                    disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
-                    className="rounded bg-purple-700 px-3 py-1 text-white disabled:opacity-50"
-                  >
-                    {proposing ? "…" : `Pool Private${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                  <button type="button" onClick={() => handleConfirm("private")} disabled={proposing} className="rounded bg-purple-700 px-3 py-1 text-white disabled:opacity-50">
+                    {proposing ? "…" : "Pool Private"}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => handleConfirm("public")}
-                    disabled={proposing || proposeUnaffordable || displayedProposeCost === null}
-                    className="rounded bg-purple-900 px-3 py-1 text-white disabled:opacity-50"
-                  >
-                    {proposing ? "…" : `Pool Public${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                  <button type="button" onClick={() => handleConfirm("public")} disabled={proposing} className="rounded bg-purple-900 px-3 py-1 text-white disabled:opacity-50">
+                    {proposing ? "…" : "Pool Public"}
                   </button>
                 </>
               ) : (
                 <button
                   type="button"
                   onClick={() => handleConfirm()}
-                  disabled={
-                    proposing || (!burningReserveId && (proposeUnaffordable || displayedProposeCost === null || duplicateOpenProposal !== null))
-                  }
+                  disabled={proposing || (!forceSwapping && (negotiationAlreadyActive || noMovesRemaining))}
                   className="rounded bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
                 >
-                  {proposing ? "…" : burningReserveId ? "Burn" : `Propose${displayedProposeCost === null ? "" : ` (${displayedProposeCost})`}`}
+                  {proposing ? "…" : forceSwapping ? "Force Swap" : "Propose"}
                 </button>
               )}
             </div>
           </div>
-          {!poolingProposalId && !burningReserveId && duplicateOpenProposal && (
-            <p className="text-xs text-red-700">
-              {playerLabel(duplicateOpenProposal.proposer_id, view)} already has an open proposal for this pair — pick different cards, or
-              Cancel and wait for it to resolve.
-            </p>
+          {!poolingProposalId && !forceSwapping && negotiationAlreadyActive && (
+            <p className="text-xs text-red-700">A negotiation is already active — Pool onto it, or wait for it to resolve.</p>
           )}
-          {!poolingProposalId &&
-            !burningReserveId &&
-            !duplicateOpenProposal &&
-            view.proposals.some((p) => p.proposer_id === view.you && p.status === "open") && (
-              <p className="text-xs text-blue-700">This will withdraw your existing proposal.</p>
-            )}
+          {!poolingProposalId && !forceSwapping && !negotiationAlreadyActive && noMovesRemaining && (
+            <p className="text-xs text-red-700">You have no Moves left to open a negotiation.</p>
+          )}
         </div>
       )}
       {proposeError && <p className="text-sm text-red-600">{proposeError}</p>}
@@ -1251,10 +1143,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         onClearVisualize={clearVisualizeHighlight}
         onStartPool={startPooling}
         lingeringDeals={lingeringDeals}
-        onSelfWithdrawProposal={markSelfWithdrawnProposal}
       />
 
-      <ReserveControls gameId={gameId} view={view} onChanged={onChanged} burningReserveId={burningReserveId} onStartBurn={startBurning} onCancelBurn={cancelSelection} />
+      <BoostControls gameId={gameId} view={view} onChanged={onChanged} forceSwapping={forceSwapping} onStartForceSwap={startForceSwap} onCancelForceSwap={cancelSelection} />
 
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
@@ -1269,7 +1160,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                 <span className={p.is_golden_name ? "font-medium text-amber-700" : undefined}>{p.display_name}</span>
                 {p.game_player_id === view.you && <span className="ml-2 text-xs font-medium text-zinc-500">YOU</span>}
               </span>
-              <span className="tabular-nums text-zinc-500">{p.reserve_count_remaining} reserve</span>
+              <span className="tabular-nums text-zinc-500">
+                {p.moves_remaining} moves · {p.boosts_remaining} boosts
+              </span>
             </li>
           ))}
         </ul>
@@ -1323,82 +1216,37 @@ function ReadyToCloseToggle({ gameId, view, onChanged }: { gameId: string; view:
   );
 }
 
-/** 2-player-only anti-stagnation mechanic -- public to both players the
- * instant one is offered, deliberately minimal (never entities or
- * displacement, only the id + countdown -- see useGameView.ts). Either
- * player may trigger; there's no veto and no confirmation dialog, same
- * one-tap convention as Accept/Ready. A real expectedVersion is sent
- * (unlike DISCARD_HOLDING/DECLINE_PICKUP) -- this is a normal, live
- * -polled, game-level offer, not a frozen per-player snapshot. See the
- * Market Correction design writeup. */
-function MarketCorrectionBanner({ gameId, view, onChanged }: { gameId: string; view: GameView; onChanged: () => void }) {
-  const correction = view.pending_market_correction;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  if (!correction) return null;
-  const correctionId = correction.correction_id;
-
-  async function handleTrigger() {
-    setError(null);
-    setBusy(true);
-    const result = await submitCommand(
-      gameId,
-      "TRIGGER_MARKET_CORRECTION",
-      { correction_id: correctionId },
-      { expectedVersion: view.version, onSettled: onChanged },
-    );
-    setBusy(false);
-    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't trigger the Market Correction."));
-  }
-
-  return (
-    <div className="flex flex-col gap-2 rounded border border-indigo-300 bg-indigo-50 p-3 text-sm">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-indigo-900">Market Correction available. Ready to shake things up?</span>
-        <span className="flex-shrink-0 font-mono text-xs font-bold tabular-nums text-indigo-700">
-          {formatCountdownTo(new Date(correction.expires_at).getTime())}
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={handleTrigger}
-        disabled={busy}
-        className="self-start rounded bg-indigo-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
-      >
-        {busy ? "…" : "Trigger Market Correction"}
-      </button>
-      {error && <p className="text-xs text-red-600">{error}</p>}
-    </div>
-  );
-}
-
-/** Card treatment for the pending-pickup decision surface -- composes two
+/** Card treatment for the Draw/Refresh decision surface -- composes two
  * independent facts, same principle as the results screen's overlay:
  * border *weight* signals ownership (bold = one of the original five,
  * matches MarketView's own convention, and is the tappable discard
- * target), a ring signals the just-revealed reserve (NEW), and anything
+ * target), a ring signals the just-revealed entity (NEW), and anything
  * that's neither fades quieter as positional-only context. The two can
- * coexist -- the drawn reserve can coincide with an already-owned
- * entity. */
-function pendingPickupCardClasses(ownedCount: number, isNew: boolean): string {
+ * coexist -- the drawn entity is, by construction, never one you already
+ * own (eligibility is zero-owned-only, see engine._use_boost_draw), so
+ * this never has to render both at once, but the composition stays
+ * general in case that ever changes. */
+function boostDrawCardClasses(ownedCount: number, isNew: boolean): string {
   const weight = ownedCount > 0 ? "border-2 border-zinc-900 bg-white" : "border border-zinc-100 bg-zinc-50 opacity-60";
   const ring = isNew ? "ring-4 ring-amber-400" : "";
   return `${weight} ${ring}`.trim();
 }
 
-/** The dedicated decision-mode screen while a reserve pickup is pending --
- * present only via view.pending_pickup, injected server-side directly
- * into the frozen cached_view (see engine._handle_pick_up_reserve).
- * Deliberately self-contained: reads only `view`/`pending`, never
- * `useGameEvents` or anything else independently polled, so there's
- * nothing live to leak through the activity ticker or support markers by
- * construction -- see MarketView's early-return call site. Everything
- * else in `view` (market positions, payout chances, holdings) is frozen
- * too, the whole poll response being the cached snapshot, not just this
- * component's own slice -- "only this player freezes" is already true
- * server-side; this view just makes it the *entire* screen instead of
- * one panel buried among live negotiation UI. */
-function PendingPickupDecisionView({
+/** The dedicated decision-mode screen while a Draw/Refresh decision is
+ * pending -- present only via view.pending_boost_draw, injected
+ * server-side directly into the frozen cached_view (see
+ * engine._use_boost_draw). Deliberately self-contained: reads only
+ * `view`/`pending`, never `useGameEvents` or anything else independently
+ * polled, so there's nothing live to leak through the activity ticker or
+ * support markers by construction -- see MarketView's early-return call
+ * site. Everything else in `view` (market positions, payout chances,
+ * holdings) is frozen too, the whole poll response being the cached
+ * snapshot, not just this component's own slice -- "only this player
+ * freezes" is already true server-side; this view just makes it the
+ * *entire* screen instead of one panel buried among live negotiation UI.
+ * The Boost was already spent the instant this screen appeared -- Skip
+ * never refunds it, it just keeps the original five holdings intact. */
+function BoostDrawDecisionView({
   gameId,
   view,
   pending,
@@ -1406,7 +1254,7 @@ function PendingPickupDecisionView({
 }: {
   gameId: string;
   view: GameView;
-  pending: NonNullable<GameView["pending_pickup"]>;
+  pending: NonNullable<GameView["pending_boost_draw"]>;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -1426,7 +1274,6 @@ function PendingPickupDecisionView({
   const myHoldings = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
   const ownedByEntity = new Map<string, HoldingView[]>();
   for (const h of myHoldings) {
-    if (!h.entity_id) continue;
     const list = ownedByEntity.get(h.entity_id) ?? [];
     list.push(h);
     ownedByEntity.set(h.entity_id, list);
@@ -1441,8 +1288,8 @@ function PendingPickupDecisionView({
     setBusy(true);
     const result = await submitCommand(
       gameId,
-      "DISCARD_HOLDING",
-      { pending_pickup_id: pending.pending_pickup_id, holding_id_to_discard: holding.holding_id },
+      "RESOLVE_BOOST_DRAW",
+      { pending_boost_draw_id: pending.pending_boost_draw_id, holding_id_to_discard: holding.holding_id },
       { onSettled: onChanged },
     );
     setBusy(false);
@@ -1452,7 +1299,12 @@ function PendingPickupDecisionView({
   async function handleSkip() {
     setError(null);
     setBusy(true);
-    const result = await submitCommand(gameId, "DECLINE_PICKUP", { pending_pickup_id: pending.pending_pickup_id }, { onSettled: onChanged });
+    const result = await submitCommand(
+      gameId,
+      "DECLINE_BOOST_DRAW",
+      { pending_boost_draw_id: pending.pending_boost_draw_id },
+      { onSettled: onChanged },
+    );
     setBusy(false);
     if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't skip."));
   }
@@ -1466,7 +1318,7 @@ function PendingPickupDecisionView({
 
       <div className="rounded border border-amber-300 bg-amber-50 p-4 text-center">
         <p className="font-medium text-amber-900">You drew {entityLabel(pending.revealed_entity_id, view)}</p>
-        <p className="mt-1 text-xs text-amber-800">Tap one of your holdings below to replace it, or Skip.</p>
+        <p className="mt-1 text-xs text-amber-800">Tap one of your holdings below to replace it, or Skip. Your Boost is already spent either way.</p>
       </div>
 
       <div>
@@ -1500,7 +1352,7 @@ function PendingPickupDecisionView({
                   data-entity-id={entity.entity_id}
                   onClick={() => tappable && handleDiscard(entity.entity_id)}
                   disabled={!tappable}
-                  className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${pendingPickupCardClasses(owned.length, isNew)}`}
+                  className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center ${boostDrawCardClasses(owned.length, isNew)}`}
                 >
                   <span className={`text-xs ${owned.length > 0 || isNew ? "text-zinc-400" : "text-zinc-300"}`}>{entity.position}</span>
                   <span className={`font-mono text-sm font-bold ${owned.length > 0 || isNew ? "text-zinc-900" : "text-zinc-300"}`}>{entity.ticker_symbol}</span>
@@ -1527,133 +1379,260 @@ function PendingPickupDecisionView({
   );
 }
 
-/** Own still-unrevealed reserves -- each a Pick Up slot (always legal
- * during negotiation, no client-side pre-check) and, while inside the
- * unilateral window, a Burn-for-swap trigger that hands off to
- * MarketView's own card-selection flow. The Burn button being disabled
- * once the window closes IS the final-window lockout indicator -- the
- * server would 400 it anyway, this just surfaces that state up front
- * instead of letting the tap fail silently. */
-function ReserveControls({
+/** Concentrate needs two of the player's own owned entities (discard +
+ * duplicate, which may coincide -- see engine._use_boost_concentrate), so
+ * it gets its own small inline picker rather than reusing MarketView's
+ * two-card market-grid selection (that flow is for picking any two market
+ * entities, not specifically ones you already own). Force Swap, in
+ * contrast, *is* exactly "pick any two market cards" -- it reuses that
+ * flow directly via forceSwapping/onStartForceSwap, the same way pooling
+ * already does. Draw/Refresh needs no selection UI at all up front -- one
+ * tap submits USE_BOOST(draw) immediately, and the response (carrying
+ * view.pending_boost_draw) hands off to BoostDrawDecisionView on the very
+ * next render. */
+function BoostControls({
   gameId,
   view,
   onChanged,
-  burningReserveId,
-  onStartBurn,
-  onCancelBurn,
+  forceSwapping,
+  onStartForceSwap,
+  onCancelForceSwap,
 }: {
   gameId: string;
   view: GameView;
   onChanged: () => void;
-  burningReserveId: string | null;
-  onStartBurn: (holdingId: string) => void;
-  onCancelBurn: () => void;
+  forceSwapping: boolean;
+  onStartForceSwap: () => void;
+  onCancelForceSwap: () => void;
 }) {
-  const [pickingUp, setPickingUp] = useState<string | null>(null);
+  const self = view.players.find((p) => p.game_player_id === view.you);
+  const [concentrating, setConcentrating] = useState(false);
+  const [discardId, setDiscardId] = useState<string>("");
+  const [duplicateEntityId, setDuplicateEntityId] = useState<string>("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const myReserves = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "reserve_unrevealed");
-  const canBurn = view.unilateral_cutoff_at !== null && !isPastDeadline(new Date(view.unilateral_cutoff_at).getTime());
+  if (!self) return null;
 
-  if (myReserves.length === 0) return null;
+  const activeArbitration = view.proposals.find((p) => p.proposal_id === view.active_proposal_id)?.pending_arbitration;
+  const boostsLegal = !view.boosts_expired && !activeArbitration && self.boosts_remaining > 0;
+  const myHoldings = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
+  const ownedEntityIds = [...new Set(myHoldings.map((h) => h.entity_id))];
 
-  async function handlePickUp(holdingId: string) {
+  function closeConcentrate() {
+    setConcentrating(false);
+    setDiscardId("");
+    setDuplicateEntityId("");
     setError(null);
-    setPickingUp(holdingId);
-    const result = await submitCommand(gameId, "PICK_UP_RESERVE", { reserve_holding_id: holdingId }, { expectedVersion: view.version, onSettled: onChanged });
-    setPickingUp(null);
-    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't pick that up."));
+  }
+
+  async function handleConcentrate() {
+    if (!discardId || !duplicateEntityId) return;
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(
+      gameId,
+      "USE_BOOST",
+      { boost_type: "concentrate", holding_id_to_discard: discardId, entity_id_to_duplicate: duplicateEntityId },
+      { expectedVersion: view.version, onSettled: onChanged },
+    );
+    setBusy(false);
+    if (!result.ok) {
+      setError(commandErrorMessage(result.data, "Couldn't concentrate."));
+      return;
+    }
+    closeConcentrate();
+  }
+
+  async function handleDraw() {
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(gameId, "USE_BOOST", { boost_type: "draw" }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusy(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't draw."));
   }
 
   return (
     <div className="rounded border border-zinc-200 bg-white p-3">
-      <h2 className="mb-2 text-sm font-medium text-zinc-700">Reserves</h2>
-      <ul className="flex flex-col gap-1.5">
-        {myReserves.map((h, i) => (
-          <li key={h.holding_id} className="flex items-center justify-between gap-2 text-sm text-zinc-900">
-            <span>Reserve {i + 1}</span>
-            <span className="flex flex-shrink-0 gap-1">
-              <button
-                type="button"
-                onClick={() => handlePickUp(h.holding_id)}
-                disabled={pickingUp !== null}
-                className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
-              >
-                {pickingUp === h.holding_id ? "…" : "Pick up"}
-              </button>
-              <button
-                type="button"
-                onClick={() => (burningReserveId === h.holding_id ? onCancelBurn() : onStartBurn(h.holding_id))}
-                disabled={!canBurn}
-                title={canBurn ? undefined : "The unilateral swap window has closed"}
-                className={`rounded border px-2 py-1 text-xs font-medium disabled:opacity-30 ${
-                  burningReserveId === h.holding_id ? "border-purple-500 bg-purple-100 text-purple-900" : "border-purple-300 text-purple-700"
-                }`}
-              >
-                {burningReserveId === h.holding_id ? "Cancel burn" : "Burn for swap"}
-              </button>
-            </span>
-          </li>
-        ))}
-      </ul>
-      {!canBurn && <p className="mt-2 text-xs text-zinc-400">The unilateral swap window has closed — Pick Up is still open.</p>}
+      <h2 className="mb-2 text-sm font-medium text-zinc-700">Boosts ({self.boosts_remaining} remaining)</h2>
+      {!boostsLegal && (
+        <p className="mb-2 text-xs text-zinc-400">
+          {view.boosts_expired
+            ? "Boosts have expired for the rest of the game."
+            : activeArbitration
+              ? "Boosts are unavailable while Arbitration is active."
+              : "No Boosts remaining."}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setConcentrating(true)}
+          disabled={!boostsLegal || concentrating || forceSwapping}
+          className="rounded border border-teal-300 px-2 py-1 text-xs font-medium text-teal-700 disabled:opacity-30"
+        >
+          Concentrate
+        </button>
+        <button
+          type="button"
+          onClick={() => (forceSwapping ? onCancelForceSwap() : onStartForceSwap())}
+          disabled={!boostsLegal || concentrating}
+          className={`rounded border px-2 py-1 text-xs font-medium disabled:opacity-30 ${
+            forceSwapping ? "border-purple-500 bg-purple-100 text-purple-900" : "border-purple-300 text-purple-700"
+          }`}
+        >
+          {forceSwapping ? "Cancel Force Swap" : "Force Swap"}
+        </button>
+        <button
+          type="button"
+          onClick={handleDraw}
+          disabled={!boostsLegal || busy || concentrating || forceSwapping}
+          className="rounded border border-amber-300 px-2 py-1 text-xs font-medium text-amber-700 disabled:opacity-30"
+        >
+          {busy ? "…" : "Draw / Refresh"}
+        </button>
+      </div>
+
+      {concentrating && (
+        <div className="mt-3 flex flex-col gap-2 rounded border border-teal-200 bg-teal-50 p-2 text-xs text-teal-900">
+          <label className="flex items-center justify-between gap-2">
+            <span>Duplicate</span>
+            <select
+              value={duplicateEntityId}
+              onChange={(e) => setDuplicateEntityId(e.target.value)}
+              className="rounded border border-teal-300 bg-white px-1 py-0.5"
+            >
+              <option value="">Choose an entity you own…</option>
+              {ownedEntityIds.map((id) => (
+                <option key={id} value={id}>
+                  {entityLabel(id, view)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center justify-between gap-2">
+            <span>Discard</span>
+            <select value={discardId} onChange={(e) => setDiscardId(e.target.value)} className="rounded border border-teal-300 bg-white px-1 py-0.5">
+              <option value="">Choose a holding to discard…</option>
+              {myHoldings.map((h) => (
+                <option key={h.holding_id} value={h.holding_id}>
+                  {entityLabel(h.entity_id, view)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={closeConcentrate} className="rounded border border-zinc-300 px-2 py-1 text-zinc-700">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConcentrate}
+              disabled={busy || !discardId || !duplicateEntityId}
+              className="rounded bg-teal-700 px-2 py-1 text-white disabled:opacity-50"
+            >
+              {busy ? "…" : "Concentrate"}
+            </button>
+          </div>
+        </div>
+      )}
       {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
     </div>
   );
 }
 
-/** Shared between a bare proposal's Accept and a Pool's Accept. Zero
- * available Influence never disables it -- accepting is free when you
- * can't afford the liability, see engine._handle_accept_proposal /
- * _handle_accept_pool -- so what can still disable it is the accept-lock
- * grace period (`lockedUntil`, omitted entirely for a private pool, which
- * is never locked -- see the call sites), or having already pledged
- * toward a multi-accept threshold (5-6 players, see `pledge`, undefined
- * everywhere accepters_required is 1 -- the ordinary case). */
-function AcceptButton({
-  liability,
-  lockedUntil,
-  pledge,
-  busy,
-  onAccept,
-}: {
-  liability: 0 | 1 | undefined;
-  lockedUntil?: string;
-  pledge?: { accepted: number; required: number; selfPledged: boolean };
-  busy: boolean;
-  onAccept: () => void;
-}) {
-  const lockDeadlineMs = lockedUntil ? new Date(lockedUntil).getTime() : null;
-  const locked = lockDeadlineMs !== null && !isPastDeadline(lockDeadlineMs);
-  const costSuffix = liability === undefined ? "" : ` (${liability})`;
-  const label = locked
-    ? `Accept in ${remainingSeconds(lockDeadlineMs!)}s`
-    : pledge?.selfPledged
-      ? `Pledged (${pledge.accepted}/${pledge.required})`
-      : pledge
-        ? `Accept${costSuffix} (${pledge.accepted}/${pledge.required})`
-        : `Accept${costSuffix}`;
+/** Shared between a bare proposal's Accept and a Pool's Accept -- a single
+ * Accept always executes immediately (no accept lock, no multi-accept
+ * threshold, no cost -- all removed in the cadence/economy redesign).
+ * Legal even while Arbitration is active on this negotiation (settling
+ * normally during the 20s window is the whole point of that window; only
+ * PASS_PROPOSAL/CREATE_POOL/etc. become illegal once it's called). */
+function AcceptButton({ busy, onAccept }: { busy: boolean; onAccept: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onAccept}
-      disabled={busy || locked || pledge?.selfPledged === true}
-      title={locked ? "Give the room a moment to read this" : pledge ? "Needs more than one accepter at 5-6 players" : undefined}
-      className="rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
-    >
-      {busy ? "…" : label}
+    <button type="button" onClick={onAccept} disabled={busy} className="rounded bg-zinc-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50">
+      {busy ? "…" : "Accept"}
     </button>
   );
 }
 
+/** Arbitration's own inline panel, rendered inside a negotiation's row once
+ * it's called (proposal.pending_arbitration is non-null). Shows the 20s
+ * countdown and who called it; already-passed players get the secret jury
+ * ballot (vote content never leaves this client -- see
+ * EVENT_VISIBILITY.ARBITRATION_VOTE_CAST). "pool" is only offered when
+ * eligible_pool_id is set -- a juror is never offered a vote for an
+ * outcome that isn't actually on the table. Settling normally (Accept,
+ * rendered by the row itself, not here) stays legal for the two active
+ * participants throughout. */
+function ArbitrationPanel({
+  gameId,
+  proposal,
+  view,
+  onChanged,
+}: {
+  gameId: string;
+  proposal: ProposalView;
+  view: GameView;
+  onChanged: () => void;
+}) {
+  const pending = proposal.pending_arbitration;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!pending) return null;
+
+  const iAmJuror = view.you !== null && proposal.passed_player_ids.includes(view.you);
+  const alreadyVoted = view.you !== null && pending.voted_player_ids.includes(view.you);
+  const deadlineMs = new Date(pending.resolves_at).getTime();
+
+  async function castVote(vote: "base" | "pool" | "neither") {
+    setError(null);
+    setBusy(true);
+    const result = await submitCommand(gameId, "CAST_ARBITRATION_VOTE", { vote }, { expectedVersion: view.version, onSettled: onChanged });
+    setBusy(false);
+    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't cast that vote."));
+  }
+
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium">Arbitration called by {playerLabel(pending.called_by, view)}</span>
+        <span className="flex-shrink-0 font-mono font-bold tabular-nums">{remainingSeconds(deadlineMs)}s</span>
+      </div>
+      {iAmJuror && !alreadyVoted && (
+        <div className="mt-2 flex flex-col gap-1">
+          <p>You&apos;re on the jury — cast a secret vote for how this should resolve if it isn&apos;t settled in time.</p>
+          <div className="flex gap-1">
+            <button type="button" onClick={() => castVote("base")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
+              Base
+            </button>
+            {pending.eligible_pool_id !== null && (
+              <button type="button" onClick={() => castVote("pool")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
+                Pool
+              </button>
+            )}
+            <button type="button" onClick={() => castVote("neither")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
+              Neither
+            </button>
+          </div>
+        </div>
+      )}
+      {iAmJuror && alreadyVoted && <p className="mt-1">You voted. Nobody will see what, live or after.</p>}
+      {!iAmJuror && <p className="mt-1">Accepting the base proposal or the eligible Pool still settles this normally, right up until it resolves.</p>}
+      {error && <p className="mt-1 text-red-600">{error}</p>}
+    </div>
+  );
+}
+
 /** Open, actionable proposals -- sourced from view.proposals (the current
- * -state projection), not the event log. A bare proposal gets Accept/
- * Withdraw (no Reject -- either accept it, let it expire, or counter with
- * a Pool), and each proposal's open Pools render nested beneath it with
- * their own legal actions: only the pool's own initiator can withdraw it
- * or make a private one public; only the base proposer can accept or
- * decline a *private* pool; a *public* pool can be accepted by anyone
- * except its own initiator, base proposer included. Straight from
- * engine._handle_decline_pool/_handle_accept_pool, not re-derived. */
+ * -state projection), not the event log. A bare proposal gets Accept only
+ * (no Withdraw -- spending a Move commits the table); each proposal's open
+ * Pools render nested beneath it with their own legal actions: only the
+ * pool's own initiator can withdraw it or make a private one public; only
+ * the base proposer can accept or decline a *private* pool; a *public*
+ * pool can be accepted by anyone except its own initiator, base proposer
+ * included. Straight from engine._handle_decline_pool/_handle_accept_pool,
+ * not re-derived. Pass is fully public now -- a passed player keeps seeing
+ * this same row (never omitted the way it used to be), just without
+ * Pool/Pass/Accept once they've passed. */
 function OpenProposals({
   gameId,
   view,
@@ -1662,7 +1641,6 @@ function OpenProposals({
   onClearVisualize,
   onStartPool,
   lingeringDeals,
-  onSelfWithdrawProposal,
 }: {
   gameId: string;
   view: GameView;
@@ -1671,13 +1649,9 @@ function OpenProposals({
   onClearVisualize: () => void;
   onStartPool: (proposalId: string) => void;
   lingeringDeals: LingeringDeal[];
-  onSelfWithdrawProposal: (proposalId: string) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // My own passes only -- see PassLingeringEntry. Keyed by proposal_id,
-  // same as lingeringById below.
-  const [passLingering, setPassLingering] = useState<Map<string, PassLingeringEntry>>(new Map());
   const openCount = view.proposals.filter((p) => p.status === "open").length;
   // Scoped to this list specifically (not a global playerLabel change) --
   // real playtest feedback that reading your own name back at the table
@@ -1690,25 +1664,6 @@ function OpenProposals({
   // -positioned entry (that used to make an accepted deal visually jump to
   // wherever the ghost list happened to render it).
   const lingeringById = new Map(lingeringDeals.map((d) => [d.key, d]));
-
-  function addPassLingering(proposalId: string, entityA: string, entityB: string, proposerId: string) {
-    setPassLingering((prev) => new Map(prev).set(proposalId, { proposalId, entityA, entityB, proposerId, fading: false }));
-    setTimeout(() => {
-      setPassLingering((prev) => {
-        const entry = prev.get(proposalId);
-        if (!entry) return prev;
-        return new Map(prev).set(proposalId, { ...entry, fading: true });
-      });
-    }, 2200);
-    setTimeout(() => {
-      setPassLingering((prev) => {
-        if (!prev.has(proposalId)) return prev;
-        const next = new Map(prev);
-        next.delete(proposalId);
-        return next;
-      });
-    }, 2900);
-  }
 
   // Rows are a pure computation from current props/state every render --
   // deliberately *not* persisted/reconciled in a separate effect. An
@@ -1726,23 +1681,10 @@ function OpenProposals({
   // that way: the row simply isn't included on a render where neither
   // condition holds yet, and *is* included the moment either becomes true,
   // however many renders that takes.
-  //
-  // view.proposals itself already provides stable, never-reordered
-  // positions for every proposal (dict-insertion order, server-side) that
-  // remains present for this player -- so filtering it directly, in place,
-  // is what keeps an accepted/withdrawn/everyone-passed row from jumping
-  // elsewhere. The one proposal that's never present here to filter is one
-  // *this player themselves* just passed on -- Pass omits it from their own
-  // view.proposals immediately and permanently (see the Pass design
-  // writeup), unlike every other resolution -- so passLingering entries
-  // are rendered separately, prepended at the top rather than trying to
-  // reconstruct a position view.proposals no longer has any record of.
   const visibleProposals = view.proposals.filter((p) => p.status === "open" || lingeringById.has(p.proposal_id));
-  const passLingeringEntries = [...passLingering.values()];
-  // Unilateral swaps have no proposal/pool object to filter view.proposals/
-  // view.pools by -- they're rendered as their own standalone rows,
-  // sourced straight from lingeringDeals, same "no live row to preserve
-  // the position of" reasoning as passLingeringEntries above.
+  // Unilateral swaps (Force Swap Boosts) have no proposal/pool object to
+  // filter view.proposals/view.pools by -- they're rendered as their own
+  // standalone rows, sourced straight from lingeringDeals.
   const unilateralEntries = lingeringDeals.filter((d) => d.kind === "unilateral_swap");
 
   async function runCommand(id: string, type: string, payload: Record<string, unknown>, fallback: string) {
@@ -1754,7 +1696,7 @@ function OpenProposals({
     return result;
   }
 
-  if (visibleProposals.length === 0 && passLingeringEntries.length === 0 && unilateralEntries.length === 0) return null;
+  if (visibleProposals.length === 0 && unilateralEntries.length === 0) return null;
 
   return (
     <div>
@@ -1769,26 +1711,17 @@ function OpenProposals({
               {entityLabel(entry.unilateralEntityA!, view)} ↔ {entityLabel(entry.unilateralEntityB!, view)}
             </span>
             <RowOverlay
-              text={`${entry.unilateralActorLabel} just swapped ${entityLabel(entry.unilateralEntityA!, view)} for ${entityLabel(entry.unilateralEntityB!, view)}`}
+              text={`${entry.unilateralActorLabel} just force-swapped ${entityLabel(entry.unilateralEntityA!, view)} for ${entityLabel(entry.unilateralEntityB!, view)}`}
               tone="blue"
               fading={entry.fading}
             />
           </li>
         ))}
-        {passLingeringEntries.map((passEntry) => (
-          <li
-            key={passEntry.proposalId}
-            className="relative flex items-center justify-between gap-2 border-b border-zinc-100 pb-2 text-zinc-500 last:border-0 last:pb-0"
-          >
-            <span>
-              {playerLabel(passEntry.proposerId, view)}: {entityLabel(passEntry.entityA, view)} ↔ {entityLabel(passEntry.entityB, view)}
-            </span>
-            <RowOverlay text="You Passed" tone="yellow" fading={passEntry.fading} />
-          </li>
-        ))}
         {visibleProposals.map((p) => {
           const isMine = p.proposer_id === view.you;
           const lingering = lingeringById.get(p.proposal_id);
+          const iHavePassed = view.you !== null && p.passed_player_ids.includes(view.you);
+          const arbitrationActive = p.pending_arbitration !== null;
           // Mirrors the server's own rule (PASS/CREATE_POOL both reject
           // while I already hold an open Pool of my own on this proposal)
           // -- Pool/Pass simply aren't offered in that state instead of
@@ -1799,6 +1732,17 @@ function OpenProposals({
           const pools = view.pools.filter(
             (pool) => pool.base_proposal_id === p.proposal_id && (pool.status === "open" || lingeringById.has(pool.pool_id)),
           );
+          // Arbitration eligibility: exactly one active responder left
+          // (the opener plus that one remaining responder = "exactly two
+          // active participants") -- either of the two may call it.
+          const activeResponderIds = view.players
+            .filter((pl) => pl.game_player_id !== p.proposer_id && !p.passed_player_ids.includes(pl.game_player_id))
+            .map((pl) => pl.game_player_id);
+          const canCallArbitration =
+            !arbitrationActive &&
+            activeResponderIds.length === 1 &&
+            view.you !== null &&
+            (view.you === p.proposer_id || view.you === activeResponderIds[0]);
           return (
             <li key={p.proposal_id} className="relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
               {/* Visualize used to be a separate button players had to
@@ -1824,11 +1768,13 @@ function OpenProposals({
               >
                 <span>
                   {labelOrYou(p.proposer_id)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
-                  {/* Self-only, proposer-only, anonymous -- the proposer's one
-                      and only channel to Pass feedback. See the Pass design
-                      writeup: never identities, never shown to anyone else. */}
-                  {isMine && p.passed_count !== undefined && (
-                    <span className="ml-2 text-xs font-normal text-zinc-400">Passed: {p.passed_count}</span>
+                  {/* Fully public now -- a Pass is a visible, intentional
+                      information leak that narrows the active participant
+                      set for everyone to see. */}
+                  {p.passed_player_ids.length > 0 && (
+                    <span className="ml-2 text-xs font-normal text-zinc-400">
+                      Passed: {p.passed_player_ids.map((id) => labelOrYou(id)).join(", ")}
+                    </span>
                   )}
                 </span>
                 {!lingering && (
@@ -1837,7 +1783,7 @@ function OpenProposals({
                   // button click also fired an unrelated market highlight
                   // +scroll as a side effect.
                   <span className="flex flex-shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
-                    {!isMine && !myOpenPoolOnThis && (
+                    {!isMine && !myOpenPoolOnThis && !iHavePassed && !arbitrationActive && (
                       <button
                         type="button"
                         onClick={() => onStartPool(p.proposal_id)}
@@ -1846,63 +1792,32 @@ function OpenProposals({
                         Pool
                       </button>
                     )}
-                    {!isMine && !myOpenPoolOnThis && (
-                      // No confirmation -- treated like Accept, one deliberate
-                      // tap. On success (and only then), lingers this exact
-                      // row under a "You Passed" overlay for a beat -- see
-                      // addPassLingering. entity_a/b/proposer_id are captured
-                      // *before* the request, since a successful Pass omits
-                      // this proposal from view.proposals on the very next
-                      // poll, taking the server's own copy of that data with
-                      // it.
+                    {!isMine && !myOpenPoolOnThis && !iHavePassed && !arbitrationActive && (
                       <button
                         type="button"
-                        onClick={async () => {
-                          const { entity_a: entityA, entity_b: entityB, proposer_id: proposerId } = p;
-                          const result = await runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.");
-                          if (result.ok) addPassLingering(p.proposal_id, entityA, entityB, proposerId);
-                        }}
+                        onClick={() => runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.")}
                         disabled={busyId === p.proposal_id}
                         className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
                       >
                         {busyId === p.proposal_id ? "…" : "Pass"}
                       </button>
                     )}
-                    {isMine ? (
+                    {canCallArbitration && (
                       <button
                         type="button"
-                        onClick={() => {
-                          // Recorded *before* the request settles -- see
-                          // MarketView's myExplicitWithdrawalsRef -- so the
-                          // event-processing effect never has to race it.
-                          onSelfWithdrawProposal(p.proposal_id);
-                          runCommand(p.proposal_id, "WITHDRAW_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't withdraw.");
-                        }}
+                        onClick={() => runCommand(p.proposal_id, "CALL_ARBITRATION", {}, "Couldn't call Arbitration.")}
                         disabled={busyId === p.proposal_id}
-                        className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
+                        className="rounded border border-amber-400 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 disabled:opacity-50"
                       >
-                        {busyId === p.proposal_id ? "…" : "Withdraw"}
+                        {busyId === p.proposal_id ? "…" : "Call Arbitration"}
                       </button>
-                    ) : (
-                      <AcceptButton
-                        liability={p.my_accept_liability}
-                        lockedUntil={p.accept_locked_until}
-                        pledge={
-                          p.accepters_required > 1
-                            ? {
-                                accepted: p.pending_accepter_ids.length,
-                                required: p.accepters_required,
-                                selfPledged: view.you !== null && p.pending_accepter_ids.includes(view.you),
-                              }
-                            : undefined
-                        }
-                        busy={busyId === p.proposal_id}
-                        onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")}
-                      />
                     )}
+                    {!isMine && !iHavePassed && <AcceptButton busy={busyId === p.proposal_id} onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")} />}
                   </span>
                 )}
               </div>
+
+              {arbitrationActive && <ArbitrationPanel gameId={gameId} proposal={p} view={view} onChanged={onChanged} />}
 
               {pools.length > 0 && (
                 <ul className="ml-3 flex flex-col gap-1 border-l border-zinc-200 pl-3">
@@ -1935,7 +1850,7 @@ function OpenProposals({
                           // stopPropagation -- see the identical note on the
                           // outer proposal row's own button span above.
                           <span className="flex flex-shrink-0 gap-1" onClick={(e) => e.stopPropagation()}>
-                            {isPoolMine && (
+                            {isPoolMine && !arbitrationActive && (
                               <>
                                 {pool.visibility === "private" && (
                                   <button
@@ -1957,7 +1872,7 @@ function OpenProposals({
                                 </button>
                               </>
                             )}
-                            {!isPoolMine && pool.visibility === "private" && isMine && (
+                            {!isPoolMine && pool.visibility === "private" && isMine && !arbitrationActive && (
                               <button
                                 type="button"
                                 onClick={() => runCommand(pool.pool_id, "DECLINE_POOL", { pool_id: pool.pool_id }, "Couldn't decline that pool.")}
@@ -1968,26 +1883,7 @@ function OpenProposals({
                               </button>
                             )}
                             {!isPoolMine && (pool.visibility === "public" || isMine) && (
-                              <AcceptButton
-                                liability={pool.my_accept_liability}
-                                // Private-pool accept (always isMine, the
-                                // base proposer) is never locked -- only a
-                                // public pool waits on the base proposal's
-                                // own accept-lock. See
-                                // engine._require_accept_unlocked.
-                                lockedUntil={pool.visibility === "public" ? p.accept_locked_until : undefined}
-                                pledge={
-                                  pool.accepters_required > 1
-                                    ? {
-                                        accepted: pool.pending_accepter_ids.length,
-                                        required: pool.accepters_required,
-                                        selfPledged: view.you !== null && pool.pending_accepter_ids.includes(view.you),
-                                      }
-                                    : undefined
-                                }
-                                busy={busyId === pool.pool_id}
-                                onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")}
-                              />
+                              <AcceptButton busy={busyId === pool.pool_id} onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")} />
                             )}
                           </span>
                         )}
@@ -2037,7 +1933,7 @@ function lingeringOverlayProps(lingering: LingeringDeal): { text: string; tone: 
   if (lingering.kind === "accepted") {
     return { text: lingering.accepterLabel ? `Accepted by ${lingering.accepterLabel}` : "Accepted", tone: "green" };
   }
-  if (lingering.kind === "everyone_passed") {
+  if (lingering.kind === "expired_all_passed") {
     return { text: "Everyone Passed", tone: "red" };
   }
   if (lingering.kind === "unilateral_swap") {
@@ -2068,8 +1964,6 @@ function RowOverlay({ text, tone, fading }: { text: string; tone: keyof typeof _
 const _ACTIVITY_EVENT_TYPES = new Set([
   "PROPOSAL_CREATED",
   "PROPOSAL_RESOLVED",
-  "PROPOSAL_ACCEPT_PLEDGED",
-  "POOL_ACCEPT_PLEDGED",
   "PRIVATE_POOL_CREATED",
   "PUBLIC_POOL_CREATED",
   "POOL_RESOLVED",
@@ -2082,28 +1976,37 @@ const _ACTIVITY_EVENT_TYPES = new Set([
   "PORTFOLIOS_REVEALED",
   "GAME_SCORED",
   "GAME_ENDED",
-  // 2-player-only anti-stagnation mechanic -- narrative/informational like
-  // the lifecycle events above, so only surfaced under "All" (matchesActivityFilter's
-  // "executed" branch only ever matches PROPOSAL_RESOLVED/POOL_RESOLVED).
-  // See the Market Correction design writeup.
-  "MARKET_CORRECTION_OFFERED",
-  "MARKET_CORRECTION_RESOLVED",
-  // System-triggered, table-wide -- narrative/informational like the
-  // lifecycle/correction events above, so only surfaced under "All".
-  "INFLUENCE_TOPPED_UP",
+  // Arbitration (cadence/economy redesign) -- narrative/informational like
+  // the lifecycle events above, so only surfaced under "All"
+  // (matchesActivityFilter's "executed" branch only ever matches
+  // PROPOSAL_RESOLVED/POOL_RESOLVED). ARBITRATION_VOTE_CAST is
+  // deliberately excluded -- it's actor-only live, and even to the voter
+  // themselves it's not narratively interesting beyond "you voted",
+  // already reflected in ArbitrationPanel's own inline UI.
+  "ARBITRATION_CALLED",
+  "ARBITRATION_POOL_REVEALED",
+  "ARBITRATION_RESOLVED",
+  // Table-wide, system-triggered -- narrative/informational like the
+  // lifecycle events above, so only surfaced under "All".
+  "BOOSTS_EXPIRED",
+  // Boost usage (actor-only live) -- narrative for the acting player's own
+  // activity feed, "All" filter only.
+  "BOOST_CONCENTRATE_USED",
+  "BOOST_FORCE_SWAP_USED",
+  "BOOST_DRAW_STARTED",
+  "BOOST_DRAW_COMPLETED",
+  "BOOST_DRAW_FAILED",
 ]);
 const _TONE_CLASSES: Record<string, string> = {
   open: "text-blue-700",
   success: "text-emerald-700",
   muted: "text-zinc-500",
   warning: "text-amber-700",
-  // Distinct from every other tone above (not blue/emerald/zinc/amber, and
-  // not the market-card badges' emerald/purple either) -- a correction is
-  // unmistakably not a player-authored proposal, pool, or burn. See the
-  // Market Correction design writeup.
-  correction: "text-indigo-700",
-  // Distinct from "success" (an accepted deal) -- a system-wide top-up is
-  // good news but not a negotiated outcome.
+  // Distinct from every other tone above -- Arbitration is unmistakably
+  // not a player-authored proposal, pool, or Boost.
+  arbitration: "text-indigo-700",
+  // Distinct from "success" (an accepted deal) -- a unilateral Boost is a
+  // personal action, not a negotiated outcome.
   boost: "text-teal-700",
 };
 
@@ -2136,25 +2039,14 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
       const accepter = playerLabel(event.actor_game_player_id, view);
       return { text: `${swap} — ${proposer} proposed, ${accepter} accepted`, tone: "success" };
     }
-    if (reason === "withdrawn_by_initiator") return { text: `${swap} — withdrawn`, tone: "muted" };
+    if (reason === "expired_all_passed") return { text: `${swap} — everyone passed`, tone: "muted" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
     // Deliberately loud, never masked (the opposite of Pass) -- the
     // market moved far enough that the proposed direction was no longer
     // valid. See the market-direction-reversal design writeup.
     if (reason === "voided_market_swung") return { text: `${swap} — voided, market swung`, tone: "warning" };
+    if (reason === "arbitration_neither") return { text: `${swap} — Arbitration resolved to neither`, tone: "arbitration" };
     return { text: `${swap} — resolved`, tone: "muted" };
-  }
-  if (event.type === "PROPOSAL_ACCEPT_PLEDGED") {
-    const proposal = view.proposals.find((p) => p.proposal_id === event.payload.proposal_id);
-    const swap = proposal ? `${entityLabel(proposal.entity_a, view)} ↔ ${entityLabel(proposal.entity_b, view)}` : "A proposal";
-    const who = playerLabel(event.actor_game_player_id, view);
-    return { text: `${swap} — ${who} accepted (${event.payload.accepted_count}/${event.payload.required_count})`, tone: "open" };
-  }
-  if (event.type === "POOL_ACCEPT_PLEDGED") {
-    const pool = view.pools.find((p) => p.pool_id === event.payload.pool_id);
-    const swap = pool?.entity_c && pool?.entity_d ? `${entityLabel(pool.entity_c, view)} ↔ ${entityLabel(pool.entity_d, view)}` : "A pool";
-    const who = playerLabel(event.actor_game_player_id, view);
-    return { text: `${swap} — ${who} accepted (${event.payload.accepted_count}/${event.payload.required_count})`, tone: "open" };
   }
   if (event.type === "PRIVATE_POOL_CREATED" || event.type === "PUBLIC_POOL_CREATED") {
     const who = playerLabel(event.actor_game_player_id, view);
@@ -2175,7 +2067,6 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     }
     if (reason === "withdrawn_by_initiator") return { text: `${swap} — pool withdrawn`, tone: "muted" };
     if (reason === "declined_by_target") return { text: `${swap} — pool declined`, tone: "muted" };
-    if (reason === "base_proposal_withdrawn") return { text: `${swap} — base proposal was withdrawn`, tone: "muted" };
     if (reason === "invalidated_by_initiator_action") return { text: `${swap} — pool abandoned by its own initiator`, tone: "muted" };
     if (reason === "preempted_by_other_action" && pool) return { text: `${swap} — ${describePreemption(pool, view)}`, tone: "warning" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };
@@ -2192,40 +2083,38 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
   }
   if (event.type === "MARKET_CLOSED") {
     const reason = event.payload.reason as string;
-    if (reason === "TIME_EXPIRED") return { text: "Market closed — time ran out", tone: "warning" };
     if (reason === "READY_THRESHOLD") return { text: "Market closed — ready threshold reached", tone: "warning" };
+    if (reason === "MOVES_EXHAUSTED") return { text: "Market closed — everyone's Moves are spent", tone: "warning" };
     return { text: "Market closed", tone: "warning" };
   }
   if (event.type === "PORTFOLIOS_REVEALED") return { text: "Portfolios revealed", tone: "open" };
   if (event.type === "GAME_SCORED" || event.type === "GAME_ENDED") return { text: "Game scored", tone: "success" };
-  if (event.type === "MARKET_CORRECTION_OFFERED") {
-    return { text: "Market Correction available", tone: "correction" };
+  if (event.type === "ARBITRATION_CALLED") {
+    const role = event.payload.caller_role === "originator" ? "the proposer" : "the responder";
+    return { text: `Arbitration called by ${playerLabel(event.actor_game_player_id, view)} (${role})`, tone: "arbitration" };
   }
-  if (event.type === "MARKET_CORRECTION_RESOLVED") {
+  if (event.type === "ARBITRATION_POOL_REVEALED") return { text: "Arbitration forced the eligible Pool public", tone: "arbitration" };
+  if (event.type === "ARBITRATION_RESOLVED") {
     const reason = event.payload.reason as string;
-    if (reason === "triggered") {
-      // moves is only ever present live when reason === "triggered" --
-      // projections.project_events redacts it for every other reason. Each
-      // line reads the entity's own name plus its old -> new position;
-      // positions have already swapped by the time this event is walked,
-      // so entity_b's *current* position is where entity_a used to sit.
-      const moves = (event.payload.moves as { target_player_id: string; entity_a: string; entity_b: string }[] | undefined) ?? [];
-      const lines = moves.map((m) => {
-        const oldPosition = positionOf(m.entity_b, view);
-        const newPosition = positionOf(m.entity_a, view);
-        return `${entityLabel(m.entity_a, view)} #${oldPosition ?? "?"} → #${newPosition ?? "?"} — market correction`;
-      });
-      return { text: ["Market Correction triggered", ...lines].join("\n"), tone: "correction" };
-    }
-    if (reason === "expired") return { text: "Market Correction expired unused", tone: "correction" };
-    if (reason === "invalidated") return { text: "Market Correction cancelled — the market moved", tone: "correction" };
-    if (reason === "market_resumed") return { text: "Market Correction cancelled — trading resumed", tone: "correction" };
-    return { text: "Market Correction resolved", tone: "correction" };
+    if (reason === "settled_normally") return { text: "Arbitration — settled normally before the window closed", tone: "arbitration" };
+    if (reason === "machine_base") return { text: "Arbitration — the machine drew the base proposal", tone: "arbitration" };
+    if (reason === "machine_pool") return { text: "Arbitration — the machine drew the Pool", tone: "arbitration" };
+    if (reason === "machine_neither") return { text: "Arbitration — the machine drew neither", tone: "arbitration" };
+    if (reason === "market_closed") return { text: "Arbitration — preempted, market closed", tone: "arbitration" };
+    return { text: "Arbitration resolved", tone: "arbitration" };
   }
-  if (event.type === "INFLUENCE_TOPPED_UP") {
-    const amount = event.payload.amount as number;
-    return { text: `Everyone was out of Influence — the table just topped up +${amount}`, tone: "boost" };
+  if (event.type === "BOOSTS_EXPIRED") return { text: "Boosts have expired for the rest of the game", tone: "boost" };
+  if (event.type === "BOOST_CONCENTRATE_USED") return { text: `${playerLabel(event.actor_game_player_id, view)} used Concentrate`, tone: "boost" };
+  if (event.type === "BOOST_FORCE_SWAP_USED") {
+    const a = entityLabel(event.payload.entity_a as string, view);
+    const b = entityLabel(event.payload.entity_b as string, view);
+    return { text: `${playerLabel(event.actor_game_player_id, view)} used Force Swap: ${a} ↔ ${b}`, tone: "boost" };
   }
+  if (event.type === "BOOST_DRAW_STARTED") return { text: `${playerLabel(event.actor_game_player_id, view)} used Draw / Refresh`, tone: "boost" };
+  if (event.type === "BOOST_DRAW_COMPLETED") {
+    return { text: `${playerLabel(event.actor_game_player_id, view)} kept ${entityLabel(event.payload.revealed_entity_id as string, view)}`, tone: "boost" };
+  }
+  if (event.type === "BOOST_DRAW_FAILED") return { text: `${playerLabel(event.actor_game_player_id, view)} skipped their Draw / Refresh`, tone: "boost" };
   return { text: event.type.replaceAll("_", " ").toLowerCase(), tone: "muted" };
 }
 
@@ -2243,18 +2132,13 @@ function matchesActivityFilter(event: EventView, filter: ActivityFilter): boolea
   return (event.type === "PROPOSAL_RESOLVED" || event.type === "POOL_RESOLVED") && event.payload.reason === "executed";
 }
 
-/** Zone-specific "what you never ended up using" copy for the reveal
- * section below -- postgame is deliberately maximally transparent (see
- * the Stage 6/7 design writeup): a discarded holding was seen and let
- * go, a surrendered-unused reserve was never picked up at all, a
- * pickup-surrendered one was seen but lost to the clock, and a
- * burned-unseen one -- the "oh, I burned Motorboat" beat -- was never
- * seen even by its own owner until this exact screen. */
+/** "What you never ended up using" copy for the reveal section below --
+ * postgame is deliberately maximally transparent. The cadence/economy
+ * redesign leaves exactly one non-portfolio zone: a holding discarded via
+ * Concentrate (a duplicate that got swapped out) or Draw/Refresh (the
+ * original holding traded away for the newly drawn entity). */
 function neverUsedLabel(zone: string): string {
-  if (zone === "discarded") return "discarded after Pick Up";
-  if (zone === "surrendered_unused") return "never picked up";
-  if (zone === "pickup_surrendered") return "revealed but lost to the clock";
-  if (zone === "burned_unseen") return "burned for a swap, never seen";
+  if (zone === "discarded") return "discarded via a Boost";
   return zone;
 }
 
@@ -2299,7 +2183,7 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const sortedResults = [...results].sort((a, b) => b.final_value - a.final_value);
   const topValue = sortedResults[0]?.final_value;
   const closeReasonText =
-    view.close_reason === "TIME_EXPIRED" ? "Time ran out." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
+    view.close_reason === "MOVES_EXHAUSTED" ? "Everyone's Moves are spent." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
 
   // Default = your own row, not the winner's -- the screen should open on
   // "how did I do", not congratulate whoever won regardless of who's

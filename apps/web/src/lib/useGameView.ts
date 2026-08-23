@@ -7,33 +7,46 @@ export interface GamePlayerView {
   seat: number;
   display_name: string;
   is_golden_name: boolean;
-  // Self-only -- Influence is a private tax on beneficial actions, not
-  // public information (see the private Influence economy design). Never
-  // present for any other player's roster entry.
-  influence?: { available: number; committed: number; spent: number };
-  reserve_count_remaining: number;
+  // Public roster facts (cadence/economy redesign) -- players need to see
+  // who can still seize initiative (Moves) or still has a unilateral card
+  // to play (Boosts). Decremented only by opening a negotiation / by
+  // USE_BOOST, respectively; moves_remaining never refunds.
+  moves_remaining: number;
+  boosts_remaining: number;
   ready_to_close?: boolean;
-  // Self-only, same reasoning as influence -- see the Haircut-risk design
-  // writeup. projected_value is the unconditional linear-rank sum (what
-  // you'd score if nothing were wiped); safe_value only appears once the
-  // profile is revealed (or the game is scored), and only covers positions
-  // that cannot possibly be wiped.
+  // Self-only -- see the Haircut-risk design writeup. projected_value is
+  // the unconditional linear-rank sum (what you'd score if nothing were
+  // wiped); safe_value only appears once the profile is revealed (or the
+  // game is scored), and only covers positions that cannot possibly be
+  // wiped.
   projected_value?: number;
   safe_value?: number;
 }
 
 export interface HoldingView {
   holding_id: string;
-  // null when this holding's identity hasn't been revealed to its owner
-  // yet (an unrevealed or burned-unseen reserve) -- redacted at the
-  // projection layer, not something the client ever has to withhold
-  // itself. Portfolio holdings are always revealed.
-  entity_id: string | null;
+  // Never null -- the cadence/economy redesign removed every unrevealed
+  // -to-owner zone (the old reserve mechanic); a player's own holdings
+  // list is always fully revealed to them.
+  entity_id: string;
   owner_player_id: string;
-  zone: "reserve_unrevealed" | "pickup_pending" | "portfolio" | "discarded" | "pickup_surrendered" | "surrendered_unused" | "burned_unseen";
+  zone: "portfolio" | "discarded";
   display_name: string | null;
   ticker_symbol: string | null;
   logo_url: string | null;
+}
+
+export interface PendingArbitrationView {
+  arbitration_id: string;
+  called_by: string;
+  caller_role: "originator" | "other";
+  resolves_at: string;
+  // Non-null only if the remaining active responder still has an eligible
+  // Pool on this negotiation -- see engine._eligible_arbitration_pool_id.
+  eligible_pool_id: string | null;
+  // "Who has voted," never what -- the jury's actual votes stay server
+  // -only/Replay-only, see EVENT_VISIBILITY's ARBITRATION_VOTE_CAST entry.
+  voted_player_ids: string[];
 }
 
 export interface ProposalView {
@@ -47,29 +60,15 @@ export interface ProposalView {
   rising_entity_id: string;
   proposer_id: string;
   status: "open" | "resolved";
-  resolution_reason: "executed" | "withdrawn_by_initiator" | "market_closed" | "voided_market_swung" | null;
-  // Public, unconditional -- ACCEPT_PROPOSAL (and ACCEPT_POOL on a public
-  // pool hanging off this proposal) is rejected server-side until now()
-  // passes this. Raw timestamp, same client-derives-its-own-display
-  // pattern as haircut_reveal_at/decision_deadline_at. See
-  // engine._require_accept_unlocked.
-  accept_locked_until: string;
-  // Public, unconditional -- accepting is already fully public everywhere
-  // else. Empty except at accepters_required > 1 (5-6 players); below
-  // that, the one accept that exists also always resolves the proposal
-  // in the same instant, so there's nothing here to ever observe live.
-  // See engine._handle_accept_proposal / GameConfig.accepters_required.
-  pending_accepter_ids: string[];
-  accepters_required: number;
-  // Self-only, mutually exclusive: present on your own authored proposal
-  // (the liability locked at PROPOSE_SWAP time -- never changes) or, while
-  // open, a live preview of what accepting would cost you right now.
-  my_influence_liability?: 0 | 1;
-  my_accept_liability?: 0 | 1;
-  // Self-only, proposer-only -- anonymous count of players who've
-  // PASS_PROPOSAL'd this proposal. Never present for anyone else,
-  // including the players who passed. See the Pass design writeup.
-  passed_count?: number;
+  resolution_reason: "executed" | "market_closed" | "expired_all_passed" | "voided_market_swung" | "arbitration_neither" | null;
+  // Fully public, identities and all (cadence/economy redesign) -- Pass is
+  // a visible, intentional information leak that narrows the active
+  // participant set for everyone to see, and marks jury eligibility for
+  // Arbitration. Empty until anyone passes.
+  passed_player_ids: string[];
+  // Non-null once CALL_ARBITRATION has fired for this negotiation, cleared
+  // the instant it resolves (any reason).
+  pending_arbitration: PendingArbitrationView | null;
 }
 
 export interface PoolView {
@@ -84,25 +83,16 @@ export interface PoolView {
     | "invalidated_by_initiator_action"
     | "declined_by_target"
     | "preempted_by_other_action"
-    | "base_proposal_withdrawn"
     | "market_closed"
     | "voided_market_swung"
     | "base_proposal_voided"
     | null;
-  // Same "who's pledged" transparency as ProposalView -- unconditional,
-  // never gated behind can_see_contents. Always [] / 1 for a private pool.
-  pending_accepter_ids: string[];
-  accepters_required: number;
   // Present only when this audience can see the pool's contents (public
   // pool, or an insider) -- see projections._project_pool. Direction is
   // content, gated the same as entity_c/entity_d.
   entity_c?: string;
   entity_d?: string;
   rising_entity_id?: string;
-  // Same self-only, mutually exclusive pair as ProposalView, but for
-  // accepting this pool (see engine._handle_accept_pool's combine rule).
-  my_influence_liability?: 0 | 1;
-  my_accept_liability?: 0 | 1;
 }
 
 export interface GameView {
@@ -117,14 +107,17 @@ export interface GameView {
   // with no response, the game auto-cancels.
   lobby_reminder_deadline_at: string | null;
   lobby_reminder_grace_seconds: number;
-  // Set together at START_GAME -- always non-null once phase is NEGOTIATION
-  // or later, always null in LOBBY.
+  // Set at START_GAME -- always non-null once phase is NEGOTIATION or
+  // later, always null in LOBBY. No gameplay clock derives from it
+  // anymore (cadence/economy redesign) -- it's elapsed-time telemetry
+  // only.
   started_at: string | null;
-  max_duration_s: number | null;
-  unilateral_cutoff_at: string | null;
-  // Public once set -- the deadline itself isn't secret, only the
-  // profile's contents are until it passes (or the game is scored).
-  haircut_reveal_at: string | null;
+  // Hidden until revealed (project() gates its contents on
+  // haircut_profile_revealed_at server-side, but never exposes that
+  // timestamp itself) or unconditionally once scored. The live reveal
+  // trigger is now Move-driven, not clock-driven -- there is no deadline
+  // to count down to; it fires at an unpredictable moment once cumulative
+  // Moves consumed first crosses 50% of the table's total allocation.
   haircut_profile: { depth_probabilities: number[] } | null;
   // Public from game start, unlike haircut_profile itself -- every
   // configured profile for this player count shares the same max_depth,
@@ -138,31 +131,32 @@ export interface GameView {
   // instant it happens -- not a leading indicator. ready_to_close itself
   // (below, per-player) stays strictly self-only with no aggregate
   // anywhere -- a secret trigger, not a public countdown.
-  close_reason: "TIME_EXPIRED" | "READY_THRESHOLD" | null;
+  close_reason: "READY_THRESHOLD" | "MOVES_EXHAUSTED" | null;
   closed_at: string | null;
+  // Public and unconditional -- at most one bare negotiation open
+  // table-wide at any time; null whenever the table is open for anyone
+  // with Moves left to seize initiative.
+  active_proposal_id: string | null;
+  // Public and unconditional, flips False -> True exactly once, the
+  // instant any single player's own moves_remaining first hits zero --
+  // every Boost control should disable table-wide the instant this is
+  // true, in addition to the separate, negotiation-scoped Arbitration gate.
+  boosts_expired: boolean;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
   proposals: ProposalView[];
   pools: PoolView[];
   holdings?: HoldingView[];
-  // Self-only -- present exactly while this player has an active
-  // pending pickup, injected directly into the frozen cached_view at
-  // PICK_UP_RESERVE time (not computed by the normal projection path,
-  // which never runs again until the pickup resolves). See the Stage 5
-  // design writeup.
-  pending_pickup?: {
-    pending_pickup_id: string;
-    reserve_holding_id: string;
+  // Self-only -- present exactly while this player has an active pending
+  // Draw/Refresh decision, injected directly into the frozen cached_view
+  // at USE_BOOST(draw) time (not computed by the normal projection path,
+  // which never runs again until the decision resolves). Reuses the old
+  // pending-pickup frozen-view pattern under a new name.
+  pending_boost_draw?: {
+    pending_boost_draw_id: string;
     revealed_entity_id: string;
     decision_deadline_at: string;
   };
-  // 2-player-only anti-stagnation mechanic -- always present (like
-  // haircut_profile), null unless a correction is currently offered.
-  // Deliberately minimal even then -- never the entities/displacement
-  // involved, which only ever appear in a
-  // MARKET_CORRECTION_RESOLVED(reason=triggered) activity entry. See
-  // the Market Correction design writeup.
-  pending_market_correction: { correction_id: string; expires_at: string } | null;
   // Present once phase is SCORED -- compute_final_scores' result, merged
   // in by project(). See the Haircut-risk design writeup.
   realized_haircut_depth?: number;

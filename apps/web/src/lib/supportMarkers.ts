@@ -15,13 +15,10 @@ export interface SupportEntry {
 
 export type SupportMarkers = Map<string, SupportEntry[]>;
 
-/** One unclaimed SWAP_EXECUTED occurrence -- a unilateral reserve burn (or,
- * in principle, an unclaimed Market Correction leg, but those are always
- * claimed by MARKET_CORRECTION_RESOLVED(triggered) before this point, see
- * the "Market Correction never credits support markers" note below). Same
- * data computeSupportMarkers already derives for its own unilateralCount
- * bump -- see findUnilateralSwaps, which shares that exact pass rather
- * than re-deriving it. */
+/** One unclaimed SWAP_EXECUTED occurrence -- a unilateral Force Swap Boost.
+ * Same data computeSupportMarkers already derives for its own
+ * unilateralCount bump -- see findUnilateralSwaps, which shares that exact
+ * pass rather than re-deriving it. */
 export interface UnilateralSwapEvent {
   entityA: string;
   entityB: string;
@@ -50,7 +47,7 @@ function pairKey(a: string, b: string): string {
  *     base leg's rise and the pool leg's rise.
  *   - accepting a Pool (private or public): executes the whole bundle --
  *     both legs' rises.
- *   - a unilateral BURN_RESERVE_FOR_SWAP: see below -- its own distinct
+ *   - a unilateral Force Swap Boost: see below -- its own distinct
  *     `unilateralCount`, not folded into ordinary `count`.
  * A player who has any existing marker (either kind) on the entity that
  * *fell* has it cleared entirely (not decremented) -- an "up" only goes
@@ -74,42 +71,29 @@ function pairKey(a: string, b: string): string {
  * credit lists get deduped through creditLeg's Set regardless of which
  * roles happen to coincide in a given player.
  *
- * **Unilateral detection.** BURN_RESERVE_FOR_SWAP never fires
- * PROPOSAL_RESOLVED/POOL_RESOLVED -- it's the only one of
- * engine._execute_swap's 4 call sites that doesn't (accept-proposal and
- * both accept-pool legs unconditionally emit a matching resolution for
- * the exact same entity pair, every time). So a SWAP_EXECUTED with no
- * matching resolution is structurally guaranteed to be a unilateral
- * burn, not inferred from a heuristic. Tracked via a per-pair *queue*
- * (not a flat claimed/unclaimed set) since the same pair can legitimately
- * swap more than once over a game -- each SWAP_EXECUTED is queued with
- * its own position snapshot, and a resolution for that exact pair pops
- * (claims) the most recent one, LIFO. Whatever's left in any queue after
- * the full event walk gets credited unilaterally, using its own recorded
+ * **Unilateral detection.** A Force Swap Boost never fires
+ * PROPOSAL_RESOLVED/POOL_RESOLVED -- it's the only path into
+ * engine._execute_swap that doesn't (accept-proposal, both accept-pool
+ * legs, and the Arbitration machine draw's own base/pool outcomes all
+ * unconditionally emit a matching resolution for the exact same entity
+ * pair, every time). So a SWAP_EXECUTED with no matching resolution is
+ * structurally guaranteed to be a unilateral Force Swap, not inferred
+ * from a heuristic. Tracked via a per-pair *queue* (not a flat
+ * claimed/unclaimed set) since the same pair can legitimately swap more
+ * than once over a game -- each SWAP_EXECUTED is queued with its own
+ * position snapshot, and a resolution for that exact pair pops (claims)
+ * the most recent one, LIFO. Whatever's left in any queue after the full
+ * event walk gets credited unilaterally, using its own recorded
  * positions rather than a shared "most recent swap" lookup, so repeated
  * unclaimed swaps of the same pair never cross-contaminate each other's
- * direction. RESERVE_BURNED_FOR_SWAP itself stays SERVER_ONLY throughout
- * -- this never needs it, or any event-visibility change: SWAP_EXECUTED's
- * actor is already, safely, the burner (for a burn, the ephemeral
+ * direction. BOOST_FORCE_SWAP_USED itself stays ACTOR_ONLY throughout --
+ * this never needs it, or any event-visibility change: SWAP_EXECUTED's
+ * actor is already, safely, the Force Swap's own user (the ephemeral
  * SwapIntent's initiator_player_id is the actor themselves, unlike an
  * *accepted* proposal/pool swap where that same field is the original
  * author, not whoever's command triggered it) -- entities, positions, and
- * actor are all already public with zero mention of which reserve funded
+ * actor are all already public with zero mention of which Boost funded
  * it.
- *
- * **Market Correction never credits support markers, ever.** A
- * corrective move is real (it goes through the same SWAP_EXECUTED /
- * engine._execute_swap choke point as everything else here), but nobody
- * authored its direction -- so a triggered correction's two swaps must
- * be *claimed*, exactly like an executed proposal/pool leg claims its
- * own swap, WITHOUT crediting any player. MARKET_CORRECTION_RESOLVED's
- * payload only ever carries its `moves` live when reason === "triggered"
- * (see projections.project_events' bespoke redaction) -- expired/
- * invalidated/market_resumed corrections never reveal what they would
- * have done, so there's nothing to claim for those, and their swaps
- * never happened anyway. If a triggering player needs attribution
- * in the ticker, it comes from MARKET_CORRECTION_RESOLVED's own
- * actor_game_player_id, entirely separate from this function.
  *
  * `pools` (the live view.pools, not the event log) is the source of a
  * pool's own entities/initiator/base_proposal_id -- not the
@@ -215,14 +199,6 @@ function _walkEvents(events: EventView[], pools: PoolView[]): { markers: Support
       if (!direction) continue;
       creditLeg(direction.rising, direction.falling, [pool.initiatorId, accepterId]);
       claimSwap(pool.entityC, pool.entityD);
-    } else if (event.type === "MARKET_CORRECTION_RESOLVED" && event.payload.reason === "triggered") {
-      // Claims both swaps so they never fall into the "unclaimed =
-      // unilateral" bucket below -- deliberately no bump()/clear() calls
-      // at all. See the design note above.
-      const moves = (event.payload.moves as { entity_a: string; entity_b: string }[] | undefined) ?? [];
-      for (const move of moves) {
-        claimSwap(move.entity_a, move.entity_b);
-      }
     }
   }
 
