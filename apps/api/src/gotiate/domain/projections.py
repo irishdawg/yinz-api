@@ -132,6 +132,11 @@ def project(game: Game, audience: Audience) -> dict:
         # Public and unconditional, flips once, permanently -- every Boost
         # control should disable table-wide the instant this is true.
         "boosts_expired": game.boosts_expired,
+        # Public config fact, not derived from any player's own state --
+        # the frontend needs this to grey out an already-at-cap entity in
+        # Concentrate's own card-tap picker, rather than hardcoding the
+        # default and letting it drift from GameConfig.
+        "concentrate_max_copies": game.config.concentrate_max_copies,
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         # NOTE (cadence/economy redesign): a passed proposal/pool is no

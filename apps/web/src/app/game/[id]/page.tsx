@@ -209,19 +209,22 @@ function negotiationStateLabel(view: GameView): string {
   return activeResponders.length <= 1 ? "Negotiation active — narrowed to two" : "Negotiation active";
 }
 
-/** Visualize's ring treatment: green (rising) / red (falling), and for a
- * Pool's 4-card Visualize, a solid ring for the base pair (pairIndex 0)
- * vs. a dashed outline for the pool leg (pairIndex 1) -- two different CSS
- * mechanisms (box-shadow ring vs. border outline) so "these are two
- * distinct pairs" reads clearly even when the two cards of a pair are far
- * apart or off-screen from each other in the horizontally-scrolling strip. */
-function highlightRingClass(highlight: { direction: "rising" | "falling"; pairIndex: number } | undefined): string {
+/** Visualize's fill treatment: a background tint, not a border/ring --
+ * ownership already owns the border (bold = owned, see the card's own
+ * className), so overloading it for Visualize too made an owned card
+ * mid-Visualize read as two competing signals at once. Which way a card
+ * is moving is already obvious from context (it's one of exactly two
+ * cards in the pair); the fill only needs to distinguish "the base deal"
+ * (light blue) from "the pool riding on it" (light violet) -- a bare
+ * proposal's own Visualize never has a pool leg, so `poolAlsoHighlighted`
+ * only ever matters for the 4-card Pool case. The base pair's own fill
+ * goes one shade lighter whenever a pool is highlighted alongside it, so
+ * the pool -- the thing you're actually hovering -- reads as the primary
+ * focus and the base stays present only as context. */
+function visualizeFillClass(highlight: { role: "base" | "pool" } | undefined, poolAlsoHighlighted: boolean): string {
   if (!highlight) return "";
-  const color = highlight.direction === "rising" ? "emerald" : "red";
-  if (highlight.pairIndex === 1) {
-    return color === "emerald" ? "outline outline-2 outline-dashed outline-emerald-500" : "outline outline-2 outline-dashed outline-red-500";
-  }
-  return color === "emerald" ? "ring-4 ring-emerald-500" : "ring-4 ring-red-500";
+  if (highlight.role === "pool") return "bg-violet-100";
+  return poolAlsoHighlighted ? "bg-blue-50" : "bg-blue-100";
 }
 
 /** Payout chance is a property of the market *position*, not whichever
@@ -462,6 +465,15 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // branch below. Mutually exclusive with poolingProposalId (starting one
   // clears the other, see cancelSelection).
   const [forceSwapping, setForceSwapping] = useState(false);
+  // True while Concentrate (a Boost) is picking its two entities directly
+  // on the scale -- unlike pooling/forceSwapping this is a two-*step*
+  // card-tap flow, not a two-card-then-confirm one: the first tap sets
+  // concentrateDuplicateEntityId (which card to duplicate), the second
+  // tap fires USE_BOOST immediately (which holding to discard), no
+  // confirm bar at all. See handleConcentrateTap.
+  const [concentrating, setConcentrating] = useState(false);
+  const [concentrateDuplicateEntityId, setConcentrateDuplicateEntityId] = useState<string | null>(null);
+  const [concentrateSubmitting, setConcentrateSubmitting] = useState(false);
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const { events } = useGameEvents(gameId);
@@ -518,31 +530,26 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // clearing any earlier pending clear first so a second click doesn't get
   // its highlight cut short by the first click's timer.
   const marketScrollRef = useRef<HTMLDivElement>(null);
-  // entity_id -> "rising" | "falling", not just a flat highlighted list --
-  // direction is derived the same way support markers already derive it
-  // (compare current positions, higher
-  // position = worse = rising once swapped), and Pool Visualize highlights
-  // both pairs at once. `pairIndex` (0 or 1) lets the market card apply a
-  // distinct ring style per pair (dashed vs solid) so a 4-card Pool
-  // Visualize still reads as two grouped pairs, not one blob of four.
-  const [highlighted, setHighlighted] = useState<Map<string, { direction: "rising" | "falling"; pairIndex: number }> | null>(
-    null,
-  );
+  // entity_id -> which pair it belongs to -- "base" gets the light-blue
+  // fill, "pool" gets light violet (see visualizeFillClass). Direction
+  // (rising/falling) doesn't need its own signal anymore: with only two
+  // cards in a pair, which one is rising is already obvious from context,
+  // and overloading color for it was competing with ownership's own
+  // border treatment. Pool Visualize highlights both pairs at once.
+  const [highlighted, setHighlighted] = useState<Map<string, { role: "base" | "pool" }> | null>(null);
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** Accepts one pair (bare proposal) or two (a proposal + its pool) --
-   * direction per pair is the entity's LOCKED rising_entity_id (see the
-   * market-direction-reversal design writeup), never recomputed from
-   * current market positions. A negotiation's arrows stay pinned to what
-   * was authored right up until it executes or voids -- if the market
-   * crosses that relationship, the negotiation voids rather than the
-   * arrows silently flipping. */
-  function visualizeProposal(pairs: [string, string, string][]) {
-    const next = new Map<string, { direction: "rising" | "falling"; pairIndex: number }>();
-    pairs.forEach(([a, b, risingId], pairIndex) => {
-      const falling = risingId === a ? b : a;
-      next.set(risingId, { direction: "rising", pairIndex });
-      next.set(falling, { direction: "falling", pairIndex });
+   * the first is always "base", the second (if present) always "pool".
+   * Marks both entities of each pair identically; there's no
+   * per-card direction distinction anymore, see the `highlighted` state
+   * comment above. */
+  function visualizeProposal(pairs: [string, string][]) {
+    const next = new Map<string, { role: "base" | "pool" }>();
+    pairs.forEach(([a, b], pairIndex) => {
+      const role = pairIndex === 0 ? "base" : "pool";
+      next.set(a, { role });
+      next.set(b, { role });
     });
     setHighlighted(next);
     if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
@@ -624,7 +631,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         if (p.status !== "resolved" || prevProposalStatus.get(p.proposal_id) !== "open") continue;
         if (p.resolution_reason === "executed") {
           addLingeringDeal(p.proposal_id, "accepted");
-          visualizeProposal([[p.entity_a, p.entity_b, p.rising_entity_id]]);
+          visualizeProposal([[p.entity_a, p.entity_b]]);
         } else if (p.resolution_reason === "expired_all_passed") {
           addLingeringDeal(p.proposal_id, "expired_all_passed");
         }
@@ -642,8 +649,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
           addLingeringDeal(pool.pool_id, "accepted");
           if (pool.entity_c && pool.entity_d && pool.rising_entity_id) {
             const base = view.proposals.find((p) => p.proposal_id === pool.base_proposal_id);
-            const pairs: [string, string, string][] = [[pool.entity_c, pool.entity_d, pool.rising_entity_id]];
-            if (base) pairs.unshift([base.entity_a, base.entity_b, base.rising_entity_id]);
+            const pairs: [string, string][] = [[pool.entity_c, pool.entity_d]];
+            if (base) pairs.unshift([base.entity_a, base.entity_b]);
             visualizeProposal(pairs);
           }
         } else if (pool.resolution_reason === "withdrawn_by_initiator") {
@@ -712,13 +719,12 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     for (const u of unilateral) {
       if (shownUnilateralSeqNosRef.current.has(u.seqNo)) continue;
       shownUnilateralSeqNosRef.current.add(u.seqNo);
-      const risingEntityId = u.positionA < u.positionB ? u.entityA : u.entityB;
       addLingeringDeal(`unilateral:${u.seqNo}`, "unilateral_swap", {
         unilateralEntityA: u.entityA,
         unilateralEntityB: u.entityB,
         unilateralActorLabel: playerLabel(u.actorId, view),
       });
-      visualizeProposal([[u.entityA, u.entityB, risingEntityId]]);
+      visualizeProposal([[u.entityA, u.entityB]]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- view.pools/view.you read fresh each run; `events` (growing every poll) is the real driver.
   }, [events]);
@@ -735,6 +741,12 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
       ownedCounts.set(h.entity_id, (ownedCounts.get(h.entity_id) ?? 0) + 1);
     }
   }
+
+  // True whenever a Pool leg is part of the current Visualize highlight --
+  // the base pair's own fill steps down a shade in that case, so the pool
+  // (the thing actually being hovered) reads as the primary focus. See
+  // visualizeFillClass.
+  const poolAlsoHighlighted = highlighted !== null && [...highlighted.values()].some((h) => h.role === "pool");
 
   // Pool selection guardrail: while pooling against a base proposal, its
   // own two entities can never legally be part of the pool leg (the
@@ -776,6 +788,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setSelected([]);
     setPoolingProposalId(proposalId);
     setForceSwapping(false);
+    setConcentrating(false);
+    setConcentrateDuplicateEntityId(null);
   }
 
   function cancelSelection() {
@@ -783,6 +797,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setSelected([]);
     setPoolingProposalId(null);
     setForceSwapping(false);
+    setConcentrating(false);
+    setConcentrateDuplicateEntityId(null);
   }
 
   function startForceSwap() {
@@ -790,6 +806,52 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     setSelected([]);
     setPoolingProposalId(null);
     setForceSwapping(true);
+    setConcentrating(false);
+    setConcentrateDuplicateEntityId(null);
+  }
+
+  function startConcentrate() {
+    setProposeError(null);
+    setSelected([]);
+    setPoolingProposalId(null);
+    setForceSwapping(false);
+    setConcentrating(true);
+    setConcentrateDuplicateEntityId(null);
+  }
+
+  /** Concentrate's own two-step card-tap flow. Step 1 (concentrateDuplicateEntityId
+   * is null): tapping an eligible owned, under-cap entity locks it in as
+   * the duplicate target. Step 2: tapping any other owned entity fires
+   * USE_BOOST(concentrate) immediately -- no confirm step, per the locked
+   * design. Deliberately excludes re-tapping the same entity for step 2:
+   * with no confirm step, an accidental double-tap on the same card would
+   * otherwise silently spend a Boost on a guaranteed no-op (legal
+   * server-side, but never useful). */
+  async function handleConcentrateTap(entityId: string) {
+    if (concentrateSubmitting) return;
+    if (concentrateDuplicateEntityId === null) {
+      const owned = ownedCounts.get(entityId) ?? 0;
+      if (owned < 1 || owned >= view.concentrate_max_copies) return;
+      setConcentrateDuplicateEntityId(entityId);
+      return;
+    }
+    if (entityId === concentrateDuplicateEntityId) return;
+    const holding = (view.holdings ?? []).find((h) => h.owner_player_id === view.you && h.zone === "portfolio" && h.entity_id === entityId);
+    if (!holding) return;
+
+    const duplicateEntityId = concentrateDuplicateEntityId;
+    setConcentrating(false);
+    setConcentrateDuplicateEntityId(null);
+    setProposeError(null);
+    setConcentrateSubmitting(true);
+    const result = await submitCommand(
+      gameId,
+      "USE_BOOST",
+      { boost_type: "concentrate", holding_id_to_discard: holding.holding_id, entity_id_to_duplicate: duplicateEntityId },
+      { expectedVersion: view.version, onSettled: onChanged },
+    );
+    setConcentrateSubmitting(false);
+    if (!result.ok) setProposeError(commandErrorMessage(result.data, "Couldn't concentrate."));
   }
 
   // A negotiation is at most one, table-wide -- Propose is illegal
@@ -932,7 +994,17 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             {displayedMarket.map((entity) => {
               const owned = ownedCounts.get(entity.entity_id) ?? 0;
               const isSelected = selected.includes(entity.entity_id);
-              const isDisabled = poolGuardrailEntities.has(entity.entity_id);
+              const isConcentrateDuplicateTarget = concentrating && entity.entity_id === concentrateDuplicateEntityId;
+              // Step 1 (nothing picked yet): must be owned and under the
+              // cap. Step 2 (duplicate already picked): any *other* owned
+              // entity -- re-tapping the same one is blocked, see
+              // handleConcentrateTap's own doc comment.
+              const concentrateIneligible =
+                concentrating &&
+                (concentrateDuplicateEntityId === null
+                  ? owned < 1 || owned >= view.concentrate_max_copies
+                  : owned < 1 || entity.entity_id === concentrateDuplicateEntityId);
+              const isDisabled = poolGuardrailEntities.has(entity.entity_id) || concentrateIneligible;
               const highlight = highlighted?.get(entity.entity_id);
               const markers = supportMarkers.get(entity.entity_id);
               const notedPlayerIds = notes[entity.entity_id] ?? [];
@@ -944,6 +1016,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                     onClick={() => {
                       if (longPressTriggeredRef.current) {
                         longPressTriggeredRef.current = false;
+                        return;
+                      }
+                      if (concentrating) {
+                        handleConcentrateTap(entity.entity_id);
                         return;
                       }
                       toggleSelect(entity.entity_id);
@@ -974,9 +1050,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                     disabled={isDisabled}
                     className={`relative flex h-36 w-28 flex-shrink-0 flex-col items-center gap-1 overflow-hidden rounded p-2 text-center transition-transform duration-300 ${
                       owned > 0 ? "border-2 border-zinc-900" : "border border-zinc-200"
-                    } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : "bg-white"} ${isDisabled ? "opacity-30" : ""} ${
+                    } ${isSelected ? "bg-blue-100 ring-2 ring-blue-500" : visualizeFillClass(highlight, poolAlsoHighlighted) || "bg-white"} ${
+                      isDisabled && !isConcentrateDuplicateTarget ? "opacity-30" : ""
+                    } ${isConcentrateDuplicateTarget ? "ring-4 ring-amber-400" : ""} ${
                       highlight ? "z-10 scale-110 shadow-lg" : ""
-                    } ${highlightRingClass(highlight)}`}
+                    }`}
                   >
                     {notedPlayerIds.length > 0 && (
                       <span className="absolute right-1 top-1 flex flex-shrink-0 gap-0.5">
@@ -1090,6 +1168,19 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         </div>
       )}
 
+      {concentrating && (
+        <div className="flex items-center justify-between gap-2 rounded border border-teal-300 bg-teal-50 p-2 text-xs text-teal-900">
+          <span>
+            {concentrateDuplicateEntityId === null
+              ? "Concentrate — tap a card to duplicate it."
+              : `Duplicating ${entityLabel(concentrateDuplicateEntityId, view)} — now tap a card to discard.`}
+          </span>
+          <button type="button" onClick={cancelSelection} className="flex-shrink-0 underline">
+            Cancel
+          </button>
+        </div>
+      )}
+
       {selected.length === 2 && (
         <div className="flex flex-col gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm">
           <div className="flex items-center justify-between gap-2">
@@ -1145,7 +1236,17 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         lingeringDeals={lingeringDeals}
       />
 
-      <BoostControls gameId={gameId} view={view} onChanged={onChanged} forceSwapping={forceSwapping} onStartForceSwap={startForceSwap} onCancelForceSwap={cancelSelection} />
+      <BoostControls
+        gameId={gameId}
+        view={view}
+        onChanged={onChanged}
+        concentrating={concentrating}
+        onStartConcentrate={startConcentrate}
+        onCancelConcentrate={cancelSelection}
+        forceSwapping={forceSwapping}
+        onStartForceSwap={startForceSwap}
+        onCancelForceSwap={cancelSelection}
+      />
 
       <div>
         <h2 className="mb-2 text-sm font-medium text-zinc-700">Players</h2>
@@ -1379,13 +1480,12 @@ function BoostDrawDecisionView({
   );
 }
 
-/** Concentrate needs two of the player's own owned entities (discard +
- * duplicate, which may coincide -- see engine._use_boost_concentrate), so
- * it gets its own small inline picker rather than reusing MarketView's
- * two-card market-grid selection (that flow is for picking any two market
- * entities, not specifically ones you already own). Force Swap, in
- * contrast, *is* exactly "pick any two market cards" -- it reuses that
- * flow directly via forceSwapping/onStartForceSwap, the same way pooling
+/** Concentrate and Force Swap both hand off to MarketView's own market-grid
+ * card-tap flow (concentrating/forceSwapping + their start/cancel
+ * callbacks) rather than owning a picker here -- Concentrate taps two of
+ * the player's own owned entities directly on the scale (duplicate, then
+ * discard, no confirm step -- see MarketView's handleConcentrateTap);
+ * Force Swap taps any two market cards, exactly like Pool composition
  * already does. Draw/Refresh needs no selection UI at all up front -- one
  * tap submits USE_BOOST(draw) immediately, and the response (carrying
  * view.pending_boost_draw) hands off to BoostDrawDecisionView on the very
@@ -1394,6 +1494,9 @@ function BoostControls({
   gameId,
   view,
   onChanged,
+  concentrating,
+  onStartConcentrate,
+  onCancelConcentrate,
   forceSwapping,
   onStartForceSwap,
   onCancelForceSwap,
@@ -1401,47 +1504,20 @@ function BoostControls({
   gameId: string;
   view: GameView;
   onChanged: () => void;
+  concentrating: boolean;
+  onStartConcentrate: () => void;
+  onCancelConcentrate: () => void;
   forceSwapping: boolean;
   onStartForceSwap: () => void;
   onCancelForceSwap: () => void;
 }) {
   const self = view.players.find((p) => p.game_player_id === view.you);
-  const [concentrating, setConcentrating] = useState(false);
-  const [discardId, setDiscardId] = useState<string>("");
-  const [duplicateEntityId, setDuplicateEntityId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!self) return null;
 
   const activeArbitration = view.proposals.find((p) => p.proposal_id === view.active_proposal_id)?.pending_arbitration;
   const boostsLegal = !view.boosts_expired && !activeArbitration && self.boosts_remaining > 0;
-  const myHoldings = (view.holdings ?? []).filter((h) => h.owner_player_id === view.you && h.zone === "portfolio");
-  const ownedEntityIds = [...new Set(myHoldings.map((h) => h.entity_id))];
-
-  function closeConcentrate() {
-    setConcentrating(false);
-    setDiscardId("");
-    setDuplicateEntityId("");
-    setError(null);
-  }
-
-  async function handleConcentrate() {
-    if (!discardId || !duplicateEntityId) return;
-    setError(null);
-    setBusy(true);
-    const result = await submitCommand(
-      gameId,
-      "USE_BOOST",
-      { boost_type: "concentrate", holding_id_to_discard: discardId, entity_id_to_duplicate: duplicateEntityId },
-      { expectedVersion: view.version, onSettled: onChanged },
-    );
-    setBusy(false);
-    if (!result.ok) {
-      setError(commandErrorMessage(result.data, "Couldn't concentrate."));
-      return;
-    }
-    closeConcentrate();
-  }
 
   async function handleDraw() {
     setError(null);
@@ -1466,11 +1542,13 @@ function BoostControls({
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={() => setConcentrating(true)}
-          disabled={!boostsLegal || concentrating || forceSwapping}
-          className="rounded border border-teal-300 px-2 py-1 text-xs font-medium text-teal-700 disabled:opacity-30"
+          onClick={() => (concentrating ? onCancelConcentrate() : onStartConcentrate())}
+          disabled={!boostsLegal || forceSwapping}
+          className={`rounded border px-2 py-1 text-xs font-medium disabled:opacity-30 ${
+            concentrating ? "border-teal-500 bg-teal-100 text-teal-900" : "border-teal-300 text-teal-700"
+          }`}
         >
-          Concentrate
+          {concentrating ? "Cancel Concentrate" : "Concentrate"}
         </button>
         <button
           type="button"
@@ -1491,50 +1569,6 @@ function BoostControls({
           {busy ? "…" : "Draw / Refresh"}
         </button>
       </div>
-
-      {concentrating && (
-        <div className="mt-3 flex flex-col gap-2 rounded border border-teal-200 bg-teal-50 p-2 text-xs text-teal-900">
-          <label className="flex items-center justify-between gap-2">
-            <span>Duplicate</span>
-            <select
-              value={duplicateEntityId}
-              onChange={(e) => setDuplicateEntityId(e.target.value)}
-              className="rounded border border-teal-300 bg-white px-1 py-0.5"
-            >
-              <option value="">Choose an entity you own…</option>
-              {ownedEntityIds.map((id) => (
-                <option key={id} value={id}>
-                  {entityLabel(id, view)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center justify-between gap-2">
-            <span>Discard</span>
-            <select value={discardId} onChange={(e) => setDiscardId(e.target.value)} className="rounded border border-teal-300 bg-white px-1 py-0.5">
-              <option value="">Choose a holding to discard…</option>
-              {myHoldings.map((h) => (
-                <option key={h.holding_id} value={h.holding_id}>
-                  {entityLabel(h.entity_id, view)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="flex justify-end gap-2">
-            <button type="button" onClick={closeConcentrate} className="rounded border border-zinc-300 px-2 py-1 text-zinc-700">
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleConcentrate}
-              disabled={busy || !discardId || !duplicateEntityId}
-              className="rounded bg-teal-700 px-2 py-1 text-white disabled:opacity-50"
-            >
-              {busy ? "…" : "Concentrate"}
-            </button>
-          </div>
-        </div>
-      )}
       {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
     </div>
   );
@@ -1645,7 +1679,7 @@ function OpenProposals({
   gameId: string;
   view: GameView;
   onChanged: () => void;
-  onVisualize: (pairs: [string, string, string][]) => void;
+  onVisualize: (pairs: [string, string][]) => void;
   onClearVisualize: () => void;
   onStartPool: (proposalId: string) => void;
   lingeringDeals: LingeringDeal[];
@@ -1760,9 +1794,9 @@ function OpenProposals({
                   re-triggers the one you're actually on. Not wired up at all
                   once resolved -- nothing left to evaluate. */}
               <div
-                onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b]])}
                 onMouseLeave={lingering ? undefined : onClearVisualize}
-                onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b, p.rising_entity_id]])}
+                onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b]])}
                 title={lingering ? undefined : "Hover or tap to visualize"}
                 className={`flex items-center justify-between gap-2 rounded ${lingering ? "" : "cursor-pointer hover:bg-zinc-50"}`}
               >
@@ -1829,8 +1863,8 @@ function OpenProposals({
                       visible && !poolLingering
                         ? () =>
                             onVisualize([
-                              [p.entity_a, p.entity_b, p.rising_entity_id],
-                              [pool.entity_c!, pool.entity_d!, pool.rising_entity_id!],
+                              [p.entity_a, p.entity_b],
+                              [pool.entity_c!, pool.entity_d!],
                             ])
                         : undefined;
                     return (
@@ -1882,7 +1916,7 @@ function OpenProposals({
                                 Decline
                               </button>
                             )}
-                            {!isPoolMine && (pool.visibility === "public" || isMine) && (
+                            {!isPoolMine && !iHavePassed && (pool.visibility === "public" || isMine) && (
                               <AcceptButton busy={busyId === pool.pool_id} onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")} />
                             )}
                           </span>
@@ -2085,6 +2119,7 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     const reason = event.payload.reason as string;
     if (reason === "READY_THRESHOLD") return { text: "Market closed — ready threshold reached", tone: "warning" };
     if (reason === "MOVES_EXHAUSTED") return { text: "Market closed — everyone's Moves are spent", tone: "warning" };
+    if (reason === "ABANDONED") return { text: "Market closed — the table went quiet", tone: "warning" };
     return { text: "Market closed", tone: "warning" };
   }
   if (event.type === "PORTFOLIOS_REVEALED") return { text: "Portfolios revealed", tone: "open" };
@@ -2183,7 +2218,13 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const sortedResults = [...results].sort((a, b) => b.final_value - a.final_value);
   const topValue = sortedResults[0]?.final_value;
   const closeReasonText =
-    view.close_reason === "MOVES_EXHAUSTED" ? "Everyone's Moves are spent." : view.close_reason === "READY_THRESHOLD" ? "Ready threshold reached." : null;
+    view.close_reason === "MOVES_EXHAUSTED"
+      ? "Everyone's Moves are spent."
+      : view.close_reason === "READY_THRESHOLD"
+        ? "Ready threshold reached."
+        : view.close_reason === "ABANDONED"
+          ? "The table went quiet."
+          : null;
 
   // Default = your own row, not the winner's -- the screen should open on
   // "how did I do", not congratulate whoever won regardless of who's

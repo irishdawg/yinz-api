@@ -141,6 +141,16 @@ class CloseReason(StrEnum):
     # engine._maybe_close_on_moves_exhausted.
     MOVES_EXHAUSTED = "MOVES_EXHAUSTED"
     # No OPTIONALITY_EXHAUSTED for V1 — deliberately deferred, see decision log §10.
+    # A real-play gap found post-redesign: removing the gameplay clock also
+    # removed the only force-close path that never depended on a player
+    # doing something. Fires once negotiation_abandonment_seconds has
+    # passed since the last successfully handled command for this game --
+    # see Game.last_activity_at and engine._maybe_close_on_abandonment.
+    # Deliberately NOT a revived gameplay clock: nobody sees a countdown,
+    # nobody races it, it never affects strategy -- purely a safety valve,
+    # same spirit as the pre-existing LOBBY abandonment auto-cancel
+    # (lobby_reminder_deadline_at/lobby_reminder_grace_seconds).
+    ABANDONED = "ABANDONED"
 
 
 class CancellationReason(StrEnum):
@@ -293,6 +303,14 @@ class GameConfig(BaseModel):
     # never determinative: the jury can lean on the machine, never become it.
     arbitration_vote_bonus: int = 10
     arbitration_vote_penalty: int = 5
+
+    # NEGOTIATION-phase abandonment backstop (see CloseReason.ABANDONED) --
+    # the game force-closes once this many seconds pass with no command
+    # successfully handled for it. Deliberately short: this cadence is
+    # designed around serial attention with no dead air, so a long silence
+    # is a much stronger abandonment signal than it would be under the old
+    # clocked design.
+    negotiation_abandonment_seconds: float = 600.0
 
     join_code_length: int = 7
     # Bounds the brute-force window on a live join code independent of how
@@ -516,6 +534,14 @@ class Game(BaseModel):
     # moves_remaining first hits zero (not when everyone's does), and never
     # resets. See engine._maybe_expire_boosts.
     boosts_expired: bool = False
+    # Set at create_game, bumped to `now` by handle_command on every
+    # successfully handled command thereafter (system-triggered time
+    # -transitions -- lobby auto-cancel, the Arbitration machine draw, a
+    # Boost-draw timeout -- deliberately never bump it; only genuine player
+    # action counts). Drives CloseReason.ABANDONED once
+    # negotiation_abandonment_seconds passes with no activity during
+    # NEGOTIATION -- see engine._maybe_close_on_abandonment.
+    last_activity_at: datetime
 
     # Chosen and locked at START_GAME, hidden until haircut_profile_revealed_at
     # (or until the game is SCORED, whichever comes first -- see project()) --

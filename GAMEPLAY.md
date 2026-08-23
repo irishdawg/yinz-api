@@ -125,6 +125,16 @@ by either:
   Boosts expiry (§4), which fires on the *first* player to hit zero — the
   table can keep spending its last few Moves, opening and resolving
   negotiations, for a while after Boosts have already expired.
+- **`ABANDONED`**: `negotiation_abandonment_seconds` (default 600s/10min)
+  passes with no command successfully handled for this game
+  (`Game.last_activity_at`, bumped by `handle_command` on every
+  successfully handled command — a rejected one never counts). Checked as
+  a time-driven transition (`apply_due_time_transitions`), same as the
+  pre-existing `LOBBY` reminder/grace auto-cancel. **Not** a revived
+  gameplay clock — nobody sees a countdown, nobody races it, it never
+  affects strategy; it exists purely so an abandoned browser tab (or a
+  player who never returns) can't leave a game open forever with nobody
+  able to close it.
 
 ### close_market() — exact sequence
 1. `phase = CLOSING`; sets `closed_at`/`close_reason`; nulls
@@ -673,8 +683,9 @@ of *every* command via `apply_due_time_transitions`
 (`engine.handle_command`'s first step), and cheaply mirrored
 (side-effect-free) by `is_time_transition_due` so `GET /games/{id}` can
 decide whether it's worth acquiring the write lock at all: lobby
-reminder/grace auto-cancel, Arbitration's own 20-second window elapsing,
-and each player's own Draw/Refresh decision window elapsing. Every other
+reminder/grace auto-cancel, the `NEGOTIATION`-phase abandonment backstop
+(§2), Arbitration's own 20-second window elapsing, and each player's own
+Draw/Refresh decision window elapsing. Every other
 trigger (Boost expiry, the Haircut reveal, the Move-exhaustion endgame) is
 a direct, synchronous consequence of a command, not something that needs
 polling to notice.

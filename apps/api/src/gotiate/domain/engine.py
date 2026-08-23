@@ -97,6 +97,7 @@ def create_game(
         join_code=new_join_code(resolved_config.join_code_length),
         config=resolved_config,
         lobby_reminder_deadline_at=now + timedelta(seconds=resolved_config.lobby_reminder_seconds),
+        last_activity_at=now,
     )
     host = GamePlayer(
         game_player_id=new_id(),
@@ -184,6 +185,15 @@ def handle_command(
         exc.partial_events = events
         raise
 
+    # A successfully handled command is "activity" regardless of whether it
+    # produced any events (a legal no-op still proves someone's here) --
+    # deliberately not tied to the version bump below, so this bookkeeping
+    # field never breaks the documented "a no-op command doesn't bump the
+    # game version" invariant. A *rejected* command (the except branch
+    # above) never reaches this line -- only genuine player action counts,
+    # see CloseReason.ABANDONED.
+    game.last_activity_at = now
+
     if new_events:
         game.version += 1
     events += new_events
@@ -220,7 +230,8 @@ def handle_command(
 
 def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     """NOTE (cadence/economy redesign): there is no gameplay clock. The
-    lobby reminder/grace auto-cancel, Arbitration's own 20-second
+    lobby reminder/grace auto-cancel, the NEGOTIATION-phase abandonment
+    backstop (CloseReason.ABANDONED), Arbitration's own 20-second
     last-chance window, and each player's own short Draw/Refresh decision
     window are the only time-driven transitions in this game -- every
     other trigger (Boost expiry, the Haircut reveal, the Move-exhaustion
@@ -248,6 +259,14 @@ def apply_due_time_transitions(game: Game, now: datetime) -> list[GameEvent]:
     if game.phase != GamePhase.NEGOTIATION:
         return events
 
+    # Checked first, before Arbitration/Boost-draw timeouts below --
+    # close_market's own generic MARKET_CLOSED sequence already resolves
+    # any pending Arbitration/Boost draw as part of closing, so there's
+    # nothing left for those checks to do once the table's gone quiet long
+    # enough to count as abandoned. See CloseReason.ABANDONED.
+    if now - game.last_activity_at >= timedelta(seconds=game.config.negotiation_abandonment_seconds):
+        return close_market(game, CloseReason.ABANDONED, now)
+
     pending = _pending_arbitration(game)
     if pending is not None and now >= pending.resolves_at:
         proposal = game.proposals[game.active_proposal_id]  # type: ignore[index]
@@ -273,6 +292,8 @@ def is_time_transition_due(game: Game, now: datetime) -> bool:
         )
     if game.phase != GamePhase.NEGOTIATION:
         return False
+    if now - game.last_activity_at >= timedelta(seconds=game.config.negotiation_abandonment_seconds):
+        return True
     pending = _pending_arbitration(game)
     if pending is not None and now >= pending.resolves_at:
         return True

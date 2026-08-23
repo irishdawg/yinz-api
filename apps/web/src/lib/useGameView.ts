@@ -131,7 +131,7 @@ export interface GameView {
   // instant it happens -- not a leading indicator. ready_to_close itself
   // (below, per-player) stays strictly self-only with no aggregate
   // anywhere -- a secret trigger, not a public countdown.
-  close_reason: "READY_THRESHOLD" | "MOVES_EXHAUSTED" | null;
+  close_reason: "READY_THRESHOLD" | "MOVES_EXHAUSTED" | "ABANDONED" | null;
   closed_at: string | null;
   // Public and unconditional -- at most one bare negotiation open
   // table-wide at any time; null whenever the table is open for anyone
@@ -142,6 +142,10 @@ export interface GameView {
   // every Boost control should disable table-wide the instant this is
   // true, in addition to the separate, negotiation-scoped Arbitration gate.
   boosts_expired: boolean;
+  // Public config fact -- the max legal copy count for a single Concentrate
+  // target, used to grey out an already-at-cap card in its own card-tap
+  // picker rather than hardcoding the default.
+  concentrate_max_copies: number;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
   proposals: ProposalView[];

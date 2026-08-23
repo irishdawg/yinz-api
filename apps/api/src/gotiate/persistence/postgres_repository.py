@@ -129,8 +129,8 @@ class PostgresGameRepository:
                 await cur.execute(
                     """
                     insert into games (id, version, next_seq_no, phase, created_at, join_code,
-                                        config, lobby_reminder_deadline_at)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s)
+                                        config, lobby_reminder_deadline_at, last_activity_at)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         game.id,
@@ -141,6 +141,7 @@ class PostgresGameRepository:
                         game.join_code,
                         Json(game.config.model_dump(mode="json")),
                         game.lobby_reminder_deadline_at,
+                        game.last_activity_at,
                     ),
                 )
                 for player in game.players:
@@ -297,7 +298,7 @@ class PostgresGameRepository:
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
                         haircut_profile = %s, haircut_profile_revealed_at = %s,
                         realized_haircut_depth = %s, cancellation_reason = %s,
-                        active_proposal_id = %s, boosts_expired = %s
+                        active_proposal_id = %s, boosts_expired = %s, last_activity_at = %s
                     where id = %s
                     """,
                     (
@@ -318,6 +319,7 @@ class PostgresGameRepository:
                         game.cancellation_reason.value if game.cancellation_reason else None,
                         game.active_proposal_id,
                         game.boosts_expired,
+                        game.last_activity_at,
                         game.id,
                     ),
                 )
@@ -694,6 +696,7 @@ def _to_game(
         realized_haircut_depth=game_row["realized_haircut_depth"],
         active_proposal_id=str(game_row["active_proposal_id"]) if game_row["active_proposal_id"] else None,
         boosts_expired=game_row["boosts_expired"],
+        last_activity_at=game_row["last_activity_at"],
     )
 
 
