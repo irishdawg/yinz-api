@@ -176,23 +176,47 @@ the curated-catalog approach was originally built to avoid entirely.
   Win32_Process | Where-Object Name -match 'python'` — kill all, start
   exactly one, confirm before proceeding).
 
-## The cadence/economy redesign hasn't been live-playtested yet
+## The cadence/economy redesign is live, but only lightly playtested so far
 
-`prototype/cadence-economy-redesign` replaced the entire real-time
-simultaneous-negotiation model (Influence, the gameplay clock, Market
-Correction, Accept Lock, the 5-6 player multi-accept threshold, the old
-Reserve/Pickup mechanic) with a Move-driven, one-negotiation-at-a-time
-cadence culminating in Arbitration, plus Boosts (Concentrate/Draw-Refresh/
-Force Swap) as the new unilateral-action economy — see `GAMEPLAY.md` for
-the current rules. All six checkpoints (domain engine, persistence,
-frontend, schema cleanup) are implemented, offline-test-covered, and
-verified against the real Postgres project script-by-script, and one
-manual pass against a real running instance found nothing broken beyond
-minor UI polish. **No extended live multi-player playtesting cycle has
-happened yet** — the kind that found and fixed the real bugs the old
-system's own punch list (superseded, no longer tracked here) accumulated
-over its own playtesting cycle. In particular, worth watching once real
-play happens:
+The full redesign (Influence/Market Correction/Accept Lock/the old
+Reserve-Pickup mechanic → Moves, Boosts, Arbitration — see `GAMEPLAY.md`
+for current rules) merged from `prototype/cadence-economy-redesign` to
+`main` and is now the live, deployed app: Render (`gotiate-api-staging`)
+and Vercel both auto-deploy from `main` (Vercel's own auto-deploy was
+itself broken until this merge — its `ignoreCommand` only diffed the tip
+commit against its immediate parent, so a multi-commit fast-forward push
+whose *last* commit didn't touch `apps/web` silently skipped the build;
+removed outright, see `5ee43d8`). All game-instance data was wiped clean
+right after the merge (`games` and everything that cascades from it) for
+a fresh start on the new schema — catalog tables (`theme_sets`,
+`theme_entities`, `player_name_seeds`) were left untouched.
+
+A first live-testing pass (solo, one person driving the client, not yet a
+real multi-player session) already found and fixed several real gaps the
+offline suite and script-based Postgres verification couldn't have
+caught:
+- **No abandonment backstop** — removing the gameplay clock also removed
+  the only force-close path that didn't depend on a player doing
+  something; a `NEGOTIATION`-phase game could sit open forever, and a
+  returning player's own auto-redirect back into their one active game
+  could trap them there with no way out. Fixed:
+  `CloseReason.ABANDONED` / `Game.last_activity_at`, structurally
+  identical to the pre-existing `LOBBY` reminder/grace auto-cancel
+  (10-minute default, `GameConfig.negotiation_abandonment_seconds`).
+  **Caveat carried forward**: the check only fires when something
+  actually touches the specific game (a command or a poll) — same
+  limitation the `LOBBY` mechanism already had. A game nobody ever polls
+  again won't auto-close on its own; there's no proactive sweep.
+- A passed player could still see and click Accept on a public Pool
+  attached to the proposal they'd passed (backend already rejected it;
+  the button just didn't know to hide) — fixed.
+- Concentrate's UI (two `<select>` dropdowns) and Visualize's UI
+  (ring/outline borders colliding with ownership's own border treatment)
+  were both reworked based on direct feedback — see `857f7e5`.
+
+**Still not exercised at all in live play**: Arbitration specifically —
+narrowing a negotiation to its final two active participants needs 3+
+real players, which hasn't happened yet. Worth watching once it does:
 
 - **Arbitration's weight tuning** (`GameConfig.arbitration_base_weights`,
   `arbitration_vote_bonus`/`_penalty`) — the 30/40/40 and 40/30/40 starting
@@ -208,18 +232,18 @@ play happens:
   from real games under the *old* cadence; worth re-checking once real
   play happens under the new one, since Haircut itself is otherwise
   unchanged by the redesign.
-- **No automated browser verification of the new Boosts/Arbitration UI.**
-  The backend + Postgres persistence path has been live-verified
-  repeatedly; the frontend (`BoostControls`, `BoostDrawDecisionView`,
-  `ArbitrationPanel`) has only ever been verified via `tsc`/`eslint`/
-  `next build` plus one manual playtesting pass, never an automated
-  Playwright-style pass.
+- **No automated browser verification of the Boosts/Arbitration UI.**
+  Every frontend fix so far has been verified via `tsc`/`eslint`/
+  `next build` plus manual testing, never an automated Playwright-style
+  pass.
 - **Frontend componentization was deliberately skipped.** The redesign
-  plan flagged breaking `page.tsx` (2700+ lines) into real component
-  modules as "a worthwhile opportunistic cleanup, not scope creep," since
-  nearly every seam was already being cut open for the rewrite. Checkpoint
-  5 kept the existing single-file structure to bound scope/risk instead —
-  available follow-up work, not started.
+  plan flagged breaking `page.tsx` (2700+ lines, still growing) into real
+  component modules as "a worthwhile opportunistic cleanup, not scope
+  creep," since nearly every seam was already being cut open for the
+  rewrite. Never started — available follow-up work.
+- **No real multi-player session yet, period** — everything above,
+  including the abandonment-backstop fix, came from one person testing
+  solo. A real 2-6 player session is likely to surface more.
 
 ## External references that don't resolve — worth knowing, not fixing
 
