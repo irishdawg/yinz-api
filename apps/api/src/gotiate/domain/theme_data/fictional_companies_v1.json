@@ -7,13 +7,15 @@
       "theme_key": "fc_001",
       "display_name": "DaveCo",
       "ticker_symbol": "DAVE",
-      "is_locked": true
+      "is_locked": true,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/dave.png"
     },
     {
       "theme_key": "fc_002",
       "display_name": "Grandma's Pharmaceuticals",
       "ticker_symbol": "GRAM",
-      "is_locked": true
+      "is_locked": true,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/grandma.png"
     },
     {
       "theme_key": "fc_003",
