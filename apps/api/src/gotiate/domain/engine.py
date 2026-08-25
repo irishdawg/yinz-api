@@ -675,6 +675,46 @@ def _handle_extend_lobby_timer(game: Game, *, payload: dict, actor_game_player_i
     ]
 
 
+def _handle_kick_player(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+    """Host-only, LOBBY-only moderation escape hatch -- e.g. an offensive
+    typed display name (typed names have no content-moderation filter by
+    design, see CURRENT_WORK.md). Removes the target's GamePlayer entirely
+    (never a soft-delete/flag) so the same auth_user_id is free to
+    immediately rejoin under a different name -- game_player_private's own
+    `unique (game_id, auth_user_id)` constraint would otherwise block
+    exactly that. Seats are compacted (every remaining player above the
+    removed seat shifts down by one) so join_game's own `seat =
+    len(game.players)` assignment never collides with the gap left
+    behind -- the host is always seat 0 and can never kick themselves, so
+    this never touches the host's own seat."""
+    if game.phase != GamePhase.LOBBY:
+        raise IllegalCommandError("can only remove a player while still in the lobby")
+    if actor_game_player_id != game.host_player_id:
+        raise IllegalCommandError("only the host can remove a player")
+
+    target_id = payload["game_player_id"]
+    if target_id == actor_game_player_id:
+        raise IllegalCommandError("the host cannot remove themselves")
+    target = next((p for p in game.players if p.game_player_id == target_id), None)
+    if target is None:
+        raise IllegalCommandError("no such player in this game")
+
+    game.players.remove(target)
+    for p in game.players:
+        if p.seat > target.seat:
+            p.seat -= 1
+
+    return [
+        _emit(
+            game,
+            now,
+            EventType.PLAYER_KICKED,
+            actor=actor_game_player_id,
+            payload={"removed_player_id": target_id, "removed_display_name": target.display_name},
+        )
+    ]
+
+
 def _handle_start_game(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     if game.phase != GamePhase.LOBBY:
         raise IllegalCommandError("game already started")
@@ -1277,6 +1317,7 @@ def _handle_set_ready_to_close(game: Game, *, payload: dict, actor_game_player_i
 _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "CANCEL_GAME": _handle_cancel_game,
     "EXTEND_LOBBY_TIMER": _handle_extend_lobby_timer,
+    "KICK_PLAYER": _handle_kick_player,
     "START_GAME": _handle_start_game,
     "PROPOSE_SWAP": _handle_propose_swap,
     "PASS_PROPOSAL": _handle_pass_proposal,

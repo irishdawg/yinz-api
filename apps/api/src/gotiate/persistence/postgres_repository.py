@@ -164,6 +164,23 @@ class PostgresGameRepository:
             async with conn.cursor() as cur:
                 for player in game.players:
                     await self._upsert_player(cur, game.id, player)
+                # KICK_PLAYER (host-only, LOBBY-only) is the one command
+                # that ever removes an entry from game.players outright
+                # (never a soft-delete/flag) -- whichever game_players rows
+                # still exist for this game_id but aren't in the current
+                # roster anymore get deleted here, generically, on every
+                # save(). Guarded against an empty current-roster list: a
+                # bare `!= all(ARRAY[])` is vacuously TRUE for every row in
+                # Postgres, which would delete every player in the game --
+                # game.players is never actually empty in practice (the
+                # host can't kick themselves), but this is cheap insurance
+                # against that exact footgun regardless.
+                current_player_ids = [p.game_player_id for p in game.players]
+                if current_player_ids:
+                    await cur.execute(
+                        "delete from game_players where game_id = %s and id != all(%s)",
+                        (game.id, current_player_ids),
+                    )
                 for entity in game.market.values():
                     # theme_set_id/version live on game.config, not on
                     # MarketEntity itself — a denormalization footgun caught

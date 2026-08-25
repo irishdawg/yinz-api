@@ -201,6 +201,7 @@ class EventVisibility(StrEnum):
 EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.GAME_CREATED: EventVisibility.PUBLIC,
     EventType.PLAYER_JOINED: EventVisibility.PUBLIC,
+    EventType.PLAYER_KICKED: EventVisibility.PUBLIC,
     EventType.LOBBY_TIMER_EXTENDED: EventVisibility.PUBLIC,
     EventType.GAME_STARTED: EventVisibility.PUBLIC,
     EventType.MARKET_INITIALIZED: EventVisibility.PUBLIC,

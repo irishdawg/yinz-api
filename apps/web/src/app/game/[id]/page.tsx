@@ -19,6 +19,16 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
 
   const [sessionReady, setSessionReady] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  // True once this player has been removed from the game (KICK_PLAYER) --
+  // detected client-side, not a server-pushed signal: view.you flips from
+  // a real seat to null the instant the host removes you, and there is no
+  // other way that transition can happen (no "leave game" feature exists,
+  // and view.you only ever goes from a real id to null, never the other
+  // direction, for an existing session). wasSeatedRef remembers "did I
+  // ever have a real seat here" so a spectator who never had one (view.you
+  // always null) is never misidentified as kicked.
+  const [kicked, setKicked] = useState(false);
+  const wasSeatedRef = useRef(false);
 
   useEffect(() => {
     ensureAnonymousSession()
@@ -26,8 +36,22 @@ export default function GamePage({ params }: { params: Promise<{ id: string }> }
       .catch(() => setSessionError("Couldn't start a session. Refresh and try again."));
   }, []);
 
-  const { view, error, refetch } = useGameView(gameId, { enabled: sessionReady });
+  const { view, error, refetch } = useGameView(gameId, { enabled: sessionReady && !kicked });
 
+  useEffect(() => {
+    if (!view) return;
+    if (view.you !== null) {
+      wasSeatedRef.current = true;
+      return;
+    }
+    if (wasSeatedRef.current) {
+      setKicked(true);
+    }
+  }, [view]);
+
+  if (kicked) {
+    return <CenteredMessage showHomeLink>You were removed from this game by the host.</CenteredMessage>;
+  }
   if (sessionError || error) {
     return <CenteredMessage showHomeLink>{sessionError ?? error}</CenteredMessage>;
   }
@@ -2590,6 +2614,7 @@ function LobbyRoom({
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [kickingId, setKickingId] = useState<string | null>(null);
 
   const joinUrl = joinCode ? `${process.env.NEXT_PUBLIC_SITE_URL ?? ""}/join/${joinCode}` : null;
   const playerCount = view.players.length;
@@ -2601,6 +2626,19 @@ function LobbyRoom({
     const result = await submitCommand(gameId, "START_GAME", {}, { expectedVersion: view.version, onSettled: onChanged });
     setStarting(false);
     if (!result.ok) setActionError(commandErrorMessage(result.data, "Couldn't start the game."));
+  }
+
+  // Host-only moderation escape hatch -- e.g. an offensive typed display
+  // name (typed names have no content-moderation filter by design, see
+  // CURRENT_WORK.md). Removes the player outright; they're free to rejoin
+  // immediately under a different name, same join code.
+  async function handleKick(targetId: string, targetName: string) {
+    if (!window.confirm(`Remove ${targetName} from this game? They can rejoin with a different name.`)) return;
+    setActionError(null);
+    setKickingId(targetId);
+    const result = await submitCommand(gameId, "KICK_PLAYER", { game_player_id: targetId }, { expectedVersion: view.version, onSettled: onChanged });
+    setKickingId(null);
+    if (!result.ok) setActionError(commandErrorMessage(result.data, "Couldn't remove that player."));
   }
 
   return (
@@ -2634,6 +2672,17 @@ function LobbyRoom({
                 {p.game_player_id === view.host_player_id && <span className="ml-2 text-xs font-medium text-zinc-500">HOST</span>}
                 {p.game_player_id === view.you && <span className="ml-2 text-xs font-medium text-zinc-500">YOU</span>}
               </span>
+              {isHost && p.game_player_id !== view.host_player_id && (
+                <button
+                  type="button"
+                  onClick={() => handleKick(p.game_player_id, p.display_name)}
+                  disabled={kickingId !== null}
+                  title={`Remove ${p.display_name}`}
+                  className="ml-2 flex-shrink-0 rounded px-1.5 font-bold text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                >
+                  {kickingId === p.game_player_id ? "…" : "✕"}
+                </button>
+              )}
             </li>
           ))}
         </ul>

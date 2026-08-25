@@ -20,6 +20,11 @@ class EventType(StrEnum):
     # Setup
     GAME_CREATED = "GAME_CREATED"
     PLAYER_JOINED = "PLAYER_JOINED"
+    # Host-only, LOBBY-only -- see engine._handle_kick_player. Payload
+    # carries the removed player's own id/display_name directly (not just
+    # a lookup key) since they're gone from game.players by the time this
+    # is read back.
+    PLAYER_KICKED = "PLAYER_KICKED"
     LOBBY_TIMER_EXTENDED = "LOBBY_TIMER_EXTENDED"
     GAME_STARTED = "GAME_STARTED"
     MARKET_INITIALIZED = "MARKET_INITIALIZED"
