@@ -2629,6 +2629,48 @@ function ShareLinkButton({ url, joinCode }: { url: string; joinCode: string }) {
   );
 }
 
+/** Copies just the 7-char join code (not the full URL -- that's
+ * ShareLinkButton's job) for the host who's reading it aloud or typing it
+ * into another device by hand. Same transient "Copied!" affordance as
+ * ShareLinkButton, kept to a compact icon so the big code stays the
+ * visual anchor. */
+function CopyCodeButton({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setFailed(false);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setFailed(true);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      aria-label={copied ? "Join code copied" : "Copy join code"}
+      title={failed ? "Couldn't copy — long-press the code instead." : copied ? "Copied!" : "Copy code"}
+      className="rounded border border-zinc-300 bg-white p-2 text-zinc-600 transition-colors hover:bg-zinc-50"
+    >
+      {copied ? (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      ) : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 function LobbyRoom({
   gameId,
   view,
@@ -2678,7 +2720,10 @@ function LobbyRoom({
         <h1 className="text-2xl font-semibold text-zinc-900">Waiting for players</h1>
         {joinCode && (
           <>
-            <p className="font-mono text-4xl font-bold tracking-widest text-zinc-900">{joinCode}</p>
+            <div className="flex items-center gap-2">
+              <p className="font-mono text-4xl font-bold tracking-widest text-zinc-900">{joinCode}</p>
+              <CopyCodeButton code={joinCode} />
+            </div>
             {joinUrl && (
               <div className="rounded bg-white p-4 shadow">
                 <QRCodeSVG value={joinUrl} size={160} />

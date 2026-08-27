@@ -38,6 +38,11 @@ export default function Home() {
   // pressed. Codes are always exactly 7 characters (join_code_lifetime's
   // format, see the input's own maxLength).
   const codeEntered = joinCodeInput.trim().length === 7;
+  // Join needs both fields -- a code with no name (or vice versa) can't
+  // complete the request. Gate the button on both so it reads as inactive
+  // until it can actually do something, instead of looking clickable and
+  // then bouncing the user up to the name field.
+  const canJoinByCode = codeEntered && Boolean(name);
 
   // Typing a name is no longer optional-but-prefilled (see NamePicker) --
   // nothing auto-populates it anymore, so a name-less submit needs to say
@@ -242,8 +247,12 @@ export default function Home() {
             <button
               type="button"
               onClick={handleJoinByCode}
-              disabled={!joinCodeInput.trim() || joining}
-              className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50"
+              disabled={!canJoinByCode || joining}
+              className={`rounded border px-4 py-2 text-sm font-medium transition-colors ${
+                canJoinByCode && !joining
+                  ? "border-zinc-900 bg-zinc-900 text-white"
+                  : "cursor-not-allowed border-zinc-200 bg-white text-zinc-400"
+              }`}
             >
               {joining ? "Joining…" : "Join game"}
             </button>

@@ -69,8 +69,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <button
             type="submit"
-            disabled={!ready || submitting}
-            className="rounded bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
+            disabled={!ready || submitting || !name}
+            className={`rounded px-4 py-2 transition-colors ${
+              ready && !submitting && name
+                ? "bg-zinc-900 text-white"
+                : "cursor-not-allowed bg-zinc-200 text-zinc-400"
+            }`}
           >
             {ready ? (submitting ? "Joining…" : "Join game") : "Starting session…"}
           </button>
