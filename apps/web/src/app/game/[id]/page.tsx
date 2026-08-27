@@ -1293,6 +1293,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
         onVisualize={visualizeProposal}
         onClearVisualize={clearVisualizeHighlight}
         onStartPool={startPooling}
+        onDefinitiveProposalAction={cancelSelection}
         lingeringDeals={lingeringDeals}
       />
 
@@ -1734,6 +1735,7 @@ function OpenProposals({
   onVisualize,
   onClearVisualize,
   onStartPool,
+  onDefinitiveProposalAction,
   lingeringDeals,
 }: {
   gameId: string;
@@ -1742,6 +1744,7 @@ function OpenProposals({
   onVisualize: (pairs: [string, string][]) => void;
   onClearVisualize: () => void;
   onStartPool: (proposalId: string) => void;
+  onDefinitiveProposalAction: () => void;
   lingeringDeals: LingeringDeal[];
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -1788,6 +1791,15 @@ function OpenProposals({
     setBusyId(null);
     if (!result.ok) setError(commandErrorMessage(result.data, fallback));
     return result;
+  }
+
+  async function runDefinitiveProposalAction(id: string, type: "PASS_PROPOSAL" | "ACCEPT_PROPOSAL", fallback: string) {
+    const result = await runCommand(id, type, { proposal_id: id }, fallback);
+    // A successful Pass or Accept commits the player's response to the
+    // base proposal. Any unfinished Pool composition against it is no
+    // longer the action they're taking, so dismiss that local draft now
+    // instead of waiting for a later poll (or leaving it open after Pass).
+    if (result.ok) onDefinitiveProposalAction();
   }
 
   if (visibleProposals.length === 0 && unilateralEntries.length === 0) return null;
@@ -1889,7 +1901,7 @@ function OpenProposals({
                     {!isMine && !myOpenPoolOnThis && !iHavePassed && !arbitrationActive && (
                       <button
                         type="button"
-                        onClick={() => runCommand(p.proposal_id, "PASS_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't pass.")}
+                        onClick={() => runDefinitiveProposalAction(p.proposal_id, "PASS_PROPOSAL", "Couldn't pass.")}
                         disabled={busyId === p.proposal_id}
                         className="rounded border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 disabled:opacity-50"
                       >
@@ -1906,7 +1918,12 @@ function OpenProposals({
                         {busyId === p.proposal_id ? "…" : "Call Arbitration"}
                       </button>
                     )}
-                    {!isMine && !iHavePassed && <AcceptButton busy={busyId === p.proposal_id} onAccept={() => runCommand(p.proposal_id, "ACCEPT_PROPOSAL", { proposal_id: p.proposal_id }, "Couldn't accept.")} />}
+                    {!isMine && !iHavePassed && (
+                      <AcceptButton
+                        busy={busyId === p.proposal_id}
+                        onAccept={() => runDefinitiveProposalAction(p.proposal_id, "ACCEPT_PROPOSAL", "Couldn't accept.")}
+                      />
+                    )}
                   </span>
                 )}
               </div>
