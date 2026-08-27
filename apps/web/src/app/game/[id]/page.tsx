@@ -1649,42 +1649,16 @@ function AcceptButton({ busy, onAccept }: { busy: boolean; onAccept: () => void 
   );
 }
 
-/** Arbitration's own inline panel, rendered inside a negotiation's row once
- * it's called (proposal.pending_arbitration is non-null). Shows the 20s
- * countdown and who called it; already-passed players get the secret jury
- * ballot (vote content never leaves this client -- see
- * EVENT_VISIBILITY.ARBITRATION_VOTE_CAST). "pool" is only offered when
- * eligible_pool_id is set -- a juror is never offered a vote for an
- * outcome that isn't actually on the table. Settling normally (Accept,
- * rendered by the row itself, not here) stays legal for the two active
- * participants throughout. */
-function ArbitrationPanel({
-  gameId,
-  proposal,
-  view,
-  onChanged,
-}: {
-  gameId: string;
-  proposal: ProposalView;
-  view: GameView;
-  onChanged: () => void;
-}) {
+/** Arbitration's inline status strip. Offer-specific jury choices live
+ * beside the actual base/Pool rows they select, so this strip owns the
+ * countdown, guidance, and the one choice with no offer row: neither. */
+function ArbitrationPanel({ proposal, view, voteBusy, onVote }: { proposal: ProposalView; view: GameView; voteBusy: boolean; onVote: () => void }) {
   const pending = proposal.pending_arbitration;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   if (!pending) return null;
 
   const iAmJuror = view.you !== null && proposal.passed_player_ids.includes(view.you);
   const alreadyVoted = view.you !== null && pending.voted_player_ids.includes(view.you);
   const deadlineMs = new Date(pending.resolves_at).getTime();
-
-  async function castVote(vote: "base" | "pool" | "neither") {
-    setError(null);
-    setBusy(true);
-    const result = await submitCommand(gameId, "CAST_ARBITRATION_VOTE", { vote }, { expectedVersion: view.version, onSettled: onChanged });
-    setBusy(false);
-    if (!result.ok) setError(commandErrorMessage(result.data, "Couldn't cast that vote."));
-  }
 
   return (
     <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
@@ -1694,25 +1668,19 @@ function ArbitrationPanel({
       </div>
       {iAmJuror && !alreadyVoted && (
         <div className="mt-2 flex flex-col gap-1">
-          <p>You&apos;re on the jury — cast a secret vote for how this should resolve if it isn&apos;t settled in time.</p>
-          <div className="flex gap-1">
-            <button type="button" onClick={() => castVote("base")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
-              Base
-            </button>
-            {pending.eligible_pool_id !== null && (
-              <button type="button" onClick={() => castVote("pool")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
-                Pool
-              </button>
-            )}
-            <button type="button" onClick={() => castVote("neither")} disabled={busy} className="rounded border border-amber-400 bg-white px-2 py-1 font-medium disabled:opacity-50">
-              Neither
-            </button>
-          </div>
+          <p>You&apos;re on the jury. Vote beside the offer you support, or reject both below. Your vote is secret.</p>
+          <button
+            type="button"
+            onClick={onVote}
+            disabled={voteBusy}
+            className="self-start rounded border border-amber-500 bg-amber-100 px-2 py-1 font-medium text-amber-950 disabled:opacity-50"
+          >
+            {voteBusy ? "…" : pending.eligible_pool_id ? "Vote neither — reject both" : "Vote neither — reject the deal"}
+          </button>
         </div>
       )}
       {iAmJuror && alreadyVoted && <p className="mt-1">You voted. Nobody will see what, live or after.</p>}
       {!iAmJuror && <p className="mt-1">Accepting the base proposal or the eligible Pool still settles this normally, right up until it resolves.</p>}
-      {error && <p className="mt-1 text-red-600">{error}</p>}
     </div>
   );
 }
@@ -1828,6 +1796,13 @@ function OpenProposals({
           const lingering = lingeringById.get(p.proposal_id);
           const iHavePassed = view.you !== null && p.passed_player_ids.includes(view.you);
           const arbitrationActive = p.pending_arbitration !== null;
+          const arbitrationVoteKey = `arbitration-vote:${p.proposal_id}`;
+          const iAmJuror = arbitrationActive && iHavePassed;
+          const alreadyVoted = view.you !== null && p.pending_arbitration?.voted_player_ids.includes(view.you);
+          const canVoteInArbitration = iAmJuror && !alreadyVoted;
+          const voteBusy = busyId === arbitrationVoteKey;
+          const castArbitrationVote = (vote: "base" | "pool" | "neither") =>
+            runCommand(arbitrationVoteKey, "CAST_ARBITRATION_VOTE", { vote }, "Couldn't cast that vote.");
           // Mirrors the server's own rule (PASS/CREATE_POOL both reject
           // while I already hold an open Pool of my own on this proposal)
           // -- Pool/Pass simply aren't offered in that state instead of
@@ -1907,11 +1882,19 @@ function OpenProposals({
                         onAccept={() => runDefinitiveProposalAction(p.proposal_id, "ACCEPT_PROPOSAL", "Couldn't accept.")}
                       />
                     )}
+                    {canVoteInArbitration && (
+                      <button
+                        type="button"
+                        onClick={() => castArbitrationVote("base")}
+                        disabled={voteBusy}
+                        className="rounded border border-amber-500 bg-amber-100 px-2 py-1 text-xs font-medium text-amber-950 disabled:opacity-50"
+                      >
+                        {voteBusy ? "…" : "Vote base"}
+                      </button>
+                    )}
                   </span>
                 )}
               </div>
-
-              {arbitrationActive && <ArbitrationPanel gameId={gameId} proposal={p} view={view} onChanged={onChanged} />}
 
               {pools.length > 0 && (
                 <ul className="ml-3 flex flex-col gap-1 border-l border-zinc-200 pl-3">
@@ -1986,6 +1969,16 @@ function OpenProposals({
                             {canActOnPool && !iPassedPool && (
                               <AcceptButton busy={busyId === pool.pool_id} onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")} />
                             )}
+                            {canVoteInArbitration && p.pending_arbitration?.eligible_pool_id === pool.pool_id && (
+                              <button
+                                type="button"
+                                onClick={() => castArbitrationVote("pool")}
+                                disabled={voteBusy}
+                                className="rounded border border-amber-500 bg-amber-100 px-2 py-0.5 font-medium text-amber-950 disabled:opacity-50"
+                              >
+                                {voteBusy ? "…" : "Vote Pool"}
+                              </button>
+                            )}
                           </span>
                         )}
                         {/* "accepted" only -- ACCEPT_POOL always resolves the base
@@ -2003,6 +1996,9 @@ function OpenProposals({
                     );
                   })}
                 </ul>
+              )}
+              {arbitrationActive && (
+                <ArbitrationPanel proposal={p} view={view} voteBusy={voteBusy} onVote={() => castArbitrationVote("neither")} />
               )}
               {lingering && <RowOverlay {...lingeringOverlayProps(lingering)} fading={lingering.fading} />}
             </li>
