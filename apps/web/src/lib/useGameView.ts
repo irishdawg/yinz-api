@@ -146,6 +146,12 @@ export interface GameView {
   // target, used to grey out an already-at-cap card in its own card-tap
   // picker rather than hardcoding the default.
   concentrate_max_copies: number;
+  // Public and unconditional -- the pair most recently Force Swapped,
+  // still locked against a direct (Move-only, negotiated) reverse via
+  // PROPOSE_SWAP/CREATE_POOL. null whenever no pair is currently locked.
+  // Another Force Swap (anywhere, any pair) is never blocked by this --
+  // only used to proactively grey out/flag the locked pair in the UI.
+  protected_pair: { entity_a: string; entity_b: string } | null;
   market: Array<{ entity_id: string; theme_key: string; position: number; display_name: string; ticker_symbol: string; logo_url: string | null }>;
   players: GamePlayerView[];
   proposals: ProposalView[];

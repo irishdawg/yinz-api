@@ -137,6 +137,14 @@ def project(game: Game, audience: Audience) -> dict:
         # Concentrate's own card-tap picker, rather than hardcoding the
         # default and letting it drift from GameConfig.
         "concentrate_max_copies": game.config.concentrate_max_copies,
+        # Public and unconditional -- the pair most recently Force Swapped,
+        # still locked against a direct (Move-only, negotiated) reverse.
+        # Projected explicitly, not left for players to discover only by
+        # having a PROPOSE_SWAP/CREATE_POOL attempt rejected -- see
+        # engine._is_protected_reversal.
+        "protected_pair": (
+            {"entity_a": game.protected_pair.entity_a, "entity_b": game.protected_pair.entity_b} if game.protected_pair else None
+        ),
         "market": _project_market(game, lookup),
         "players": [_project_player(game, p, audience) for p in game.players],
         # NOTE (cadence/economy redesign): a passed proposal/pool is no

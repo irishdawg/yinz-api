@@ -434,6 +434,27 @@ all. No decision window; resolves synchronously through the same
 `_execute_swap` choke point as any negotiated swap (§6), so it can void
 other open negotiations exactly like an accepted deal would.
 
+**Reversal lock.** Force Swap sets a single, table-wide `protected_pair`
+(public and unconditional in `project()`) naming the two entities it just
+swapped. While that lock is in place, `PROPOSE_SWAP` or `CREATE_POOL`
+naming exactly that pair (either order) is illegal — `IllegalCommandError`,
+"this pair was just Force Swapped and is locked against a direct
+reverse". This is a durability fix for a real underpowered-Boost problem:
+a Force Swap costs a whole Boost, but the exact reverse could otherwise be
+undone for the price of a mere Move. The lock is narrow by design:
+- It blocks only a **direct** reverse of the exact protected pair — a Move
+  involving either entity against a third one is unaffected.
+- Another Force Swap is **never** blocked by it, including one that
+  targets the same pair — a Boost undoing a Boost is fair, same-cost play.
+  That new Force Swap simply overwrites `protected_pair` with its own
+  result (see `_use_boost_force_swap`).
+- The lock clears the instant either protected entity actually moves again
+  through an *executed* negotiated swap (`ACCEPT_PROPOSAL` or
+  `ACCEPT_POOL`, inside `_execute_swap`) — there is no wall-clock timer.
+- A single global slot, not per-player or a list: the next Force Swap
+  anywhere unconditionally overwrites it, regardless of which entities it
+  targets.
+
 ---
 
 ## 8. Arbitration
@@ -663,10 +684,10 @@ optimistic-concurrency (`StaleVersionError` → HTTP 409) for every command
 | `CANCEL_GAME` | `{}` | Host-only, `LOBBY`-only. |
 | `EXTEND_LOBBY_TIMER` | `{}` | Host-only, `LOBBY`-only. |
 | `START_GAME` | `{}` | Host-only, `LOBBY`-only, 2–6 players. See §2. |
-| `PROPOSE_SWAP` | `{entity_a, entity_b}` | Move-gated, single-active-negotiation-gated. See §4–5. |
+| `PROPOSE_SWAP` | `{entity_a, entity_b}` | Move-gated, single-active-negotiation-gated. May not directly reverse a Force-Swap-protected pair. See §4–5, §7 (reversal lock). |
 | `PASS_PROPOSAL` | `{proposal_id}` | Non-proposer, non-repeat, no own open pool on it, no active Arbitration. See §5. |
 | `ACCEPT_PROPOSAL` | `{proposal_id}` | Not your own, not passed. Legal during Arbitration. |
-| `CREATE_POOL` | `{proposal_id, entity_c, entity_d, visibility}` | See §5. |
+| `CREATE_POOL` | `{proposal_id, entity_c, entity_d, visibility}` | See §5. May not directly reverse a Force-Swap-protected pair — see §7. |
 | `WITHDRAW_POOL` | `{pool_id}` | Pool initiator only. Illegal during Arbitration. |
 | `MAKE_POOL_PUBLIC` | `{pool_id}` | Pool initiator only, private→public. Illegal during Arbitration. |
 | `DECLINE_POOL` | `{pool_id}` | Base proposer only, private pools only. Illegal during Arbitration. |

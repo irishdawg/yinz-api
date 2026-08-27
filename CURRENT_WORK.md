@@ -63,7 +63,7 @@ full-suite runs (no consistent repro), across multiple separate sessions:
 Suggests real wall-clock timing and/or shared unseeded `random` module
 state leaking across tests, not a logic bug — worth a closer look
 (seed/inject time explicitly) before the suite gets meaningfully larger
-(currently 259 tests), but still out of scope to chase down
+(currently 281 tests), but still out of scope to chase down
 opportunistically. If you see it fail, rerun before treating it as a
 regression. (A second flaky test formerly tracked here,
 `test_discard_holding_that_changes_source_ownership_resolves_invalidated`,
@@ -213,6 +213,19 @@ caught:
 - Concentrate's UI (two `<select>` dropdowns) and Visualize's UI
   (ring/outline borders colliding with ownership's own border treatment)
   were both reworked based on direct feedback — see `857f7e5`.
+- **Force Swap felt underpowered** — it costs a whole Boost, but the exact
+  reverse could be undone for the price of a mere Move via a negotiated
+  swap. Fixed with a durability lock: `Game.protected_pair`, set by every
+  Force Swap, blocks only a *direct* reverse of that exact pair via
+  `PROPOSE_SWAP`/`CREATE_POOL` — never blocks another Force Swap (a Boost
+  undoing a Boost is fair, same-cost play), and clears the instant either
+  entity moves again through an executed negotiated swap. No wall-clock
+  timer. See `GAMEPLAY.md` §7 ("Reversal lock"),
+  `engine._is_protected_reversal`, `test_force_swap_protection.py`.
+- **`KICK_PLAYER`** — host-only, `LOBBY`-only moderation for an offensive
+  typed display name (see the "no content moderation" gap above): hard-
+  removes a player from `game.players` and compacts seats, freeing the
+  join code for them to immediately rejoin under a different name.
 
 **Still not exercised at all in live play**: Arbitration specifically —
 narrowing a negotiation to its final two active participants needs 3+

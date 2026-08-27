@@ -55,6 +55,7 @@ from gotiate.domain.entities import (
     PoolVisibility,
     Proposal,
     ProposalResolutionReason,
+    ProtectedPair,
     ResolutionStatus,
     SwapIntent,
 )
@@ -530,6 +531,17 @@ def _rising_entity(game: Game, entity_a: str, entity_b: str) -> str:
     return entity_a if a.position > b.position else entity_b
 
 
+def _is_protected_reversal(game: Game, entity_a: str, entity_b: str) -> bool:
+    """True iff {entity_a, entity_b} is exactly the currently-protected
+    pair (order-independent) -- see ProtectedPair. Only ever consulted by
+    PROPOSE_SWAP/CREATE_POOL; Force Swap is deliberately exempt (a Boost
+    undoing a Boost is fair, same-cost play -- see
+    engine._use_boost_force_swap, which never calls this)."""
+    if game.protected_pair is None:
+        return False
+    return {entity_a, entity_b} == {game.protected_pair.entity_a, game.protected_pair.entity_b}
+
+
 # --------------------------------------------------------------------------
 # The Agency Principle, written once (§01, §04)
 # --------------------------------------------------------------------------
@@ -779,6 +791,8 @@ def _handle_propose_swap(game: Game, *, payload: dict, actor_game_player_id: str
     if entity_a == entity_b:
         raise IllegalCommandError("a proposal must name two different entities")
     _require_entities_exist(game, entity_a, entity_b)
+    if _is_protected_reversal(game, entity_a, entity_b):
+        raise IllegalCommandError("this pair was just Force Swapped and is locked against a direct reverse")
 
     # Opening a negotiation is the only thing that spends a Move.
     # Committed permanently the instant this succeeds -- never refunded,
@@ -888,6 +902,8 @@ def _handle_create_pool(game: Game, *, payload: dict, actor_game_player_id: str 
     overlap = {proposal.swap.entity_a, proposal.swap.entity_b} & {entity_c, entity_d}
     if overlap:
         raise IllegalCommandError(f"pool cannot reference {sorted(overlap)}, already in the base proposal")
+    if _is_protected_reversal(game, entity_c, entity_d):
+        raise IllegalCommandError("this pair was just Force Swapped and is locked against a direct reverse")
 
     visibility = PoolVisibility(payload["visibility"])
     if visibility is PoolVisibility.PUBLIC and not game.config.allow_public_pools:
@@ -1160,7 +1176,17 @@ def _use_boost_concentrate(game: Game, player: GamePlayer, payload: dict, now: d
 def _use_boost_force_swap(game: Game, player: GamePlayer, payload: dict, now: datetime) -> list[GameEvent]:
     """Alter the market unilaterally -- Boost-gated, otherwise identical to
     a negotiated swap: reuses _execute_swap directly, so it correctly
-    triggers crossing-invalidation against every other open negotiation."""
+    triggers crossing-invalidation against every other open negotiation.
+    Deliberately never consults _is_protected_reversal -- Force Swap can
+    always target any pair, including the currently-protected one (a
+    Boost undoing a Boost is fair, same-cost play).
+
+    Sets game.protected_pair to this pair, unconditionally, *after*
+    _execute_swap runs -- _execute_swap's own generic clearing (see its
+    docstring) may have already cleared whatever was protected before,
+    including this exact pair if it's the one being re-swapped; either
+    way, this call is what actually determines the new lock, overwriting
+    any earlier value regardless of what _execute_swap just did to it."""
     entity_a, entity_b = payload["entity_a"], payload["entity_b"]
     if entity_a == entity_b:
         raise IllegalCommandError("must name two different entities")
@@ -1174,6 +1200,7 @@ def _use_boost_force_swap(game: Game, player: GamePlayer, payload: dict, now: da
         rising_entity_id=_rising_entity(game, entity_a, entity_b),
     )
     events = _execute_swap(game, swap, now)
+    game.protected_pair = ProtectedPair(entity_a=entity_a, entity_b=entity_b)
     events.append(
         _emit(game, now, EventType.BOOST_FORCE_SWAP_USED, actor=player.game_player_id, payload={"entity_a": entity_a, "entity_b": entity_b})
     )
@@ -1517,10 +1544,23 @@ def _execute_swap(
     any) -- right after its own swap, a fresh direction check would always
     look "crossed" (the entity that was rising just took the better
     position), which is the negotiation succeeding as promised, not a
-    violation."""
+    violation.
+
+    Also the single place `game.protected_pair` ever clears (Force Swap's
+    own lock, see ProtectedPair): if either entity this swap actually
+    moves is part of the currently-protected pair, the lock lifts --
+    whatever "reverse" it was guarding against wouldn't even restore the
+    original state anymore once one of the two has moved again through a
+    negotiated deal. Checked generically here, not per-caller, so Accept
+    /Pool/the Arbitration machine draw's own execution all clear it for
+    free; Force Swap's own call site unconditionally re-sets
+    protected_pair to its own pair immediately afterward regardless of
+    what happens here."""
     a = _market_entity(game, swap.entity_a)
     b = _market_entity(game, swap.entity_b)
     a.position, b.position = b.position, a.position
+    if game.protected_pair is not None and {swap.entity_a, swap.entity_b} & {game.protected_pair.entity_a, game.protected_pair.entity_b}:
+        game.protected_pair = None
     events: list[GameEvent] = [
         _emit(
             game,

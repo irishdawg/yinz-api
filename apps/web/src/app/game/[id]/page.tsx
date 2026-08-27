@@ -780,6 +780,13 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   const basePoolingProposal = poolingProposalId ? view.proposals.find((p) => p.proposal_id === poolingProposalId) : undefined;
   const poolGuardrailEntities = new Set(basePoolingProposal ? [basePoolingProposal.entity_a, basePoolingProposal.entity_b] : []);
 
+  // Force Swap durability: the pair most recently Force Swapped is locked
+  // against a direct, negotiated reverse (Propose/Pool naming exactly that
+  // pair) -- see engine._is_protected_reversal. Force Swap itself is
+  // exempt (a Boost undoing a Boost is fair, same-cost play), so this only
+  // ever guards toggleSelect's Propose/Pool path, never forceSwapping mode.
+  const protectedPairEntities = view.protected_pair ? new Set([view.protected_pair.entity_a, view.protected_pair.entity_b]) : null;
+
   // The base proposal can resolve (someone else accepts/withdraws it, or it
   // voids on a market swing) at any moment while a player is still mid-Pool
   // composition against it -- their own poll picks that up on the very next
@@ -799,6 +806,21 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
   function toggleSelect(entityId: string) {
     if (poolGuardrailEntities.has(entityId)) return;
+    // Completing the exact locked pair via a negotiated Propose/Pool --
+    // the backend already rejects this (_is_protected_reversal), but catch
+    // it here so the required warning is immediate, not a round-trip.
+    // Selecting either entity alone is still fine; only pairing them
+    // together, and only outside Force Swap mode, is blocked.
+    if (
+      !forceSwapping &&
+      protectedPairEntities?.has(entityId) &&
+      selected.length === 1 &&
+      protectedPairEntities.has(selected[0]) &&
+      !selected.includes(entityId)
+    ) {
+      setProposeError("That pair was just Force Swapped and is locked against a direct reverse — Force Swap it again, or wait for one of them to move first.");
+      return;
+    }
     setProposeError(null);
     setSelected((prev) => {
       if (prev.includes(entityId)) return prev.filter((id) => id !== entityId);
@@ -1080,6 +1102,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                       highlight ? "z-10 scale-110 shadow-lg" : ""
                     }`}
                   >
+                    {protectedPairEntities?.has(entity.entity_id) && (
+                      <span
+                        title="Just Force Swapped — locked against a direct reverse Propose/Pool"
+                        className="absolute left-1 top-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-zinc-900 text-[9px] text-white"
+                      >
+                        🔒
+                      </span>
+                    )}
                     {notedPlayerIds.length > 0 && (
                       <span className="absolute right-1 top-1 flex flex-shrink-0 gap-0.5">
                         {notedPlayerIds.map((id) =>

@@ -362,6 +362,20 @@ class Holding(BaseModel):
     revealed_at_seq_no: int | None = None
 
 
+class ProtectedPair(BaseModel):
+    """The two entities from the most recently Force-Swapped pair, if their
+    direct reverse is still locked -- see engine._use_boost_force_swap and
+    Game.protected_pair. A single global slot, not per-player, not a list
+    -- unconditionally overwritten by the *next* Force Swap regardless of
+    which entities it targets (a Boost undoing a Boost is always fair,
+    same-cost symmetric play; only the cheaper, Move-only negotiated
+    reversal route is what this blocks). Order is not meaningful --
+    engine._is_protected_reversal compares as an unordered pair."""
+
+    entity_a: str
+    entity_b: str
+
+
 class SwapIntent(BaseModel):
     """Shape, not a table — the common core of Proposal and Pool."""
 
@@ -542,6 +556,13 @@ class Game(BaseModel):
     # negotiation_abandonment_seconds passes with no activity during
     # NEGOTIATION -- see engine._maybe_close_on_abandonment.
     last_activity_at: datetime
+
+    # Force Swap durability: the pair most recently Force-Swapped, still
+    # locked against a direct (Move-only, negotiated) reverse -- see
+    # ProtectedPair's own docstring, engine._is_protected_reversal, and
+    # engine._use_boost_force_swap. None whenever no Force Swap has
+    # happened yet, or the lock has since cleared (see engine._execute_swap).
+    protected_pair: ProtectedPair | None = None
 
     # Chosen and locked at START_GAME, hidden until haircut_profile_revealed_at
     # (or until the game is SCORED, whichever comes first -- see project()) --

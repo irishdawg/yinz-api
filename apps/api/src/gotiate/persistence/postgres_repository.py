@@ -74,6 +74,7 @@ from gotiate.domain.entities import (
     PoolVisibility,
     Proposal,
     ProposalResolutionReason,
+    ProtectedPair,
     ResolutionStatus,
     SwapIntent,
 )
@@ -327,7 +328,8 @@ class PostgresGameRepository:
                         close_threshold = %s, closed_at = %s, close_reason = %s, scored_at = %s,
                         haircut_profile = %s, haircut_profile_revealed_at = %s,
                         realized_haircut_depth = %s, cancellation_reason = %s,
-                        active_proposal_id = %s, boosts_expired = %s, last_activity_at = %s
+                        active_proposal_id = %s, boosts_expired = %s, last_activity_at = %s,
+                        protected_pair = %s
                     where id = %s
                     """,
                     (
@@ -349,6 +351,7 @@ class PostgresGameRepository:
                         game.active_proposal_id,
                         game.boosts_expired,
                         game.last_activity_at,
+                        Json(game.protected_pair.model_dump(mode="json")) if game.protected_pair else None,
                         game.id,
                     ),
                 )
@@ -726,6 +729,7 @@ def _to_game(
         active_proposal_id=str(game_row["active_proposal_id"]) if game_row["active_proposal_id"] else None,
         boosts_expired=game_row["boosts_expired"],
         last_activity_at=game_row["last_activity_at"],
+        protected_pair=ProtectedPair.model_validate(game_row["protected_pair"]) if game_row["protected_pair"] else None,
     )
 
 
