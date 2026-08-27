@@ -91,7 +91,8 @@
       "theme_key": "fc_014",
       "display_name": "Gusset, Gusset & Grant",
       "ticker_symbol": "GUS",
-      "is_locked": false
+      "is_locked": false,
+      "logo_url": "https://vomnvmnsdhvwtqkjtoal.supabase.co/storage/v1/object/public/gotiate_assets/icons/gusset.png"
     },
     {
       "theme_key": "fc_015",
