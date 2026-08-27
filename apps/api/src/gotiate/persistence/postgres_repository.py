@@ -295,6 +295,15 @@ class PostgresGameRepository:
                         """,
                         (pool.pool_id, game.id, pool.swap.entity_a, pool.swap.entity_b, pool.swap.rising_entity_id),
                     )
+                    for passed_player_id in pool.passed_player_ids:
+                        await cur.execute(
+                            """
+                            insert into pool_passes (pool_id, game_id, game_player_id)
+                            values (%s, %s, %s)
+                            on conflict (pool_id, game_player_id) do nothing
+                            """,
+                            (pool.pool_id, game.id, passed_player_id),
+                        )
                 for holding in game.holdings.values():
                     await cur.execute(
                         """
@@ -504,6 +513,11 @@ class PostgresGameRepository:
             await cur.execute("select * from pools where game_id = %s", (game_id,))
             pool_rows = await cur.fetchall()
 
+            await cur.execute("select * from pool_passes where game_id = %s", (game_id,))
+            passed_player_ids_by_pool: dict[str, set[str]] = {}
+            for r in await cur.fetchall():
+                passed_player_ids_by_pool.setdefault(str(r["pool_id"]), set()).add(str(r["game_player_id"]))
+
             await cur.execute("select * from pool_contents where game_id = %s", (game_id,))
             pool_content_rows = {str(r["pool_id"]): r for r in await cur.fetchall()}
 
@@ -522,6 +536,7 @@ class PostgresGameRepository:
             passed_player_ids_by_proposal,
             arbitration_state_by_proposal,
             pool_rows,
+            passed_player_ids_by_pool,
             pool_content_rows,
             holding_rows,
         )
@@ -614,6 +629,7 @@ def _to_game(
     passed_player_ids_by_proposal: dict[str, set[str]],
     arbitration_state_by_proposal: dict[str, Any],
     pool_rows: list[DictRow],
+    passed_player_ids_by_pool: dict[str, set[str]],
     pool_content_rows: dict[str, DictRow],
     holding_rows: list[DictRow],
 ) -> Game:
@@ -688,6 +704,7 @@ def _to_game(
             resolved_at_seq_no=por["resolved_at_seq_no"],
             resolved_by_player_id=str(por["resolved_by_player_id"]) if por["resolved_by_player_id"] else None,
             resolution_reason=PoolResolutionReason(por["resolution_reason"]) if por["resolution_reason"] else None,
+            passed_player_ids=passed_player_ids_by_pool.get(poid, set()),
         )
 
     holdings: dict[str, Holding] = {}

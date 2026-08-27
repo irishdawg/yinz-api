@@ -78,6 +78,10 @@ class PoolResolutionReason(StrEnum):
     WITHDRAWN_BY_INITIATOR = "withdrawn_by_initiator"
     INVALIDATED_BY_INITIATOR_ACTION = "invalidated_by_initiator_action"
     DECLINED_BY_TARGET = "declined_by_target"
+    # Every player who could still accept this Pool passed it. For a
+    # private Pool that eligible set contains only the base proposer, so
+    # their first Pass resolves it immediately.
+    EXPIRED_ALL_PASSED = "expired_all_passed"
     PREEMPTED_BY_OTHER_ACTION = "preempted_by_other_action"
     # NOTE (cadence/economy redesign): BASE_PROPOSAL_WITHDRAWN is gone --
     # a base proposal can no longer be withdrawn, so a Pool attached to it
@@ -478,6 +482,9 @@ class Pool(BaseModel):
     resolved_at_seq_no: int | None = None
     resolved_by_player_id: str | None = None
     resolution_reason: PoolResolutionReason | None = None
+    # Add-only and public, scoped to this Pool. Passing a Pool does not
+    # pass the base proposal or any sibling Pool.
+    passed_player_ids: set[str] = Field(default_factory=set)
 
 
 # --------------------------------------------------------------------------

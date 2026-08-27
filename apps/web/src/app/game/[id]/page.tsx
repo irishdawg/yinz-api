@@ -547,12 +547,9 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
 
   const getFlipStyle = useMarketReorderFlip(displayedMarket.map((e) => e.entity_id));
 
-  // "Visualize" on an open proposal briefly emphasizes the two cards it
-  // names, so a player doesn't have to mentally parse proposer + entity
-  // names and hunt for the matching tiles. Purely a client-side highlight
-  // -- no command involved -- so a plain timeout-cleared ref is enough,
-  // clearing any earlier pending clear first so a second click doesn't get
-  // its highlight cut short by the first click's timer.
+  // The one open base proposal is always visualized. A Pool hover/tap (or
+  // the brief resolved-deal treatment below) temporarily overrides that
+  // default; clearing the override naturally reveals the base again.
   const marketScrollRef = useRef<HTMLDivElement>(null);
   // entity_id -> which pair it belongs to -- "base" gets the light-blue
   // fill, "pool" gets light violet (see visualizeFillClass). Direction
@@ -562,13 +559,22 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // border treatment. Pool Visualize highlights both pairs at once.
   const [highlighted, setHighlighted] = useState<Map<string, { role: "base" | "pool" }> | null>(null);
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const defaultProposalHighlight = useMemo(() => {
+    const proposal = view.proposals.find((p) => p.proposal_id === view.active_proposal_id && p.status === "open");
+    if (!proposal) return null;
+    return new Map<string, { role: "base" }>([
+      [proposal.entity_a, { role: "base" }],
+      [proposal.entity_b, { role: "base" }],
+    ]);
+  }, [view.active_proposal_id, view.proposals]);
+  const effectiveHighlight = highlighted ?? defaultProposalHighlight;
 
   /** Accepts one pair (bare proposal) or two (a proposal + its pool) --
    * the first is always "base", the second (if present) always "pool".
    * Marks both entities of each pair identically; there's no
    * per-card direction distinction anymore, see the `highlighted` state
    * comment above. */
-  function visualizeProposal(pairs: [string, string][]) {
+  function visualizeProposal(pairs: [string, string][], autoClear = true) {
     const next = new Map<string, { role: "base" | "pool" }>();
     pairs.forEach(([a, b], pairIndex) => {
       const role = pairIndex === 0 ? "base" : "pool";
@@ -577,11 +583,10 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     });
     setHighlighted(next);
     if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
-    // 3s ceiling for a tap (no "leave" gesture to clear it early) or an
-    // auto-triggered visualize (a just-resolved deal, nobody necessarily
-    // hovering anything) -- a real mouse hover clears it immediately on
-    // mouseleave instead, see clearVisualizeHighlight below.
-    highlightTimeoutRef.current = setTimeout(() => setHighlighted(null), 3000);
+    // Taps and auto-triggered resolved deals have no mouseleave gesture,
+    // so they return to the open base proposal after 3s. A Pool hover stays
+    // visualized until its own mouseleave clears it.
+    if (autoClear) highlightTimeoutRef.current = setTimeout(() => setHighlighted(null), 3000);
 
     const container = marketScrollRef.current;
     if (!container) return;
@@ -594,13 +599,8 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
     container.scrollTo({ left: (minLeft + maxRight) / 2 - container.clientWidth / 2, behavior: "smooth" });
   }
 
-  // Real playtest feedback: Visualize was "too sticky" -- moving off a
-  // proposal row (not onto another one) still left the highlight sitting
-  // for the rest of its 3s ceiling. Only wired to onMouseLeave (a real
-  // mouse hover), never called for a tap/auto-trigger -- touch has no
-  // "leave" gesture to fire this from, and an auto-triggered visualize
-  // (a deal that just resolved) isn't tied to hovering anything to begin
-  // with, so both correctly keep running out their own 3s ceiling instead.
+  // Pool mouseleave clears only the temporary override; while a base
+  // proposal remains open, effectiveHighlight immediately falls back to it.
   function clearVisualizeHighlight() {
     if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
     setHighlighted(null);
@@ -678,11 +678,11 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             visualizeProposal(pairs);
           }
         } else if (pool.resolution_reason === "withdrawn_by_initiator") {
-          // Never masked for pools -- Pass doesn't apply to them, so this is
-          // always a genuine self-withdraw, no proposer-only disambiguation needed.
           addLingeringDeal(pool.pool_id, "withdrawn");
+        } else if (pool.resolution_reason === "expired_all_passed") {
+          addLingeringDeal(pool.pool_id, "expired_all_passed");
         }
-        // Every other pool reason (declined/preempted/invalidated/base
+        // Every other pool reason (legacy decline/preempted/invalidated/base
         // -proposal-withdrawn-or-voided) -- no lingering treatment, same as before.
       }
     }
@@ -770,7 +770,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
   // the base pair's own fill steps down a shade in that case, so the pool
   // (the thing actually being hovered) reads as the primary focus. See
   // visualizeFillClass.
-  const poolAlsoHighlighted = highlighted !== null && [...highlighted.values()].some((h) => h.role === "pool");
+  const poolAlsoHighlighted = effectiveHighlight !== null && [...effectiveHighlight.values()].some((h) => h.role === "pool");
 
   // Pool selection guardrail: while pooling against a base proposal, its
   // own two entities can never legally be part of the pool leg (the
@@ -1057,7 +1057,7 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
                   ? owned < 1 || owned >= view.concentrate_max_copies
                   : owned < 1 || entity.entity_id === concentrateDuplicateEntityId);
               const isDisabled = poolGuardrailEntities.has(entity.entity_id) || concentrateIneligible;
-              const highlight = highlighted?.get(entity.entity_id);
+              const highlight = effectiveHighlight?.get(entity.entity_id);
               const markers = supportMarkers.get(entity.entity_id);
               const notedPlayerIds = notes[entity.entity_id] ?? [];
               return (
@@ -1741,7 +1741,7 @@ function OpenProposals({
   gameId: string;
   view: GameView;
   onChanged: () => void;
-  onVisualize: (pairs: [string, string][]) => void;
+  onVisualize: (pairs: [string, string][], autoClear?: boolean) => void;
   onClearVisualize: () => void;
   onStartPool: (proposalId: string) => void;
   onDefinitiveProposalAction: () => void;
@@ -1851,27 +1851,10 @@ function OpenProposals({
             (view.you === p.proposer_id || view.you === activeResponderIds[0]);
           return (
             <li key={p.proposal_id} className="relative flex flex-col gap-1.5 border-b border-zinc-100 pb-2 text-zinc-900 last:border-0 last:pb-0">
-              {/* Visualize used to be a separate button players had to
-                  remember to press every time, then hovering/tapping the whole
-                  row -- but mouseenter only fires once per continuous hover
-                  session, so once a pool exists (a *nested* <li>, further
-                  down, with its own mouseenter), landing on it and then
-                  moving back onto this header never re-fired this row's own
-                  visualize -- there was no way back to "just the base
-                  proposal" without leaving the card and re-entering exactly
-                  on this line. Wiring the handlers to this header div
-                  specifically (a sibling of the pools list below, not its
-                  ancestor) instead of the outer <li> gives each its own
-                  independent hover boundary, so moving between them always
-                  re-triggers the one you're actually on. Not wired up at all
-                  once resolved -- nothing left to evaluate. */}
-              <div
-                onMouseEnter={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b]])}
-                onMouseLeave={lingering ? undefined : onClearVisualize}
-                onClick={lingering ? undefined : () => onVisualize([[p.entity_a, p.entity_b]])}
-                title={lingering ? undefined : "Hover or tap to visualize"}
-                className={`flex items-center justify-between gap-2 rounded ${lingering ? "" : "cursor-pointer hover:bg-zinc-50"}`}
-              >
+              {/* With only one table-wide negotiation, the open base
+                  proposal is already the persistent default visualization.
+                  Only its nested Pools need hover/tap interaction. */}
+              <div className="flex items-center justify-between gap-2 rounded">
                 <span>
                   {labelOrYou(p.proposer_id)}: {entityLabel(p.entity_a, view)} ↔ {entityLabel(p.entity_b, view)}
                   {/* Fully public now -- a Pass is a visible, intentional
@@ -1934,28 +1917,35 @@ function OpenProposals({
                 <ul className="ml-3 flex flex-col gap-1 border-l border-zinc-200 pl-3">
                   {pools.map((pool) => {
                     const isPoolMine = pool.initiator_id === view.you;
+                    const iPassedPool = view.you !== null && pool.passed_player_ids.includes(view.you);
+                    const canActOnPool = !isPoolMine && !iHavePassed && (pool.visibility === "public" || isMine);
                     const visible = Boolean(pool.entity_c && pool.entity_d);
                     const poolLingering = lingeringById.get(pool.pool_id);
                     const visualizePoolLeg =
                       visible && !poolLingering
-                        ? () =>
+                        ? (autoClear: boolean) =>
                             onVisualize([
                               [p.entity_a, p.entity_b],
                               [pool.entity_c!, pool.entity_d!],
-                            ])
+                            ], autoClear)
                         : undefined;
                     return (
                       <li
                         key={pool.pool_id}
-                        onMouseEnter={visualizePoolLeg}
+                        onMouseEnter={visualizePoolLeg ? () => visualizePoolLeg(false) : undefined}
                         onMouseLeave={visualizePoolLeg ? onClearVisualize : undefined}
-                        onClick={visualizePoolLeg}
+                        onClick={visualizePoolLeg ? () => visualizePoolLeg(true) : undefined}
                         title={visualizePoolLeg ? "Hover or tap to visualize" : undefined}
                         className={`relative flex items-center justify-between gap-2 text-xs text-zinc-700 ${visualizePoolLeg ? "cursor-pointer hover:bg-zinc-50" : ""}`}
                       >
                         <span>
                           {labelOrYou(pool.initiator_id)} pooled {pool.visibility}
                           {visible ? `: ${entityLabel(pool.entity_c!, view)} ↔ ${entityLabel(pool.entity_d!, view)}` : " (hidden)"}
+                          {pool.passed_player_ids.length > 0 && (
+                            <span className="ml-2 text-zinc-400">
+                              Passed: {pool.passed_player_ids.map((id) => labelOrYou(id)).join(", ")}
+                            </span>
+                          )}
                         </span>
                         {!poolLingering && (
                           // stopPropagation -- see the identical note on the
@@ -1983,17 +1973,17 @@ function OpenProposals({
                                 </button>
                               </>
                             )}
-                            {!isPoolMine && pool.visibility === "private" && isMine && !arbitrationActive && (
+                            {canActOnPool && !iPassedPool && !arbitrationActive && (
                               <button
                                 type="button"
-                                onClick={() => runCommand(pool.pool_id, "DECLINE_POOL", { pool_id: pool.pool_id }, "Couldn't decline that pool.")}
+                                onClick={() => runCommand(pool.pool_id, "PASS_POOL", { pool_id: pool.pool_id }, "Couldn't pass that pool.")}
                                 disabled={busyId === pool.pool_id}
                                 className="rounded border border-zinc-300 px-2 py-0.5 disabled:opacity-50"
                               >
-                                Decline
+                                {busyId === pool.pool_id ? "…" : "Pass"}
                               </button>
                             )}
-                            {!isPoolMine && !iHavePassed && (pool.visibility === "public" || isMine) && (
+                            {canActOnPool && !iPassedPool && (
                               <AcceptButton busy={busyId === pool.pool_id} onAccept={() => runCommand(pool.pool_id, "ACCEPT_POOL", { pool_id: pool.pool_id }, "Couldn't accept that pool.")} />
                             )}
                           </span>
@@ -2006,7 +1996,9 @@ function OpenProposals({
                             is different: it only ever resolves the pool itself, never
                             touching the base proposal, so a withdrawn pool needs its
                             own overlay -- there's no outer one to rely on. */}
-                        {poolLingering?.kind === "withdrawn" && <RowOverlay {...lingeringOverlayProps(poolLingering)} fading={poolLingering.fading} />}
+                        {(poolLingering?.kind === "withdrawn" || poolLingering?.kind === "expired_all_passed") && (
+                          <RowOverlay {...lingeringOverlayProps(poolLingering)} fading={poolLingering.fading} />
+                        )}
                       </li>
                     );
                   })}
@@ -2178,6 +2170,7 @@ function describeEvent(event: EventView, view: GameView): { text: string; tone: 
     }
     if (reason === "withdrawn_by_initiator") return { text: `${swap} — pool withdrawn`, tone: "muted" };
     if (reason === "declined_by_target") return { text: `${swap} — pool declined`, tone: "muted" };
+    if (reason === "expired_all_passed") return { text: `${swap} — everyone passed`, tone: "muted" };
     if (reason === "invalidated_by_initiator_action") return { text: `${swap} — pool abandoned by its own initiator`, tone: "muted" };
     if (reason === "preempted_by_other_action" && pool) return { text: `${swap} — ${describePreemption(pool, view)}`, tone: "warning" };
     if (reason === "market_closed") return { text: `${swap} — expired, market closed`, tone: "warning" };

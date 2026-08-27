@@ -317,8 +317,17 @@ at most one Pool can ever be eligible.
   (private or public pool) or, for a public pool only, any other
   non-passed, non-initiator player. **Legal even while Arbitration is
   active** — settling normally, same as `ACCEPT_PROPOSAL`.
-- **`DECLINE_POOL`**: private pools only, base-proposer-only. Resolves
-  `DECLINED_BY_TARGET`. Illegal while Arbitration is active.
+- **`PASS_POOL`**: public, permanent, and scoped only to that Pool. For a
+  private Pool, only the base proposer may Pass; because they are its sole
+  eligible accepter, that immediately resolves it `EXPIRED_ALL_PASSED`.
+  For a public Pool, every player currently eligible to accept it may Pass
+  independently; once all eligible accepters have passed, it resolves the
+  same way. A player who later `PASS_PROPOSAL`s stops counting as eligible
+  for every public Pool on that base. Pool-pass identities are projected
+  publicly as `passed_player_ids`, and a passer can still accept the base
+  proposal or a sibling Pool. The Pool initiator uses `WITHDRAW_POOL`
+  instead. Illegal while Arbitration is active. `DECLINE_POOL` remains a
+  compatibility alias with these same semantics for older clients.
 - **`WITHDRAW_POOL`**: the pool's own initiator only. Resolves
   `WITHDRAWN_BY_INITIATOR`. Illegal while Arbitration is active. A player
   holding an open Pool cannot `PASS_PROPOSAL` until they withdraw it first
@@ -707,7 +716,8 @@ optimistic-concurrency (`StaleVersionError` → HTTP 409) for every command
 | `CREATE_POOL` | `{proposal_id, entity_c, entity_d, visibility}` | See §5. May not directly reverse a Force-Swap-protected pair — see §7. |
 | `WITHDRAW_POOL` | `{pool_id}` | Pool initiator only. Illegal during Arbitration. |
 | `MAKE_POOL_PUBLIC` | `{pool_id}` | Pool initiator only, private→public. Illegal during Arbitration. |
-| `DECLINE_POOL` | `{pool_id}` | Base proposer only, private pools only. Illegal during Arbitration. |
+| `PASS_POOL` | `{pool_id}` | Eligible accepter, non-repeat, non-initiator. Private resolves on the base proposer's Pass; public resolves once all eligible accepters Pass. Illegal during Arbitration. |
+| `DECLINE_POOL` | `{pool_id}` | Compatibility alias for `PASS_POOL`. |
 | `ACCEPT_POOL` | `{pool_id}` | See §5. Legal during Arbitration. |
 | `CALL_ARBITRATION` | `{}` | Either of the final two active participants. See §8. |
 | `CAST_ARBITRATION_VOTE` | `{vote}` | Jury-only (already-passed players). See §8. |

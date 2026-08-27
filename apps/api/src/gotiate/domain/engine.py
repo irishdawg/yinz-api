@@ -833,6 +833,22 @@ def _all_others_passed(game: Game, proposal: Proposal) -> bool:
     return others <= proposal.passed_player_ids
 
 
+def _pool_eligible_accepter_ids(game: Game, pool: Pool, base: Proposal) -> set[str]:
+    """Players who can still accept this Pool under its current visibility.
+
+    A private Pool has exactly one target: the base proposer. A public
+    Pool is open to every seated player except its own initiator and anyone
+    who already left the base negotiation via PASS_PROPOSAL.
+    """
+    if pool.visibility is PoolVisibility.PRIVATE:
+        return {base.swap.initiator_player_id}
+    return {p.game_player_id for p in game.players} - {pool.swap.initiator_player_id} - base.passed_player_ids
+
+
+def _all_pool_accepters_passed(game: Game, pool: Pool, base: Proposal) -> bool:
+    return _pool_eligible_accepter_ids(game, pool, base) <= pool.passed_player_ids
+
+
 def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     proposal = _require_open_proposal(game, payload["proposal_id"])
@@ -859,6 +875,19 @@ def _handle_pass_proposal(game: Game, *, payload: dict, actor_game_player_id: st
     # longer omits a proposal from a player who has passed it).
     proposal.passed_player_ids.add(actor_game_player_id)
     events = [_emit(game, now, EventType.PROPOSAL_PASSED, actor=actor_game_player_id, payload={"proposal_id": proposal.proposal_id})]
+
+    # Passing the base also removes this player from every public Pool's
+    # accepter set. That can make an independently-tracked public Pool
+    # mathematically dead even though this player never passed that Pool
+    # directly.
+    for pool in game.pools.values():
+        if (
+            pool.base_proposal_id == proposal.proposal_id
+            and pool.status == ResolutionStatus.OPEN
+            and pool.visibility is PoolVisibility.PUBLIC
+            and _all_pool_accepters_passed(game, pool, proposal)
+        ):
+            events.append(_resolve_pool(game, pool, PoolResolutionReason.EXPIRED_ALL_PASSED, None, now))
 
     # By construction, no Pool can be open here: a passed player can never
     # hold one (blocked above) and can never create a new one (proposals
@@ -971,17 +1000,26 @@ def _handle_make_pool_public(game: Game, *, payload: dict, actor_game_player_id:
     return [_emit(game, now, EventType.POOL_MADE_PUBLIC, actor=actor_game_player_id, payload={"pool_id": pool.pool_id})]
 
 
-def _handle_decline_pool(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
+def _handle_pass_pool(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
     _require_negotiation(game)
     pool = _require_open_pool(game, payload["pool_id"])
-    if pool.visibility is not PoolVisibility.PRIVATE:
-        raise IllegalCommandError("only a private pool can be declined")
     base = _require_open_proposal(game, pool.base_proposal_id)
     _require_no_active_arbitration(base)
     _require_no_pending_boost_draw(game, actor_game_player_id)
-    if base.swap.initiator_player_id != actor_game_player_id:
-        raise IllegalCommandError("only the base proposer may decline a private pool")
-    return [_resolve_pool(game, pool, PoolResolutionReason.DECLINED_BY_TARGET, actor_game_player_id, now)]
+    if pool.swap.initiator_player_id == actor_game_player_id:
+        raise IllegalCommandError("cannot pass your own Pool; withdraw it instead")
+    if actor_game_player_id in base.passed_player_ids:
+        raise IllegalCommandError("you passed the base proposal and can no longer act on its Pools")
+    if pool.visibility is PoolVisibility.PRIVATE and base.swap.initiator_player_id != actor_game_player_id:
+        raise IllegalCommandError("only the base proposer may pass a private Pool")
+    if actor_game_player_id in pool.passed_player_ids:
+        raise IllegalCommandError("you already passed this Pool")
+
+    pool.passed_player_ids.add(actor_game_player_id)
+    events = [_emit(game, now, EventType.POOL_PASSED, actor=actor_game_player_id, payload={"pool_id": pool.pool_id})]
+    if _all_pool_accepters_passed(game, pool, base):
+        events.append(_resolve_pool(game, pool, PoolResolutionReason.EXPIRED_ALL_PASSED, actor_game_player_id, now))
+    return events
 
 
 def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str | None, now: datetime) -> list[GameEvent]:
@@ -996,6 +1034,8 @@ def _handle_accept_pool(game: Game, *, payload: dict, actor_game_player_id: str 
         raise IllegalCommandError("only the base proposer may accept a private pool")
     if actor_game_player_id in base.passed_player_ids:
         raise IllegalCommandError("you passed this proposal and can no longer accept a Pool on it")
+    if actor_game_player_id in pool.passed_player_ids:
+        raise IllegalCommandError("you passed this Pool and can no longer accept it")
 
     events: list[GameEvent] = []
     events += _execute_swap(game, base.swap, now, exclude_proposal_id=base.proposal_id, exclude_pool_id=pool.pool_id)
@@ -1352,7 +1392,10 @@ _HANDLERS: dict[str, Callable[..., list[GameEvent]]] = {
     "CREATE_POOL": _handle_create_pool,
     "WITHDRAW_POOL": _handle_withdraw_pool,
     "MAKE_POOL_PUBLIC": _handle_make_pool_public,
-    "DECLINE_POOL": _handle_decline_pool,
+    "PASS_POOL": _handle_pass_pool,
+    # Compatibility for older clients; the authoritative behavior is now
+    # Pool Pass, including public Pools and public pass tracking.
+    "DECLINE_POOL": _handle_pass_pool,
     "ACCEPT_POOL": _handle_accept_pool,
     "CALL_ARBITRATION": _handle_call_arbitration,
     "CAST_ARBITRATION_VOTE": _handle_cast_arbitration_vote,

@@ -280,6 +280,9 @@ EVENT_VISIBILITY: dict[EventType, EventVisibility] = {
     EventType.PRIVATE_POOL_CREATED: EventVisibility.POOL_INSIDERS,
     EventType.PUBLIC_POOL_CREATED: EventVisibility.PUBLIC,
     EventType.POOL_MADE_PUBLIC: EventVisibility.PUBLIC,
+    # Like base-proposal Pass, Pool Pass is an intentional, public
+    # narrowing of who is still considering this specific offer.
+    EventType.POOL_PASSED: EventVisibility.PUBLIC,
     # Checked against the real payload, not assumed: POOL_RESOLVED only ever
     # carries pool_id/reason, nothing to redact.
     EventType.POOL_RESOLVED: EventVisibility.PUBLIC,
@@ -506,6 +509,7 @@ def _project_pool(game: Game, pool: Pool, audience: Audience) -> dict:
         "initiator_id": pool.swap.initiator_player_id,
         "status": pool.status.value,
         "resolution_reason": pool.resolution_reason.value if pool.resolution_reason else None,
+        "passed_player_ids": sorted(pool.passed_player_ids),
     }
     if can_see_contents:
         out["entity_c"] = pool.swap.entity_a

@@ -16,6 +16,7 @@ interface ThemeSetSummary {
 // literal repeated in three places.
 const _ENTER_NAME_ERROR = "Enter your name first.";
 const _ENTER_NAME_JOIN_ERROR = "Enter your name above first.";
+const _DEFAULT_THEME_SET_ID = "fictional_companies_v1";
 
 export default function Home() {
   const router = useRouter();
@@ -93,7 +94,10 @@ export default function Home() {
           .then((response) => response.json())
           .then((data: ThemeSetSummary[]) => {
             setThemeSets(data);
-            if (data.length > 0) setThemeSetId(data[0].theme_set_id);
+            if (data.length > 0) {
+              const defaultTheme = data.find((theme) => theme.theme_set_id === _DEFAULT_THEME_SET_ID);
+              setThemeSetId(defaultTheme?.theme_set_id ?? data[0].theme_set_id);
+            }
           })
           .catch(() => {
             // Non-fatal -- create_game just falls back to the server's default theme set.

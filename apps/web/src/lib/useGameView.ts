@@ -85,11 +85,13 @@ export interface PoolView {
     | "withdrawn_by_initiator"
     | "invalidated_by_initiator_action"
     | "declined_by_target"
+    | "expired_all_passed"
     | "preempted_by_other_action"
     | "market_closed"
     | "voided_market_swung"
     | "base_proposal_voided"
     | null;
+  passed_player_ids: string[];
   // Present only when this audience can see the pool's contents (public
   // pool, or an insider) -- see projections._project_pool. Direction is
   // content, gated the same as entity_c/entity_d.
