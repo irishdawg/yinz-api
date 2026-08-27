@@ -162,8 +162,6 @@ class PostgresGameRepository:
         # enforces no such constraint and would never have caught this).
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                for player in game.players:
-                    await self._upsert_player(cur, game.id, player)
                 # KICK_PLAYER (host-only, LOBBY-only) is the one command
                 # that ever removes an entry from game.players outright
                 # (never a soft-delete/flag) -- whichever game_players rows
@@ -175,12 +173,26 @@ class PostgresGameRepository:
                 # game.players is never actually empty in practice (the
                 # host can't kick themselves), but this is cheap insurance
                 # against that exact footgun regardless.
+                #
+                # Must run BEFORE the upsert loop below, not after: seats
+                # compact on kick (everyone above the removed seat shifts
+                # down one), so a surviving player's new seat number can be
+                # exactly the departing player's old one. game_players has
+                # a unique (game_id, seat) constraint -- upserting the
+                # survivor into that seat while the kicked player's stale
+                # row still occupies it is a real UniqueViolation, not a
+                # hypothetical: caught live, kicking anyone other than the
+                # highest-seated player 500'd every time and rolled back
+                # the whole save() (transactional, so nothing persisted at
+                # all -- not a partial kick).
                 current_player_ids = [p.game_player_id for p in game.players]
                 if current_player_ids:
                     await cur.execute(
                         "delete from game_players where game_id = %s and id != all(%s)",
                         (game.id, current_player_ids),
                     )
+                for player in game.players:
+                    await self._upsert_player(cur, game.id, player)
                 for entity in game.market.values():
                     # theme_set_id/version live on game.config, not on
                     # MarketEntity itself — a denormalization footgun caught
