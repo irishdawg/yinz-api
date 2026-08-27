@@ -3,8 +3,10 @@ surface: hiding information from other players is the entire game."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from gotiate.domain import engine
-from gotiate.domain.entities import GamePhase
+from gotiate.domain.entities import CloseReason, GameConfig, GamePhase
 from gotiate.domain.projections import PlayerAudience, PublicAudience, project
 from tests.conftest import make_started_game, now
 
@@ -56,6 +58,71 @@ def test_ready_to_close_never_visible_to_others():
     view_p0 = project(game, PlayerAudience(p0))
     self_view = next(p for p in view_p0["players"] if p["game_player_id"] == p0)
     assert self_view["ready_to_close"] is True
+
+
+def test_ready_to_close_revealed_to_all_after_ready_threshold_close():
+    # The one post-hoc exception to the self-only rule: once the market
+    # closed *because* the ready threshold was reached, every player's
+    # ready_to_close is exposed table-wide so the results leaderboard can
+    # mark who voted. A non-voter (4-player threshold is 3) shows False,
+    # not omitted.
+    game = make_started_game(4)
+    voters = [p.game_player_id for p in game.players[:3]]
+    abstainer = game.players[3].game_player_id
+    for pid in voters:
+        engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=pid, expected_version=None, now=now())
+
+    assert game.phase == GamePhase.SCORED
+    assert game.close_reason is CloseReason.READY_THRESHOLD
+
+    for audience in (PlayerAudience(abstainer), PublicAudience()):
+        players = {p["game_player_id"]: p for p in project(game, audience)["players"]}
+        for pid in voters:
+            assert players[pid]["ready_to_close"] is True
+        assert players[abstainer]["ready_to_close"] is False
+
+
+def test_ready_to_close_stays_hidden_when_close_reason_is_not_ready_threshold():
+    game = make_started_game(4, config=GameConfig(negotiation_abandonment_seconds=5.0))
+    p0, p1 = game.players[0].game_player_id, game.players[1].game_player_id
+    engine.handle_command(game, command_type="SET_READY_TO_CLOSE", payload={"ready": True}, actor_game_player_id=p0, expected_version=None, now=now())
+
+    engine.apply_due_time_transitions(game, game.last_activity_at + timedelta(seconds=10))
+    assert game.close_reason is CloseReason.ABANDONED
+
+    other = next(p for p in project(game, PlayerAudience(p1))["players"] if p["game_player_id"] == p0)
+    assert "ready_to_close" not in other
+
+
+def test_haircut_reveal_in_moves_counts_down_then_nulls_once_revealed():
+    # The Move-driven successor to the old gameplay clock: total allocation
+    # is 2 * 3 = 6, so the profile reveals the instant cumulative consumed
+    # Moves reach 3 ((6 + 1) // 2). Only opening a bare negotiation costs a
+    # Move; passing is free.
+    game = make_started_game(2, config=GameConfig(starting_moves=3))
+    p0, p1 = [p.game_player_id for p in game.players]
+    e = list(game.market.keys())
+
+    def open_then_pass(proposer: str, passer: str, ea: str, eb: str) -> None:
+        events = engine.handle_command(
+            game, command_type="PROPOSE_SWAP", payload={"entity_a": ea, "entity_b": eb}, actor_game_player_id=proposer, expected_version=None, now=now()
+        )
+        pid = next(ev.payload["proposal_id"] for ev in events if ev.type.value == "PROPOSAL_CREATED")
+        engine.handle_command(game, command_type="PASS_PROPOSAL", payload={"proposal_id": pid}, actor_game_player_id=passer, expected_version=None, now=now())
+
+    assert project(game, PublicAudience())["haircut_reveal_in_moves"] == 3
+
+    open_then_pass(p0, p1, e[0], e[1])  # 1 consumed
+    assert project(game, PublicAudience())["haircut_reveal_in_moves"] == 2
+
+    open_then_pass(p1, p0, e[2], e[3])  # 2 consumed
+    assert project(game, PublicAudience())["haircut_reveal_in_moves"] == 1
+
+    open_then_pass(p0, p1, e[0], e[1])  # 3 consumed -- reveal fires mid-command
+    assert game.haircut_profile_revealed_at is not None
+    revealed = project(game, PublicAudience())
+    assert revealed["haircut_reveal_in_moves"] is None
+    assert revealed["haircut_profile"] is not None
 
 
 def test_close_reason_and_closed_at_null_before_close_public_once_closed():

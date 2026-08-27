@@ -555,6 +555,13 @@ position `p` (1-indexed) survives.
   initial Move allocation. A game that closes before crossing that
   threshold never sees the live event, but `project()` unconditionally
   reveals the profile once `phase == SCORED` regardless.
+- **Countdown**: `haircut_reveal_in_moves` in `project()` — how many more
+  Moves the table must burn before that trigger fires (`(total_initial +
+  1) // 2 - consumed`, floored at 0). The Move-driven stand-in for the
+  retired gameplay clock's visible timer; `null` once revealed, once
+  scored, or in `LOBBY`. Not a leak — per-player `moves_remaining` is
+  already public and `HAIRCUT_RISK_REVEALED` is a public event, so this
+  is only the same arithmetic centralized server-side.
 - **Generated fresh every game, not chosen from a list**
   (`engine._generate_random_haircut_profile`) — an earlier version picked
   one of 5 named curves per player count (Cliff / Deep burn / Brutal
@@ -609,14 +616,24 @@ position `p` (1-indexed) survives.
 ## 10. Ready-to-close & market close
 
 `SET_READY_TO_CLOSE` (payload `{ready: bool}`) toggles a player's own
-readiness — **strictly self-only, no aggregate anywhere**. No other player
-ever learns a count, a percentage, or even that someone toggled it; the
-only thing anyone else ever learns is the sudden fact of closure itself,
-once `close_threshold` (`close_threshold(n)`: `n` itself for `n <= 3`,
-`ceil(0.75n)` above that) is actually reached. `READY_TO_CLOSE_CHANGED` is
-`ACTOR_ONLY`. Toggling is bidirectional (on then off is legal) right up
-until the threshold triggers closure in the same transaction; a no-op
-toggle (already at that value) doesn't even bump the game version.
+readiness — **self-only for the entire live game, no aggregate anywhere**.
+No other player ever learns a count, a percentage, or even that someone
+toggled it; the only thing anyone else ever learns is the sudden fact of
+closure itself, once `close_threshold` (`close_threshold(n)`: `n` itself
+for `n <= 3`, `ceil(0.75n)` above that) is actually reached.
+`READY_TO_CLOSE_CHANGED` is `ACTOR_ONLY`. Toggling is bidirectional (on
+then off is legal) right up until the threshold triggers closure in the
+same transaction; a no-op toggle (already at that value) doesn't even bump
+the game version.
+
+**One post-close exception**: once the market has closed *because* the
+ready threshold was reached (`close_reason == READY_THRESHOLD`),
+`project()` exposes every player's final `ready_to_close` to all live
+audiences — the results leaderboard marks the voters "voted to close".
+Nothing is revealed before close, and no other `CloseReason` exposes it.
+Replay exposure is still governed solely by
+`GameConfig.ready_to_close_revealed_in_replay`. See
+`_project_player` and `test_ready_to_close_revealed_to_all_after_ready_threshold_close`.
 
 ---
 

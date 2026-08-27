@@ -28,6 +28,7 @@ from typing import Iterable
 
 from gotiate.domain import themes
 from gotiate.domain.entities import (
+    CloseReason,
     Game,
     GamePhase,
     GamePlayer,
@@ -115,6 +116,24 @@ def project(game: Game, audience: Audience) -> dict:
         # the reveal.
         "haircut_risk_band_depth": (
             round(len(game.market) * game.config.risk_depth_fraction) if game.haircut_profile is not None else None
+        ),
+        # How many more Moves the table must burn before the profile's
+        # contents reveal -- the Move-driven successor to the old gameplay
+        # clock (see engine._maybe_reveal_haircut, which fires the instant
+        # cumulative consumed Moves first reach 50% of the initial
+        # len(players) * starting_moves allocation). Integer, counts down
+        # to 0; null once revealed, once scored, or if there's no profile.
+        # Not a leaked secret: consumed Moves are already public per-player
+        # (moves_remaining) and the reveal event itself is PUBLIC -- this
+        # is just the same arithmetic done server-side so the threshold
+        # formula stays in one place.
+        "haircut_reveal_in_moves": (
+            max(0, (_moves_total_initial(game) + 1) // 2 - _moves_consumed(game))
+            if game.haircut_profile is not None
+            and game.haircut_profile_revealed_at is None
+            and not scored
+            and _moves_total_initial(game) > 0
+            else None
         ),
         # Only meaningful once phase is CANCELLED -- null otherwise.
         "cancellation_reason": game.cancellation_reason.value if game.cancellation_reason else None,
@@ -374,9 +393,20 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
     }
 
     # Ready-to-close: owner-only live, never the aggregate — see visibility §06.
+    # The one post-hoc exception: once the market has actually closed
+    # *because* the ready threshold was reached, who voted stops being a
+    # live secret — the results leaderboard marks those players "voted to
+    # close". Still nothing before close (a lone early voter stays hidden —
+    # test_ready_to_close_never_visible_to_others) and nothing for any
+    # other CloseReason.
     if is_self:
         out["ready_to_close"] = player.ready_to_close
-    elif is_replay and game.config.ready_to_close_revealed_in_replay:
+    elif is_replay:
+        # Replay exposure stays governed solely by its own config knob —
+        # the post-close reveal below is a live-view concern.
+        if game.config.ready_to_close_revealed_in_replay:
+            out["ready_to_close"] = player.ready_to_close
+    elif game.close_reason == CloseReason.READY_THRESHOLD:
         out["ready_to_close"] = player.ready_to_close
 
     if is_self or is_replay:
@@ -392,6 +422,16 @@ def _project_player(game: Game, player: GamePlayer, audience: Audience) -> dict:
 
 def _haircut_visible(game: Game) -> bool:
     return game.haircut_profile is not None and (game.haircut_profile_revealed_at is not None or game.phase == GamePhase.SCORED)
+
+
+def _moves_total_initial(game: Game) -> int:
+    """The table's whole starting Move allocation -- the denominator
+    engine._maybe_reveal_haircut measures consumed Moves against."""
+    return len(game.players) * game.config.starting_moves
+
+
+def _moves_consumed(game: Game) -> int:
+    return _moves_total_initial(game) - sum(p.moves_remaining for p in game.players)
 
 
 def _safe_value(game: Game, game_player_id: str) -> int:

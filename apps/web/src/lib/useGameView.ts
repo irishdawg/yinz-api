@@ -13,6 +13,9 @@ export interface GamePlayerView {
   // USE_BOOST, respectively; moves_remaining never refunds.
   moves_remaining: number;
   boosts_remaining: number;
+  // Self-only while the game is live. Also present for every player once
+  // the market closed via CloseReason READY_THRESHOLD -- the results
+  // leaderboard uses it to mark who voted to close.
   ready_to_close?: boolean;
   // Self-only -- see the Haircut-risk design writeup. projected_value is
   // the unconditional linear-rank sum (what you'd score if nothing were
@@ -115,10 +118,15 @@ export interface GameView {
   // Hidden until revealed (project() gates its contents on
   // haircut_profile_revealed_at server-side, but never exposes that
   // timestamp itself) or unconditionally once scored. The live reveal
-  // trigger is now Move-driven, not clock-driven -- there is no deadline
-  // to count down to; it fires at an unpredictable moment once cumulative
-  // Moves consumed first crosses 50% of the table's total allocation.
+  // trigger is now Move-driven, not clock-driven -- it fires once
+  // cumulative Moves consumed first crosses 50% of the table's total
+  // allocation. That crossing point is a fixed count, surfaced as
+  // haircut_reveal_in_moves below so the UI can show the countdown the
+  // old gameplay clock used to.
   haircut_profile: { depth_probabilities: number[] } | null;
+  // Moves the table must still burn before haircut_profile reveals.
+  // Counts down to 0; null once revealed, once scored, or in LOBBY.
+  haircut_reveal_in_moves: number | null;
   // Public from game start, unlike haircut_profile itself -- every
   // configured profile for this player count shares the same max_depth,
   // so "positions 1..N carry some risk" is structural, not profile
@@ -129,8 +137,9 @@ export interface GameView {
   cancellation_reason: "HOST_INITIATED" | "LOBBY_TIMEOUT" | null;
   // The *fact* of why/when the market closed, revealed only at the
   // instant it happens -- not a leading indicator. ready_to_close itself
-  // (below, per-player) stays strictly self-only with no aggregate
-  // anywhere -- a secret trigger, not a public countdown.
+  // (above, per-player) stays strictly self-only *while the game is live*
+  // -- a secret trigger, not a public countdown -- and is only revealed
+  // table-wide afterwards if this is "READY_THRESHOLD".
   close_reason: "READY_THRESHOLD" | "MOVES_EXHAUSTED" | "ABANDONED" | null;
   closed_at: string | null;
   // Public and unconditional -- at most one bare negotiation open

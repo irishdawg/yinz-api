@@ -987,8 +987,14 @@ function MarketView({ gameId, view, onChanged }: { gameId: string; view: GameVie
             </div>
           </div>
           <div>
-            <div className="text-xs font-medium text-zinc-500">{view.haircut_profile ? "Safe" : "Risk"}</div>
-            <div className="tabular-nums text-zinc-900">{view.haircut_profile ? (self.safe_value ?? "—") : "Hidden"}</div>
+            <div className="text-xs font-medium text-zinc-500">{view.haircut_profile ? "Safe" : "Risk reveal"}</div>
+            <div className="tabular-nums text-zinc-900">
+              {view.haircut_profile
+                ? (self.safe_value ?? "—")
+                : view.haircut_reveal_in_moves !== null
+                  ? `${view.haircut_reveal_in_moves} move${view.haircut_reveal_in_moves === 1 ? "" : "s"}`
+                  : "Hidden"}
+            </div>
           </div>
           <MovesBoostsSummary player={self} boostsExpired={view.boosts_expired} />
           <ReadyToCloseToggle gameId={gameId} view={view} onChanged={onChanged} />
@@ -2271,6 +2277,13 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
   const holdings = view.holdings ?? [];
   const sortedResults = [...results].sort((a, b) => b.final_value - a.final_value);
   const topValue = sortedResults[0]?.final_value;
+  // Only populated when the game ended because enough players voted to
+  // close -- project() withholds ready_to_close for every other outcome
+  // (and for everyone but yourself while the game is live).
+  const votedToClose =
+    view.close_reason === "READY_THRESHOLD"
+      ? new Set(view.players.filter((p) => p.ready_to_close).map((p) => p.game_player_id))
+      : new Set<string>();
   const closeReasonText =
     view.close_reason === "MOVES_EXHAUSTED"
       ? "Everyone's Moves are spent."
@@ -2368,6 +2381,11 @@ function ResultsView({ gameId, view }: { gameId: string; view: GameView }) {
                     {isWinner ? "🏆 " : ""}
                     {playerLabel(r.game_player_id, view)}
                     {r.game_player_id === view.you ? " - You" : ""}
+                    {votedToClose.has(r.game_player_id) && (
+                      <span className="ml-2 rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-normal text-zinc-500">
+                        voted to close
+                      </span>
+                    )}
                   </span>
                   <span className="tabular-nums text-zinc-700">{r.final_value}</span>
                 </button>
