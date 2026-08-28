@@ -1068,22 +1068,22 @@ def _handle_call_arbitration(game: Game, *, payload: dict, actor_game_player_id:
     if actor_game_player_id not in final_two:
         raise IllegalCommandError("only the two active participants may call arbitration")
 
+    # Arbitration exists to resolve a contest between the base deal and a
+    # concrete counter-offer. A bare proposal -- including every proposal
+    # in a two-player game before its responder creates a Pool -- has
+    # nothing to arbitrate.
+    eligible_pool_id = _eligible_arbitration_pool_id(game, proposal)
+    if eligible_pool_id is None:
+        raise IllegalCommandError("arbitration requires an open Pool from the remaining responder")
+
     caller_role = "originator" if actor_game_player_id == proposal.swap.initiator_player_id else "other"
     base_weights = dict(game.config.arbitration_base_weights[caller_role])
 
     events: list[GameEvent] = []
-    eligible_pool_id = _eligible_arbitration_pool_id(game, proposal)
-    if eligible_pool_id is None:
-        # Nothing to renormalize yet -- the draw itself renormalizes
-        # whatever's left. Just drop the illegal candidate outright.
-        base_weights.pop("pool", None)
-    else:
-        pool = game.pools[eligible_pool_id]
-        if pool.visibility is PoolVisibility.PRIVATE:
-            pool.visibility = PoolVisibility.PUBLIC
-            events.append(
-                _emit(game, now, EventType.ARBITRATION_POOL_REVEALED, actor=actor_game_player_id, payload={"pool_id": eligible_pool_id})
-            )
+    pool = game.pools[eligible_pool_id]
+    if pool.visibility is PoolVisibility.PRIVATE:
+        pool.visibility = PoolVisibility.PUBLIC
+        events.append(_emit(game, now, EventType.ARBITRATION_POOL_REVEALED, actor=actor_game_player_id, payload={"pool_id": eligible_pool_id}))
 
     proposal.pending_arbitration = PendingArbitration(
         arbitration_id=new_id(),

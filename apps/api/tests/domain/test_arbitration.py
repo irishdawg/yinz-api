@@ -65,7 +65,19 @@ def _accept_pool(game, pool_id, actor):
     )
 
 
-def _call(game, actor, at=None):
+def _call(game, actor, at=None, *, ensure_pool=True):
+    # Arbitration now always compares a base proposal with the final
+    # responder's concrete Pool. Most tests exercise behavior after the
+    # call rather than Pool setup itself, so supply that required public
+    # Pool here when the test has narrowed correctly and did not create
+    # one explicitly.
+    if ensure_pool and game.active_proposal_id is not None:
+        proposal = game.proposals[game.active_proposal_id]
+        active_responders = engine._active_responder_ids(game, proposal)
+        open_pools = [pool for pool in game.pools.values() if pool.base_proposal_id == proposal.proposal_id and pool.status is ResolutionStatus.OPEN]
+        if len(active_responders) == 1 and not open_pools:
+            candidates = [entity_id for entity_id in game.market if entity_id not in {proposal.swap.entity_a, proposal.swap.entity_b}]
+            _pool(game, next(iter(active_responders)), proposal.proposal_id, candidates[0], candidates[1], visibility="public")
     return engine.handle_command(
         game, command_type="CALL_ARBITRATION", payload={}, actor_game_player_id=actor, expected_version=None, now=at or later()
     )
@@ -332,17 +344,14 @@ def test_voting_twice_is_rejected():
         _vote(game, mortia, "neither")
 
 
-def test_voting_pool_rejected_when_no_pool_is_eligible():
+def test_call_arbitration_rejected_when_no_pool_is_eligible():
     game = make_started_game(3)
     tedy, mortia, hanky = [p.game_player_id for p in game.players]
     e = list(game.market.keys())
     proposal_id = _propose(game, tedy, e[0], e[1])
     _narrow_to_final_two(game, proposal_id, tedy, (mortia, hanky), keep=hanky)
-    _call(game, hanky)  # no pool ever created
-    assert game.proposals[proposal_id].pending_arbitration.eligible_pool_id is None
-
-    with pytest.raises(IllegalCommandError):
-        _vote(game, mortia, "pool")
+    with pytest.raises(IllegalCommandError, match="requires an open Pool"):
+        _call(game, hanky, ensure_pool=False)
 
 
 def test_votes_invisible_live_to_every_audience_including_active_pair():
@@ -437,16 +446,13 @@ def test_other_caller_gets_the_other_weight_table():
     assert pending.base_weights == {"base": 40, "pool": 30, "neither": 40}
 
 
-def test_no_eligible_pool_drops_it_from_the_candidate_set():
+def test_two_player_bare_proposal_cannot_instantly_arbitrate():
     game = make_started_game(2)
     tedy, mortia = [p.game_player_id for p in game.players]
     e = list(game.market.keys())
     proposal_id = _propose(game, tedy, e[0], e[1])
-    _call(game, tedy)
-    pending = game.proposals[proposal_id].pending_arbitration
-    assert "pool" not in pending.base_weights
-    assert pending.eligible_pool_id is None
-    assert set(pending.base_weights.keys()) == {"base", "neither"}
+    with pytest.raises(IllegalCommandError, match="requires an open Pool"):
+        _call(game, tedy, ensure_pool=False)
 
 
 def test_final_weights_math_one_vote_for_base():

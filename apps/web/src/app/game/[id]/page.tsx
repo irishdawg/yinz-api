@@ -1819,9 +1819,16 @@ function OpenProposals({
           const activeResponderIds = view.players
             .filter((pl) => pl.game_player_id !== p.proposer_id && !p.passed_player_ids.includes(pl.game_player_id))
             .map((pl) => pl.game_player_id);
+          const hasEligibleArbitrationPool =
+            activeResponderIds.length === 1 &&
+            view.pools.some(
+              (pool) =>
+                pool.base_proposal_id === p.proposal_id && pool.initiator_id === activeResponderIds[0] && pool.status === "open",
+            );
           const canCallArbitration =
             !arbitrationActive &&
             activeResponderIds.length === 1 &&
+            hasEligibleArbitrationPool &&
             view.you !== null &&
             (view.you === p.proposer_id || view.you === activeResponderIds[0]);
           return (

@@ -470,8 +470,11 @@ undone for the price of a mere Move. The lock is narrow by design:
 
 Once a negotiation's active participant set (§5) narrows to exactly one
 remaining responder — the opener plus that one player, "the final two" —
-either of them may `CALL_ARBITRATION` (payload `{}`). Irreversible: there
-is no un-call, and once called, nothing may add a new Pool, remove the
+**and that responder has an open Pool on the base proposal**, either of
+them may `CALL_ARBITRATION` (payload `{}`). No Pool means there is no
+competing offer to arbitrate, so a bare proposal can never enter
+Arbitration (including immediately in a two-player game). Irreversible:
+there is no un-call, and once called, nothing may add a new Pool, remove the
 eligible one, or narrow the participant set further until it resolves.
 Settling normally (`ACCEPT_PROPOSAL` or `ACCEPT_POOL`) remains fully legal
 throughout the window — the intended way out if the pair actually agrees
@@ -488,10 +491,9 @@ Calling Arbitration:
 - Locks in caller-role-dependent starting weights
   (`GameConfig.arbitration_base_weights`, default `{originator: {base: 30,
   pool: 40, neither: 40}, other: {base: 40, pool: 30, neither: 40}}`) —
-  deliberately weights, not percentages, they don't need to sum to 100. If
-  no Pool is eligible, `"pool"` is dropped from the candidate set entirely
-  (never assigned a weight of zero, never transferred elsewhere) rather
-  than offered as an illegal choice.
+  deliberately weights, not percentages, they don't need to sum to 100.
+  All three candidates (`base`, `pool`, `neither`) are always present,
+  because the open-Pool precondition guarantees a concrete Pool outcome.
 - No Boosts are legal for anyone for the duration of the window (§7).
 
 **The secret jury**: every player who has already passed this negotiation
@@ -719,7 +721,7 @@ optimistic-concurrency (`StaleVersionError` → HTTP 409) for every command
 | `PASS_POOL` | `{pool_id}` | Eligible accepter, non-repeat, non-initiator. Private resolves on the base proposer's Pass; public resolves once all eligible accepters Pass. Illegal during Arbitration. |
 | `DECLINE_POOL` | `{pool_id}` | Compatibility alias for `PASS_POOL`. |
 | `ACCEPT_POOL` | `{pool_id}` | See §5. Legal during Arbitration. |
-| `CALL_ARBITRATION` | `{}` | Either of the final two active participants. See §8. |
+| `CALL_ARBITRATION` | `{}` | Either of the final two active participants, while the remaining responder has an open Pool. See §8. |
 | `CAST_ARBITRATION_VOTE` | `{vote}` | Jury-only (already-passed players). See §8. |
 | `USE_BOOST` | `{boost_type, ...}` | `boost_type`: `concentrate` \| `draw` \| `force_swap`. See §7. |
 | `RESOLVE_BOOST_DRAW` | `{pending_boost_draw_id, holding_id_to_discard}` | **Version-exempt.** See §7. |

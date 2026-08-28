@@ -97,6 +97,14 @@ def test_abandonment_preempts_a_pending_arbitration():
         game, command_type="PASS_PROPOSAL", payload={"proposal_id": proposal_id}, actor_game_player_id=mortia, expected_version=None, now=game.last_activity_at
     )
     engine.handle_command(
+        game,
+        command_type="CREATE_POOL",
+        payload={"proposal_id": proposal_id, "entity_c": e[2], "entity_d": e[3], "visibility": "public"},
+        actor_game_player_id=hanky,
+        expected_version=None,
+        now=game.last_activity_at,
+    )
+    engine.handle_command(
         game, command_type="CALL_ARBITRATION", payload={}, actor_game_player_id=hanky, expected_version=None, now=game.last_activity_at
     )
     assert game.proposals[proposal_id].pending_arbitration is not None
